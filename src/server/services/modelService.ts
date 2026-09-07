@@ -1389,6 +1389,29 @@ async function refreshModelsForAllActiveAccounts(): Promise<ModelRefreshResult[]
   return results;
 }
 
+export async function loadDisabledModelsBySite(): Promise<Map<number, Set<string>>> {
+  const disabledModelRows = await db.select().from(schema.siteDisabledModels).all();
+  const disabledModelsBySite = new Map<number, Set<string>>();
+  for (const row of disabledModelRows) {
+    const modelName = (row.modelName || '').trim().toLowerCase();
+    if (!modelName) continue;
+    if (!disabledModelsBySite.has(row.siteId)) disabledModelsBySite.set(row.siteId, new Set());
+    disabledModelsBySite.get(row.siteId)!.add(modelName);
+  }
+  return disabledModelsBySite;
+}
+
+export function isModelDisabledForSite(
+  disabledModelsBySite: Map<number, Set<string>>,
+  siteId: number,
+  modelName: string,
+): boolean {
+  const normalized = (modelName || '').trim().toLowerCase();
+  if (!normalized) return false;
+  const disabled = disabledModelsBySite.get(siteId);
+  return !!disabled && disabled.has(normalized);
+}
+
 export async function rebuildTokenRoutesFromAvailability(
   options: RebuildTokenRoutesOptions = {},
 ) {
@@ -1424,17 +1447,7 @@ export async function rebuildTokenRoutesFromAvailability(
     .all();
 
   // Load site-level disabled models
-  const disabledModelRows = await db.select().from(schema.siteDisabledModels).all();
-  const disabledModelsBySite = new Map<number, Set<string>>();
-  for (const row of disabledModelRows) {
-    if (!disabledModelsBySite.has(row.siteId)) disabledModelsBySite.set(row.siteId, new Set());
-    disabledModelsBySite.get(row.siteId)!.add(row.modelName.toLowerCase());
-  }
-
-  function isModelDisabledForSite(siteId: number, modelName: string): boolean {
-    const disabled = disabledModelsBySite.get(siteId);
-    return !!disabled && disabled.has(modelName.toLowerCase());
-  }
+  const disabledModelsBySite = await loadDisabledModelsBySite();
 
   // Load global brand filter
   const blockedBrandRules = getBlockedBrandRules(config.globalBlockedBrands);
@@ -1496,7 +1509,7 @@ export async function rebuildTokenRoutesFromAvailability(
     const modelName = (modelNameRaw || '').trim();
     if (!modelName) return;
     if (!isModelAllowedByWhitelist(modelName)) return;
-    if (isModelDisabledForSite(siteId, modelName)) return;
+    if (isModelDisabledForSite(disabledModelsBySite, siteId, modelName)) return;
     if (blockedBrandRules.length > 0 && isModelBlockedByBrand(modelName, blockedBrandRules)) return;
     if (!modelCandidates.has(modelName)) modelCandidates.set(modelName, new Map());
     const candidate = { accountId, tokenId, oauthRouteUnitId };

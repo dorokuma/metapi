@@ -11,6 +11,8 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
     let db: DbModule['db'];
     let schema: DbModule['schema'];
     let rebuildTokenRoutesFromAvailability: ModelServiceModule['rebuildTokenRoutesFromAvailability'];
+    let loadDisabledModelsBySite: ModelServiceModule['loadDisabledModelsBySite'];
+    let isModelDisabledForSite: ModelServiceModule['isModelDisabledForSite'];
     let dataDir = '';
 
     beforeAll(async () => {
@@ -24,6 +26,8 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
         db = dbModule.db;
         schema = dbModule.schema;
         rebuildTokenRoutesFromAvailability = modelService.rebuildTokenRoutesFromAvailability;
+        loadDisabledModelsBySite = modelService.loadDisabledModelsBySite;
+        isModelDisabledForSite = modelService.isModelDisabledForSite;
     });
 
     beforeEach(async () => {
@@ -265,5 +269,52 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
         expect(patternChannels).toHaveLength(1);
         expect(patternChannels[0]?.accountId).toBe(allowedAccount.id);
         expect(patternChannels[0]?.tokenId).toBe(allowedToken.id);
+    });
+
+    it('loadDisabledModelsBySite groups by site, normalizes whitespace and casing, and skips empty entries', async () => {
+        const siteA = await db.insert(schema.sites).values({
+            name: 'site-a',
+            url: 'https://site-a.example.com',
+            platform: 'new-api',
+        }).returning().get();
+
+        const siteB = await db.insert(schema.sites).values({
+            name: 'site-b',
+            url: 'https://site-b.example.com',
+            platform: 'new-api',
+        }).returning().get();
+
+        await db.insert(schema.siteDisabledModels).values([
+            { siteId: siteA.id, modelName: ' x ' },
+            { siteId: siteA.id, modelName: 'Y' },
+            { siteId: siteA.id, modelName: '   ' },
+            { siteId: siteB.id, modelName: 'GPT-4O' },
+            { siteId: siteB.id, modelName: ' claude-3-5-sonnet ' },
+        ]).run();
+
+        const map = await loadDisabledModelsBySite();
+
+        expect(map.size).toBe(2);
+
+        const siteADisabled = map.get(siteA.id);
+        expect(siteADisabled).toBeDefined();
+        expect(siteADisabled!.size).toBe(2);
+        expect(siteADisabled!.has('x')).toBe(true);
+        expect(siteADisabled!.has('y')).toBe(true);
+        expect(siteADisabled!.has('')).toBe(false);
+
+        const siteBDisabled = map.get(siteB.id);
+        expect(siteBDisabled).toBeDefined();
+        expect(siteBDisabled!.size).toBe(2);
+        expect(siteBDisabled!.has('gpt-4o')).toBe(true);
+        expect(siteBDisabled!.has('claude-3-5-sonnet')).toBe(true);
+
+        expect(isModelDisabledForSite(map, siteA.id, '  X  ')).toBe(true);
+        expect(isModelDisabledForSite(map, siteA.id, 'y')).toBe(true);
+        expect(isModelDisabledForSite(map, siteA.id, 'other-model')).toBe(false);
+        expect(isModelDisabledForSite(map, siteA.id, '')).toBe(false);
+        expect(isModelDisabledForSite(map, siteB.id, 'gpt-4o')).toBe(true);
+        expect(isModelDisabledForSite(map, siteB.id, 'Claude-3-5-Sonnet')).toBe(true);
+        expect(isModelDisabledForSite(map, 99999, 'x')).toBe(false);
     });
 });

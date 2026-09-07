@@ -559,9 +559,9 @@ describe('/api/models/token-candidates', () => {
     ]).run();
 
     await db.insert(schema.siteDisabledModels).values([
-      { siteId: site.id, modelName: 'model-a' },
-      { siteId: site.id, modelName: 'model-b' },
-      { siteId: site.id, modelName: 'model-c' },
+      { siteId: site.id, modelName: ' model-a ' },
+      { siteId: site.id, modelName: 'Model-B' },
+      { siteId: site.id, modelName: ' Model-C ' },
     ]).run();
 
     fetchModelPricingCatalogMock.mockResolvedValue({

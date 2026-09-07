@@ -1,8 +1,12 @@
-﻿import { FastifyInstance } from "fastify";
+import { FastifyInstance } from "fastify";
 import { db, schema } from "../../db/index.js";
 import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import { config } from "../../config.js";
-import { refreshModelsForAccount } from "../../services/modelService.js";
+import {
+  isModelDisabledForSite,
+  loadDisabledModelsBySite,
+  refreshModelsForAccount,
+} from "../../services/modelService.js";
 import * as routeRefreshWorkflow from "../../services/routeRefreshWorkflow.js";
 import { buildModelAnalysis } from "../../services/modelAnalysisService.js";
 import {
@@ -1469,25 +1473,7 @@ export async function statsRoutes(app: FastifyInstance) {
       };
 
       // Load site-level disabled models
-      const disabledModelRows = await db
-        .select()
-        .from(schema.siteDisabledModels)
-        .all();
-      const disabledModelsBySite = new Map<number, Set<string>>();
-      for (const row of disabledModelRows) {
-        if (!disabledModelsBySite.has(row.siteId)) {
-          disabledModelsBySite.set(row.siteId, new Set());
-        }
-        disabledModelsBySite.get(row.siteId)!.add(row.modelName.toLowerCase());
-      }
-
-      function isModelDisabledForSite(
-        siteId: number,
-        modelName: string,
-      ): boolean {
-        const disabled = disabledModelsBySite.get(siteId);
-        return !!disabled && disabled.has(modelName.toLowerCase());
-      }
+      const disabledModelsBySite = await loadDisabledModelsBySite();
 
       // Load global allowed models whitelist
       const globalAllowedModels = new Set(
@@ -1592,7 +1578,7 @@ export async function statsRoutes(app: FastifyInstance) {
       for (const row of rows) {
         const modelName = (row.token_model_availability.modelName || "").trim();
         if (!modelName) continue;
-        if (isModelDisabledForSite(row.sites.id, modelName)) continue;
+        if (isModelDisabledForSite(disabledModelsBySite, row.sites.id, modelName)) continue;
         const accountModelKey = `${row.accounts.id}::${modelName.toLowerCase()}`;
         coveredAccountModelSet.add(accountModelKey);
 
@@ -1642,7 +1628,7 @@ export async function statsRoutes(app: FastifyInstance) {
         if (!requiresManagedAccountTokens(row)) continue;
         const modelName = (row.modelName || "").trim();
         if (!modelName) continue;
-        if (isModelDisabledForSite(row.siteId, modelName)) continue;
+        if (isModelDisabledForSite(disabledModelsBySite, row.siteId, modelName)) continue;
         const coverageKey = `${row.accountId}::${modelName.toLowerCase()}`;
         if (coveredAccountModelSet.has(coverageKey)) continue;
         if (!modelsWithoutToken[modelName]) modelsWithoutToken[modelName] = [];
@@ -1666,6 +1652,7 @@ export async function statsRoutes(app: FastifyInstance) {
             (row) =>
               requiresManagedAccountTokens(row) &&
               !isModelDisabledForSite(
+                disabledModelsBySite,
                 row.siteId,
                 (row.modelName || "").trim(),
               ),
@@ -1748,7 +1735,7 @@ export async function statsRoutes(app: FastifyInstance) {
         if (!requiresManagedAccountTokens(row)) continue;
         const modelName = (row.modelName || "").trim();
         if (!modelName) continue;
-        if (isModelDisabledForSite(row.siteId, modelName)) continue;
+        if (isModelDisabledForSite(disabledModelsBySite, row.siteId, modelName)) continue;
         const accountModelKey = `${row.accountId}::${modelName.toLowerCase()}`;
 
         const requiredGroups =

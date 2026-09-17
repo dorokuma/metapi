@@ -64,6 +64,16 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
 
 ---
 
+## Development conventions
+
+Detailed development and contribution guidelines are maintained across:
+
+- [AGENTS.md](AGENTS.md): Architectural principles, core iron rules, and engineering constraints for AI agents and developers.
+- [CONTRIBUTING.md](CONTRIBUTING.md): Local environment setup, development commands, and pull request guidelines for contributors.
+- [.agents/notes/README.md](.agents/notes/README.md): Rules and trigger conditions for architectural decisions, troubleshooting notes, and trade-offs.
+
+---
+
 ## 🌐 Live Demo
 
 > Try Metapi without deploying — full-featured demo instance:

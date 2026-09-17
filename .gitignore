@@ -26,3 +26,6 @@ docker/.env
 docs/plan/
 docs/plans/
 .ace-tool/
+
+# Agent note index
+.agents/notes/INDEX.md

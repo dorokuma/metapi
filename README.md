@@ -51,6 +51,16 @@
 
 ---
 
+## 开发规范 / Development conventions
+
+详细的开发与贡献规范分布在以下文档中：
+
+- [AGENTS.md](AGENTS.md)：面向 AI Agent 与开发者的架构原则、核心铁律与工程约束。
+- [CONTRIBUTING.md](CONTRIBUTING.md)：面向贡献者的本地环境配置、开发命令与提交规范。
+- [.agents/notes/README.md](.agents/notes/README.md)：架构决策、踩坑记录与技术权衡笔记的记录规则。
+
+---
+
 ## 🌐 在线体验
 
 > 无需部署，直接体验 Metapi 的完整功能：

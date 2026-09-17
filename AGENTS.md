@@ -4,6 +4,24 @@ These rules apply to the whole repository unless a deeper `AGENTS.md` overrides
 them. They are intentionally opinionated and mechanical so humans and agents can
 make small, consistent changes without re-learning the codebase each time.
 
+## Core Rules / 核心铁律
+
+- **构建与测试**：全量构建执行 `npm run build`（包含 Web/Server/Desktop 构建）；测试执行 `npm test`（Vitest 单元与集成测试）。
+- **静态与契约检查**：类型检查执行 `npm run typecheck`；架构与仓库漂移检查执行 `npm run repo:drift-check`；数据库契约与兼容性检查执行 `npm run test:schema:unit` / `npm run test:schema:parity` / `npm run test:schema:upgrade`。
+- **提交规范**：提交规范——commit message 须过全局 commit-msg hook：Conventional Commits 类型白名单、≤72 字、冒号后一空格、禁噪声词与密钥。
+- **决策与踩坑记录**：决策/踩坑须记 .agents/notes/（满足触发规则任一条即写，参考模板并按规范归档）。
+
+## Index & Documentation / 索引与现状文档
+
+- 项目文档：[docs/](docs/)（VitePress 文档目录）及 [CONTRIBUTING.md](CONTRIBUTING.md)（贡献与本地开发指南）
+- 架构与规则文档：[AGENTS.md](AGENTS.md)
+- 决策与踩坑笔记：[.agents/notes/](.agents/notes/)（说明详见 [.agents/notes/README.md](.agents/notes/README.md)）
+- 写完笔记刷新索引：scripts/notes-index.sh（本地生成 INDEX.md，不入 git）
+
+## Related Repositories / 关联仓库
+
+- **prism**：同属 LLM 网关方向，独立演进。
+
 ## Golden Principles
 
 - Prefer one source of truth. If a helper, contract, or workflow already owns

@@ -166,22 +166,23 @@ metapi/
 Use conventional commit format / 使用约定式提交格式:
 
 ```
-<type>: <description>
+<type>: <subject>
+<type>(<scope>): <subject>
 
 [optional body]
 ```
 
-Types / 类型:
-- `feat`: New feature / 新功能
-- `fix`: Bug fix / 错误修复
-- `docs`: Documentation / 文档
-- `refactor`: Code refactoring / 代码重构
-- `test`: Tests / 测试
-- `chore`: Build/tooling / 构建/工具
+Rules / 规则:
+- **Types / 类型**: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert` (lowercase / 小写)
+- **Scope**: Optional (`[a-z0-9._-]+`) / 可选
+- **Subject / 主题**: Non-empty, ≤ 72 characters, mixed Chinese and English permitted / 非空，≤ 72 字符，允许中英文混合
+- **Exemptions / 豁免**: Merge, revert, `fixup!`, `squash!` commits / Merge、revert、`fixup!` 及 `squash!` 提交免检
+- **Hook**: Enforced locally by `commit-msg` hook with secret scanning and noise-word blocking / 本地 `commit-msg` hook 自动校验并拦截密钥泄露与过程噪声词
 
 Examples / 示例:
 ```
 feat: add AnyRouter platform adapter
+feat(router): add AnyRouter platform adapter
 fix: handle empty model list in dashboard
 docs: update Docker deployment guide
 refactor: extract route selection logic

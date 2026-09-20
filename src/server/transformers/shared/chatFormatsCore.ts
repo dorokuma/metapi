@@ -6,6 +6,7 @@ import {
   consumeThinkTaggedText,
   createThinkTagParserState,
   extractInlineThinkTags,
+  flushThinkTaggedText,
   type ThinkTagParserState,
 } from './thinkTagParser.js';
 
@@ -150,14 +151,17 @@ function textFromPart(part: unknown): string {
   return '';
 }
 
-function extractTextAndReasoning(value: unknown): { content: string; reasoning: string } {
-  if (typeof value === 'string') return extractInlineThinkTags(value);
+function extractTextAndReasoning(
+  value: unknown,
+  options?: { reasoningChannelActive?: boolean },
+): { content: string; reasoning: string } {
+  if (typeof value === 'string') return extractInlineThinkTags(value, options);
   if (Array.isArray(value)) {
     const contentParts: string[] = [];
     const reasoningParts: string[] = [];
     for (const item of value) {
       if (typeof item === 'string') {
-        const parsedString = extractInlineThinkTags(item);
+        const parsedString = extractInlineThinkTags(item, options);
         if (parsedString.content) contentParts.push(parsedString.content);
         if (parsedString.reasoning) reasoningParts.push(parsedString.reasoning);
         continue;
@@ -170,6 +174,12 @@ function extractTextAndReasoning(value: unknown): { content: string; reasoning: 
         continue;
       }
       if (type === 'thinking_delta' && typeof item.text === 'string') {
+        reasoningParts.push(item.text);
+        continue;
+      }
+      // Responses-API reasoning blocks (stepfun /v1/responses style): the full
+      // thinking text lives in `content: [{ type: 'reasoning_text', text }]`.
+      if (type === 'reasoning_text' && typeof item.text === 'string') {
         reasoningParts.push(item.text);
         continue;
       }
@@ -208,11 +218,26 @@ function extractTextAndReasoning(value: unknown): { content: string; reasoning: 
   };
 }
 
+function extractRawStreamingTextAndDirectReasoning(value: unknown): { content: string; reasoning: string } {
+  if (typeof value === 'string') {
+    return { content: value, reasoning: '' };
+  }
+  if (isRecord(value)) {
+    const content = typeof value.content === 'string' ? value.content
+      : (typeof value.text === 'string' ? value.text : '');
+    const reasoning =
+      (typeof value.reasoning_content === 'string' ? value.reasoning_content : '')
+      || (typeof value.reasoning === 'string' ? value.reasoning : '');
+    return { content, reasoning };
+  }
+  return { content: '', reasoning: '' };
+}
+
 function extractStreamingTextAndReasoning(
   value: unknown,
   thinkTagParser: ThinkTagParserState,
 ): { content: string; reasoning: string } {
-  const parsed = extractTextAndReasoning(value);
+  const parsed = extractRawStreamingTextAndDirectReasoning(value);
   if (!parsed.content) {
     return parsed;
   }
@@ -314,8 +339,18 @@ function serializeSse(event: string, data: unknown): string {
 }
 
 function extractAssistantContent(choice: any): string {
-  const messageContent = choice?.message?.content;
-  const parsedMessage = extractTextAndReasoning(messageContent).content;
+  const message = choice?.message || {};
+  const messageContent = message.content;
+  // If the choice carries thinking through a direct reasoning field, a think-
+  // tagged copy inside the content is an aggregator echo: drop it instead of
+  // passing it through as literal text.
+  const echoActive = [
+    message.reasoning_content,
+    message.reasoning,
+    choice?.reasoning_content,
+    choice?.reasoning,
+  ].some((item) => typeof item === 'string' && item.length > 0);
+  const parsedMessage = extractTextAndReasoning(messageContent, { reasoningChannelActive: echoActive }).content;
   if (parsedMessage) return parsedMessage;
 
   const content = extractTextAndReasoning(choice?.content).content;
@@ -458,6 +493,9 @@ function parseResponsesOutputText(payload: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const item of output) {
     if (!isRecord(item)) continue;
+    // Reasoning items carry the model's thinking (reasoning_text / summary blocks).
+    // They are collected by parseResponsesReasoning and must never reach content.
+    if (asTrimmedString(item.type).toLowerCase() === 'reasoning') continue;
     const parsed = extractTextAndReasoning(item.content ?? item);
     if (parsed.content) parts.push(parsed.content);
   }
@@ -1482,6 +1520,33 @@ export function normalizeUpstreamFinalResponse(
   };
 }
 
+/**
+ * Detect upstream reasoning echoes in delta.content. Some OpenAI-compatible
+ * aggregators duplicate the reasoning text into both delta.content and
+ * delta.reasoning_content (sometimes with extra whitespace or decoration
+ * around it). Strip the echoed reasoning so it never reaches the visible
+ * content channel; anything left over after removing the echo is preserved.
+ */
+function stripReasoningEchoFromContent(content: string, reasoning: string): string {
+  if (!content || !reasoning) return content;
+
+  if (content === reasoning) return '';
+
+  const trimmedContent = content.trim();
+  const trimmedReasoning = reasoning.trim();
+  if (!trimmedReasoning) return content;
+  if (trimmedContent === trimmedReasoning) return '';
+
+  if (trimmedContent.includes(trimmedReasoning)) {
+    return trimmedContent.replace(trimmedReasoning, '').trim();
+  }
+  if (trimmedReasoning.includes(trimmedContent)) {
+    return '';
+  }
+
+  return content;
+}
+
 export function normalizeUpstreamStreamEvent(
   payload: unknown,
   context: StreamTransformContext,
@@ -1496,6 +1561,13 @@ export function normalizeUpstreamStreamEvent(
 
     const choice = payload.choices[0] ?? {};
     const delta = isRecord(choice?.delta) ? choice.delta : {};
+    // Mark the direct reasoning channel as active BEFORE parsing content, so
+    // a think-tag opening after real content is recognised as an aggregator
+    // echo of the reasoning (and discarded) rather than literal text.
+    if ((typeof (delta as any).reasoning_content === 'string' && (delta as any).reasoning_content.length > 0)
+      || (typeof (delta as any).reasoning === 'string' && (delta as any).reasoning.length > 0)) {
+      context.thinkTagParser.reasoningChannelActive = true;
+    }
     const deltaParsed = extractStreamingTextAndReasoning(delta.content ?? delta, context.thinkTagParser);
     const messageParsed = extractStreamingTextAndReasoning(choice?.message?.content ?? '', context.thinkTagParser);
 
@@ -1514,13 +1586,23 @@ export function normalizeUpstreamStreamEvent(
       ? (delta as any).reasoning_signature
       : undefined;
 
+    const finishReason = normalizeStopReason(choice?.finish_reason);
+
+    // When the stream terminates, flush any pending think-tag fragment held by the
+    // stateful parser so trailing partial tags (or an unclosed reasoning section)
+    // are emitted into the correct channel instead of being dropped or leaking
+    // into a later response.
+    const flushed = finishReason
+      ? flushThinkTaggedText(context.thinkTagParser)
+      : { content: '', reasoning: '' };
+
     // Some upstream providers (e.g. certain OpenAI-compatible aggregators) emit thinking
-    // tokens with the same text duplicated in both delta.content and delta.reasoning_content.
-    // When the two values are identical it means content is just echoing the reasoning —
-    // suppress it so internal thinking is never leaked to downstream consumers.
-    const contentDelta = (reasoningDelta && rawContentDelta === reasoningDelta)
-      ? ''
-      : rawContentDelta;
+    // tokens duplicated in both delta.content and delta.reasoning_content. When the
+    // content is just echoing the reasoning (exact match, whitespace-only differences,
+    // or the reasoning embedded inside decoration text), suppress the echoed part so
+    // internal thinking is never leaked to downstream consumers.
+    const contentDelta = stripReasoningEchoFromContent(rawContentDelta, reasoningDelta) + flushed.content;
+    const reasoningDeltaWithFlush = reasoningDelta + flushed.reasoning;
 
     const rawToolCalls = Array.isArray((delta as any).tool_calls)
       ? ((delta as any).tool_calls as unknown[])
@@ -1557,10 +1639,10 @@ export function normalizeUpstreamStreamEvent(
     return {
       role: (delta as any).role === 'assistant' ? 'assistant' : undefined,
       contentDelta: contentDelta || undefined,
-      reasoningDelta: reasoningDelta || undefined,
+      reasoningDelta: reasoningDeltaWithFlush || undefined,
       reasoningSignature,
       toolCallDeltas: toolCallDeltas.length > 0 ? toolCallDeltas : undefined,
-      finishReason: normalizeStopReason(choice?.finish_reason),
+      finishReason,
     };
   }
 
@@ -1585,6 +1667,7 @@ export function normalizeUpstreamStreamEvent(
   }
 
   if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_summary_text.done') {
+    context.thinkTagParser.reasoningChannelActive = true;
     const outputIndex = extractResponsesOutputIndex(payload);
     const deltaText = type === 'response.reasoning_summary_text.done'
       ? (typeof (payload as any).text === 'string' ? (payload as any).text : extractTextAndReasoning(payload.text).content)
@@ -1592,6 +1675,27 @@ export function normalizeUpstreamStreamEvent(
     const previousReasoning = context.responsesReasoningByIndex[outputIndex] || '';
     const novelDelta = computeNovelResponsesDelta(previousReasoning, deltaText);
     const nextReasoning = type === 'response.reasoning_summary_text.done'
+      ? (deltaText || previousReasoning)
+      : `${previousReasoning}${novelDelta}`;
+    if (nextReasoning) {
+      context.responsesReasoningByIndex[outputIndex] = nextReasoning;
+    }
+    return {
+      reasoningDelta: novelDelta || undefined,
+    };
+  }
+
+  if (type === 'response.reasoning_text.delta' || type === 'response.reasoning_text.done') {
+    // Non-summary reasoning events (e.g. stepfun) carry the thinking text in
+    // `delta` / `text`; treat them exactly like the summary variants above.
+    context.thinkTagParser.reasoningChannelActive = true;
+    const outputIndex = extractResponsesOutputIndex(payload);
+    const deltaText = type === 'response.reasoning_text.done'
+      ? (typeof (payload as any).text === 'string' ? (payload as any).text : extractTextAndReasoning(payload.text).content)
+      : (typeof payload.delta === 'string' ? payload.delta : extractTextAndReasoning(payload.delta).content);
+    const previousReasoning = context.responsesReasoningByIndex[outputIndex] || '';
+    const novelDelta = computeNovelResponsesDelta(previousReasoning, deltaText);
+    const nextReasoning = type === 'response.reasoning_text.done'
       ? (deltaText || previousReasoning)
       : `${previousReasoning}${novelDelta}`;
     if (nextReasoning) {
@@ -1637,15 +1741,19 @@ export function normalizeUpstreamStreamEvent(
   if ((type === 'response.output_item.added' || type === 'response.output_item.done') && isRecord((payload as any).item)) {
     const outputIndex = extractResponsesOutputIndex(payload as Record<string, unknown>);
     const item = (payload as any).item as Record<string, unknown>;
-    if (item.type === 'reasoning' && isNonEmptyString(item.encrypted_content)) {
+    if (item.type === 'reasoning') {
+      // Reasoning items carry thinking text (reasoning_text blocks) regardless of
+      // whether an encrypted signature is present. Emitting them here keeps the
+      // text out of the visible-content channel.
+      context.thinkTagParser.reasoningChannelActive = true;
       const reasoningText = extractResponsesItemText(item);
       const novelReasoning = computeNovelResponsesDelta(context.responsesReasoningByIndex[outputIndex] || '', reasoningText);
       if (reasoningText) {
         context.responsesReasoningByIndex[outputIndex] = reasoningText;
       }
       return {
-        reasoningSignature: item.encrypted_content,
         reasoningDelta: novelReasoning || undefined,
+        ...(isNonEmptyString(item.encrypted_content) ? { reasoningSignature: item.encrypted_content } : {}),
       };
     }
     const toolCallEvent = buildResponsesToolCallDeltaFromItem(item, outputIndex, context);
@@ -1860,6 +1968,9 @@ export function normalizeUpstreamStreamEvent(
     }
 
     const parsed = extractStreamingTextAndReasoning(payload.content_block, context.thinkTagParser);
+    if ((payload.content_block as any)?.type === 'thinking') {
+      context.thinkTagParser.reasoningChannelActive = true;
+    }
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
@@ -1889,6 +2000,7 @@ export function normalizeUpstreamStreamEvent(
     }
 
     if (deltaType === 'thinking_delta') {
+      context.thinkTagParser.reasoningChannelActive = true;
       return {
         reasoningDelta: parsed.content || parsed.reasoning || undefined,
       };

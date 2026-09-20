@@ -637,4 +637,211 @@ describe('shared normalized helpers', () => {
     expect(normalizeStopReason('completed')).toBe('stop');
     expect(normalizeStopReason('mystery')).toBeNull();
   });
+
+  describe('streaming inline think tags (glm/stepfun style upstreams)', () => {
+    const chunk = (
+      context: ReturnType<typeof createStreamTransformContext>,
+      delta: Record<string, unknown>,
+      extra: Record<string, unknown> = {},
+    ) => normalizeUpstreamStreamEvent({
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta, ...extra }],
+    }, context, 'fallback-model');
+    const tidy = (event: Record<string, unknown>) => Object.fromEntries(
+      Object.entries(event).filter(([, value]) => value !== undefined && value !== null),
+    );
+    const tidyChunk = (
+      context: ReturnType<typeof createStreamTransformContext>,
+      delta: Record<string, unknown>,
+      extra: Record<string, unknown> = {},
+    ) => tidy(chunk(context, delta, extra) as Record<string, unknown>);
+    const tidyEvent = (payload: Record<string, unknown>, context: ReturnType<typeof createStreamTransformContext>) =>
+      tidy(normalizeUpstreamStreamEvent(payload, context, 'fallback-model') as Record<string, unknown>);
+
+    it('routes an opening tag that is its own delta into reasoning', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: '<think>' })).toEqual({});
+      expect(tidyChunk(context, { content: '真思考' })).toEqual({ reasoningDelta: '真思考' });
+      expect(tidyChunk(context, { content: '</think>' })).toEqual({});
+      expect(tidyChunk(context, { content: '正文回答' })).toEqual({ contentDelta: '正文回答' });
+    });
+
+    it('routes a tag split across deltas into reasoning', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: '<thinkin' })).toEqual({});
+      expect(tidyChunk(context, { content: 'g>真思考' })).toEqual({ reasoningDelta: '真思考' });
+      expect(tidyChunk(context, { content: '</think' })).toEqual({});
+      expect(tidyChunk(context, { content: 'ing>正文' })).toEqual({ contentDelta: '正文' });
+    });
+
+    it('parses a tag glued to the thinking text in one delta', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: '<think>真思考</think>正文' })).toEqual({
+        reasoningDelta: '真思考',
+        contentDelta: '正文',
+      });
+    });
+
+    it('flushes an unclosed reasoning section as reasoning on finish', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      tidyChunk(context, { content: '<think>真思' });
+      tidyChunk(context, { content: '考剩余' });
+      expect(tidyChunk(context, { content: '' }, { finish_reason: 'stop' })).toEqual({
+        finishReason: 'stop',
+      });
+    });
+
+    it('flushes a partial pending tag as content on finish', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: '正文开' })).toEqual({ contentDelta: '正文开' });
+      expect(tidyChunk(context, { content: '<thi' })).toEqual({});
+      expect(tidyChunk(context, { content: '' }, { finish_reason: 'stop' })).toEqual({
+        contentDelta: '<thi',
+        finishReason: 'stop',
+      });
+    });
+
+    it('strips an echoed reasoning when reasoning_content duplicates content', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, {
+        content: '逐步推理文本',
+        reasoning_content: '逐步推理文本',
+      })).toEqual({
+        reasoningDelta: '逐步推理文本',
+      });
+    });
+
+    it('keeps genuinely different content when reasoning_content is present', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, {
+        content: '这是正文',
+        reasoning_content: '思考内容',
+      })).toEqual({
+        contentDelta: '这是正文',
+        reasoningDelta: '思考内容',
+      });
+    });
+
+    it('discards a tagged reasoning echo after content when the direct reasoning channel is active', () => {
+      const context = createStreamTransformContext('step-5-preview');
+
+      expect(tidyChunk(context, { reasoning_content: '直接思考第一段' })).toEqual({
+        reasoningDelta: '直接思考第一段',
+      });
+      expect(tidyChunk(context, { content: '回复开头：<think>回显的思考' })).toEqual({
+        contentDelta: '回复开头：',
+      });
+      expect(tidyChunk(context, { content: '</think>真正的回答' })).toEqual({
+        contentDelta: '真正的回答',
+      });
+    });
+
+    it('keeps a literal tag in content when real content was already emitted', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: '前面正文，提到 ' })).toEqual({ contentDelta: '前面正文，提到 ' });
+      expect(tidyChunk(context, { content: '<think> 这个标签本身' })).toEqual({ contentDelta: '<think> 这个标签本身' });
+      expect(tidyChunk(context, { content: '结尾' })).toEqual({ contentDelta: '结尾' });
+    });
+
+    it('still parses an opening tag after whitespace-only content', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: ' <think>真思考' })).toEqual({ reasoningDelta: '真思考' });
+      expect(tidyChunk(context, { content: '</think>正文' })).toEqual({ contentDelta: '正文' });
+    });
+
+    it('routes response.reasoning_text.delta events into reasoning', () => {
+      const context = createStreamTransformContext('step-3.7-flash');
+
+      expect(tidyEvent({
+        type: 'response.reasoning_text.delta',
+        item_id: 'rs_1',
+        output_index: 0,
+        content_index: 0,
+        delta: '思考增量',
+      }, context)).toEqual({ reasoningDelta: '思考增量' });
+
+      expect(tidyEvent({
+        type: 'response.reasoning_text.done',
+        item_id: 'rs_1',
+        output_index: 0,
+        content_index: 0,
+        text: '思考增量完毕',
+      }, context)).toEqual({ reasoningDelta: '完毕' });
+    });
+
+    it('keeps reasoning items out of content on response.completed', () => {
+      const context = createStreamTransformContext('step-3.7-flash');
+
+      expect(tidyEvent({
+        type: 'response.completed',
+        response: {
+          id: 'resp_1',
+          status: 'completed',
+          output: [
+            { type: 'reasoning', content: [{ type: 'reasoning_text', text: '完整思考' }] },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '最终答案' }] },
+          ],
+        },
+      }, context)).toEqual({
+        role: 'assistant',
+        reasoningDelta: '完整思考',
+        contentDelta: '最终答案',
+        finishReason: 'stop',
+        done: true,
+      });
+    });
+
+    it('strips the <thinking> variant in streaming deltas', () => {
+      const context = createStreamTransformContext('glm-5.3');
+
+      expect(tidyChunk(context, { content: '<thinking>整段思考内容' })).toEqual({ reasoningDelta: '整段思考内容' });
+      expect(tidyChunk(context, { content: '</thinking>正文回答' })).toEqual({ contentDelta: '正文回答' });
+    });
+
+    it('strips the <thinking> variant in non-streaming final responses', () => {
+      expect(normalizeUpstreamFinalResponse({
+        object: 'chat.completion',
+        model: 'glm-5.3-flash',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '<thinking>内部推演</thinking>最终答案',
+          },
+          finish_reason: 'stop',
+        }],
+      }, 'glm-5.3-flash')).toMatchObject({
+        content: '最终答案',
+        reasoningContent: '内部推演',
+      });
+    });
+
+    it('drops the tagged echo in non-streaming responses when reasoning_content is present', () => {
+      expect(normalizeUpstreamFinalResponse({
+        object: 'chat.completion',
+        model: 'step-5-preview',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '回复开头：<think>回显思考</think>最终答案',
+            reasoning_content: '直接思考',
+          },
+          finish_reason: 'stop',
+        }],
+      }, 'step-5-preview')).toMatchObject({
+        content: '回复开头：最终答案',
+        reasoningContent: '直接思考',
+      });
+    });
+  });
 });

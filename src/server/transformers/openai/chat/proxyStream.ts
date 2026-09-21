@@ -20,6 +20,7 @@ type ChatProxyStreamSessionInput = {
   modelName: string;
   successfulUpstreamPath: string;
   onParsedPayload?: (payload: unknown) => void;
+  onEventParsed?: (payload: unknown) => void;
   writeLines: (lines: string[]) => void;
   writeRaw: (chunk: string) => void;
 };
@@ -263,6 +264,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     }
 
     if (parsedPayload && typeof parsedPayload === 'object') {
+      input.onEventParsed?.(parsedPayload);
       const payloadType = typeof (parsedPayload as Record<string, unknown>).type === 'string'
         ? String((parsedPayload as Record<string, unknown>).type)
         : '';

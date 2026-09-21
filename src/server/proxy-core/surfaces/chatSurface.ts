@@ -799,6 +799,26 @@ export async function handleChatSurfaceRequest(
               parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
             }
           },
+          onEventParsed: (payload) => {
+            if (!payload || typeof payload !== 'object') return;
+            const record = payload as Record<string, unknown>;
+            if (record.type && typeof record.type === 'string' && record.type !== 'http.response.start') return;
+            const choice = record.choices && Array.isArray(record.choices) && isRecord(record.choices[0]) ? record.choices[0] : (isRecord(record) ? record : null);
+            if (!choice) return;
+            const finishReason = asTrimmedString(choice.finish_reason);
+            const hasToolCalls = !!(record.tool_calls || (Array.isArray(record.choices) && record.choices.some((c: any) => c.tool_calls)));
+            const hasContent = !!(record.content != null || (Array.isArray(record.choices) && record.choices.some((c: any) => c.content != null)));
+            try {
+              request.log.info({
+                surface: 'chat/upstream-stream-event',
+                requestId: request.id,
+                upstream_model: modelName,
+                raw_finish_reason: finishReason || null,
+                has_tool_calls: hasToolCalls,
+                has_content: hasContent,
+              }, 'chat surface upstream stream event diagnostic');
+            } catch {}
+          },
           writeLines,
           writeRaw: (chunk) => {
             startSseResponse();
@@ -1139,6 +1159,24 @@ export async function handleChatSurfaceRequest(
           }
         }
       }
+      const upstreamRecord = isRecord(upstreamData) ? upstreamData : null;
+      const upstreamFinishReason = upstreamRecord
+        ? asTrimmedString(
+            (upstreamRecord.choices && Array.isArray(upstreamRecord.choices)
+              ? upstreamRecord.choices[0]
+              : upstreamRecord).finish_reason,
+          )
+        : null;
+      try {
+        request.log.info({
+          surface: 'chat/upstream-final',
+          requestId: request.id,
+          upstream_model: modelName,
+          raw_finish_reason: upstreamFinishReason || null,
+          has_tool_calls: !!(upstreamRecord && (upstreamRecord.tool_calls || (Array.isArray((upstreamRecord as any)?.choices) && (upstreamRecord as any).choices.some((c: any) => c.tool_calls)))),
+          has_content: !!(upstreamRecord && (upstreamRecord.content != null || (Array.isArray((upstreamRecord as any)?.choices) && (upstreamRecord as any).choices.some((c: any) => c.content != null)))),
+        }, 'chat surface upstream final payload diagnostic');
+      } catch {}
       if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
         upstreamData = unwrapGeminiCliPayload(upstreamData);
       }

@@ -7,7 +7,11 @@ vi.mock('./modelPricingService.js', () => ({
 }));
 
 import { resolveUpstreamEndpointCandidates } from './upstreamEndpointDerivation.js';
-import { resetUpstreamEndpointRuntimeState } from './upstreamEndpointRuntimeMemory.js';
+import {
+  recordUpstreamEndpointFailure,
+  recordUpstreamEndpointSuccess,
+  resetUpstreamEndpointRuntimeState,
+} from './upstreamEndpointRuntimeMemory.js';
 
 const baseContext = {
   site: {
@@ -140,25 +144,125 @@ describe('upstreamEndpointDerivation', () => {
     expect(order).toEqual(['messages']);
   });
 
-  it('returns no candidates for claude count_tokens when the upstream does not support messages', async () => {
+  it('keeps runtime memory preference behaviour unchanged when the site has no pin', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).toEqual(['chat', 'messages', 'responses']);
+  });
+
+  it('pins the site preferred endpoint ahead of a remembered responses preference', async () => {
+    const context = {
+      ...baseContext,
+      site: {
+        ...baseContext.site,
+        platform: 'openai',
+      },
+    };
+
+    // 先记下运行时偏好：responses 曾成功，会被 runtime memory 顶到最前。
+    recordUpstreamEndpointSuccess({
+      siteId: context.site.id,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+    });
+
+    const withoutPin = await resolveUpstreamEndpointCandidates(context, 'gpt-5.3', 'openai');
+    expect(withoutPin[0]).toBe('responses');
+
+    const withPin = await resolveUpstreamEndpointCandidates(
+      {
+        ...context,
+        site: { ...context.site, preferredEndpoint: 'chat' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(withPin).toEqual(['chat', 'responses', 'messages']);
+  });
+
+  it('does not revive a blocked endpoint when it is pinned', async () => {
+    const context = {
+      ...baseContext,
+      site: {
+        ...baseContext.site,
+        platform: 'openai',
+      },
+    };
+
+    recordUpstreamEndpointFailure({
+      siteId: context.site.id,
+      endpoint: 'chat',
+      downstreamFormat: 'openai',
+      status: 404,
+      errorText: 'not found',
+      modelName: 'gpt-5.3',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...context,
+        site: { ...context.site, preferredEndpoint: 'chat' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).not.toContain('chat');
+    expect(order).toEqual(['responses', 'messages']);
+  });
+
+  it('treats unknown or auto preferred endpoint values as no-op', async () => {
+    const context = {
+      ...baseContext,
+      site: {
+        ...baseContext.site,
+        platform: 'openai',
+      },
+    };
+
+    const baseline = ['responses', 'chat', 'messages'];
+    for (const value of ['', 'auto', 'gemini', 'CHAT ', 'unknown']) {
+      const order = await resolveUpstreamEndpointCandidates(
+        {
+          ...context,
+          site: { ...context.site, preferredEndpoint: value },
+        },
+        'gpt-5.3',
+        'openai',
+      );
+      if (value.trim().toLowerCase() === 'chat') {
+        expect(order[0]).toBe('chat');
+        continue;
+      }
+      expect(order, `preferredEndpoint=${JSON.stringify(value)}`).toEqual(baseline);
+    }
+  });
+
+  it('keeps compact requests responses-only even when a different endpoint is pinned', async () => {
     const order = await resolveUpstreamEndpointCandidates(
       {
         ...baseContext,
         site: {
           ...baseContext.site,
-          platform: 'codex',
-          url: 'https://chatgpt.com/backend-api/codex',
+          platform: 'openai',
+          preferredEndpoint: 'chat',
         },
       },
-      'gpt-5.4',
-      'claude',
+      'gpt-5.3',
+      'responses',
       undefined,
       undefined,
       {
-        requestKind: 'claude-count-tokens',
+        requestKind: 'responses-compact',
       },
     );
 
-    expect(order).toEqual([]);
+    expect(order).toEqual(['responses']);
   });
 });

@@ -66,6 +66,7 @@ type SiteRow = {
   customHeadersOverrideRequestHeaders?: boolean | null;
   globalWeight?: number;
   maxConcurrency?: number;
+  preferredEndpoint?: string | null;
   isPinned?: boolean;
   sortOrder?: number;
   totalBalance?: number;
@@ -84,6 +85,16 @@ type SiteRow = {
     lastFailureReason?: string | null;
   }>;
 };
+
+// 与模型操练场（src/web/pages/ModelTester.tsx 的 PROTOCOL_OPTIONS）保持同一套协议词汇：
+// OpenAI 旧协议（chat/completions）、OpenAI 新协议（responses）、Anthropic（messages）。
+// Gemini 原生由站点 platform 驱动，不是可选的上游端点，因此不出现在此列表。
+const PREFERRED_ENDPOINT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '', label: '自动（跟随平台默认）' },
+  { value: 'chat', label: 'OpenAI Chat (/v1/chat/completions · 旧)' },
+  { value: 'responses', label: 'OpenAI Responses (/v1/responses · 新)' },
+  { value: 'messages', label: 'Claude (/v1/messages)' },
+];
 
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
   return typeof customHeaders === 'string' && customHeaders.trim().length > 0;
@@ -779,6 +790,7 @@ export default function Sites() {
       customHeadersOverrideRequestHeaders: !!form.customHeadersOverrideRequestHeaders,
       globalWeight: Number(parsedGlobalWeight.toFixed(3)),
       maxConcurrency: parsedMaxConcurrency,
+      preferredEndpoint: form.preferredEndpoint,
       postRefreshProbeEnabled: probeEnabled,
       postRefreshProbeModel: probeModel.trim(),
       postRefreshProbeScope: probeScope,
@@ -1986,6 +1998,21 @@ export default function Sites() {
               />
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 同一站点的请求会共享该上限，超过后按并发等待时间排队。
+              </div>
+            </div>
+          </ResponsiveFormGrid>
+
+          <ResponsiveFormGrid>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <ModernSelect
+                data-testid="site-preferred-endpoint-select"
+                value={form.preferredEndpoint}
+                onChange={(nextValue) => setForm((prev) => ({ ...prev, preferredEndpoint: nextValue }))}
+                options={PREFERRED_ENDPOINT_OPTIONS.map((option) => ({ ...option, label: tr(option.label) }))}
+                placeholder="上游端点：自动（跟随平台）"
+              />
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                指定该站点优先级最高的上游接口协议；仍保留其余候选作为回退。自动=跟随平台默认。
               </div>
             </div>
           </ResponsiveFormGrid>

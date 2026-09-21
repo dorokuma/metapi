@@ -256,4 +256,66 @@ describe('sites api endpoints', () => {
     expect(invalid.statusCode).toBe(400);
     expect((invalid.json() as { error?: string }).error).toContain('0 to 100000');
   });
+
+  it('persists preferredEndpoint on create and update, and rejects unsupported protocols', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'preferred-endpoint-site',
+        url: 'https://panel.example.com',
+        platform: 'new-api',
+        preferredEndpoint: 'chat',
+      },
+    });
+
+    expect(created.statusCode).toBe(200);
+    const createdSite = created.json() as { id: number; preferredEndpoint?: string };
+    expect(createdSite.preferredEndpoint).toBe('chat');
+
+    const updated = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${createdSite.id}`,
+      payload: { preferredEndpoint: 'responses' },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect((updated.json() as { preferredEndpoint?: string }).preferredEndpoint).toBe('responses');
+
+    const resetToAuto = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${createdSite.id}`,
+      payload: { preferredEndpoint: 'auto' },
+    });
+    expect(resetToAuto.statusCode).toBe(200);
+    expect((resetToAuto.json() as { preferredEndpoint?: string }).preferredEndpoint).toBe('');
+
+    const listed = await app.inject({ method: 'GET', url: '/api/sites' });
+    expect(listed.statusCode).toBe(200);
+    const listedSite = (listed.json() as Array<{ id: number; preferredEndpoint?: string }>)
+      .find((row) => row.id === createdSite.id);
+    expect(listedSite?.preferredEndpoint).toBe('');
+
+    for (const badValue of ['gemini', 'openai', 5]) {
+      const invalid = await app.inject({
+        method: 'PUT',
+        url: `/api/sites/${createdSite.id}`,
+        payload: { preferredEndpoint: badValue },
+      });
+      expect(invalid.statusCode, `preferredEndpoint=${String(badValue)}`).toBe(400);
+      expect((invalid.json() as { error?: string }).error).toContain('Invalid preferredEndpoint');
+    }
+
+    const invalidCreate = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'bad-preferred-endpoint-site',
+        url: 'https://panel2.example.com',
+        platform: 'new-api',
+        preferredEndpoint: 'gemini',
+      },
+    });
+    expect(invalidCreate.statusCode).toBe(400);
+    expect((invalidCreate.json() as { error?: string }).error).toContain('Invalid preferredEndpoint');
+  });
 });

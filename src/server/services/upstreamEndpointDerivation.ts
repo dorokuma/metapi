@@ -23,6 +23,7 @@ type ChannelContext = {
     url: string;
     platform: string;
     apiKey?: string | null;
+    preferredEndpoint?: string | null;
   };
   account: {
     id: number;
@@ -37,6 +38,12 @@ function asTrimmedString(value: unknown): string {
 
 function normalizePlatformName(platform: unknown): string {
   return asTrimmedString(platform).toLowerCase();
+}
+
+function normalizePreferredEndpointPin(value: unknown): UpstreamEndpoint | null {
+  const raw = asTrimmedString(value).toLowerCase();
+  if (raw === 'chat' || raw === 'messages' || raw === 'responses') return raw;
+  return null;
 }
 
 function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
@@ -178,8 +185,17 @@ export async function resolveUpstreamEndpointCandidates(
       capabilityProfile,
     })
   );
+  const pinnedEndpoint = normalizePreferredEndpointPin(context.site.preferredEndpoint);
+  const applySitePin = (candidates: UpstreamEndpoint[]): UpstreamEndpoint[] => {
+    if (!pinnedEndpoint || candidates.length <= 1) return candidates;
+    if (!candidates.includes(pinnedEndpoint)) return candidates;
+    return [
+      pinnedEndpoint,
+      ...candidates.filter((endpoint) => endpoint !== pinnedEndpoint),
+    ];
+  };
   const finalizeCandidates = (candidates: UpstreamEndpoint[]): UpstreamEndpoint[] => {
-    const preferredCandidates = applyRuntimePreference(candidates);
+    const preferredCandidates = applySitePin(applyRuntimePreference(candidates));
     if (hints?.requestKind === 'claude-count-tokens') {
       return preferredCandidates.includes('messages') ? ['messages'] : ([] as UpstreamEndpoint[]);
     }

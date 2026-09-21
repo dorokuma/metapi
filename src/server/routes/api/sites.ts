@@ -73,6 +73,21 @@ function normalizeMaxConcurrency(input: unknown): number | null {
   return parsed;
 }
 
+const PREFERRED_ENDPOINT_VALUES = ['chat', 'messages', 'responses'] as const;
+export type PreferredEndpointValue = (typeof PREFERRED_ENDPOINT_VALUES)[number];
+
+// 站点级上游端点偏好：''（auto，跟随平台默认）或 chat/messages/responses。
+function normalizePreferredEndpoint(input: unknown): PreferredEndpointValue | '' | null {
+  if (input === undefined || input === null) return null;
+  if (typeof input !== 'string') return null;
+  const normalized = input.trim().toLowerCase();
+  if (!normalized || normalized === 'auto') return '';
+  if ((PREFERRED_ENDPOINT_VALUES as readonly string[]).includes(normalized)) {
+    return normalized as PreferredEndpointValue;
+  }
+  return null;
+}
+
 function normalizeOptionalExternalCheckinUrl(input: unknown): {
   valid: boolean;
   present: boolean;
@@ -493,6 +508,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       sortOrder,
       globalWeight,
       maxConcurrency,
+      preferredEndpoint,
       apiEndpoints,
     } = createBody;
     const normalizedStatus = normalizeSiteStatus(status);
@@ -526,6 +542,12 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedMaxConcurrency = normalizeMaxConcurrency(maxConcurrency);
     if (maxConcurrency !== undefined && normalizedMaxConcurrency === null) {
       return reply.code(400).send({ error: 'Invalid maxConcurrency value. Expected an integer from 0 to 100000.' });
+    }
+    const normalizedPreferredEndpoint = normalizePreferredEndpoint(preferredEndpoint);
+    if (preferredEndpoint !== undefined && normalizedPreferredEndpoint === null) {
+      return reply.code(400).send({
+        error: 'Invalid preferredEndpoint value. Expected one of: auto, chat, messages, responses.',
+      });
     }
     const normalizedCustomHeaders = parseSiteCustomHeadersInput(customHeaders);
     if (!normalizedCustomHeaders.valid) {
@@ -597,6 +619,7 @@ export async function sitesRoutes(app: FastifyInstance) {
           sortOrder: normalizedSortOrder ?? (maxSortOrder + 1),
           globalWeight: normalizedGlobalWeight ?? 1,
           maxConcurrency: normalizedMaxConcurrency ?? 0,
+          preferredEndpoint: normalizedPreferredEndpoint ?? '',
         }).run();
         const siteId = getInsertedRowId(siteInsert);
         if (siteId && normalizedApiEndpoints.present && normalizedApiEndpoints.apiEndpoints.length > 0) {
@@ -683,6 +706,12 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.maxConcurrency !== undefined && normalizedMaxConcurrency === null) {
       return reply.code(400).send({ error: 'Invalid maxConcurrency value. Expected an integer from 0 to 100000.' });
     }
+    const normalizedPreferredEndpoint = normalizePreferredEndpoint(body.preferredEndpoint);
+    if (body.preferredEndpoint !== undefined && normalizedPreferredEndpoint === null) {
+      return reply.code(400).send({
+        error: 'Invalid preferredEndpoint value. Expected one of: auto, chat, messages, responses.',
+      });
+    }
     const normalizedCustomHeaders = parseSiteCustomHeadersInput(body.customHeaders);
     if (!normalizedCustomHeaders.valid) {
       return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
@@ -738,6 +767,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.sortOrder !== undefined) updates.sortOrder = normalizedSortOrder;
     if (body.globalWeight !== undefined) updates.globalWeight = normalizedGlobalWeight;
     if (body.maxConcurrency !== undefined) updates.maxConcurrency = normalizedMaxConcurrency;
+    if (body.preferredEndpoint !== undefined) updates.preferredEndpoint = normalizedPreferredEndpoint;
     const anyBody = body as Record<string, unknown>;
     if (anyBody.postRefreshProbeEnabled !== undefined) updates.postRefreshProbeEnabled = anyBody.postRefreshProbeEnabled === true || anyBody.postRefreshProbeEnabled === 1;
     if (anyBody.postRefreshProbeModel !== undefined) updates.postRefreshProbeModel = String(anyBody.postRefreshProbeModel || '').trim();

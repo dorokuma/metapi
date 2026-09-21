@@ -155,6 +155,14 @@ describe('buildSiteSaveAction', () => {
     ]);
   });
 
+  it('carries preferred endpoint through the editor form', () => {
+    expect(emptySiteForm().preferredEndpoint).toBe('');
+    expect(siteFormFromSite({ preferredEndpoint: '  chat  ' }).preferredEndpoint).toBe('chat');
+    expect(siteFormFromSite({}).preferredEndpoint).toBe('');
+    expect(siteFormFromSite({ preferredEndpoint: null } as unknown as Parameters<typeof siteFormFromSite>[0]).preferredEndpoint).toBe('');
+    expect(siteFormFromSite({ preferredEndpoint: 'responses' }).preferredEndpoint).toBe('responses');
+  });
+
   it('parses custom headers json into key value rows', () => {
     expect(siteFormFromSite({
       name: 'site-e',

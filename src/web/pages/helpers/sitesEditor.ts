@@ -23,6 +23,7 @@ export type SiteForm = {
   customHeadersOverrideRequestHeaders: boolean;
   globalWeight: string;
   maxConcurrency: string;
+  preferredEndpoint: string;
 };
 
 export type SiteEditorState =
@@ -50,6 +51,7 @@ export type SiteSavePayload = {
   postRefreshProbeModel?: string;
   postRefreshProbeScope?: 'single' | 'all';
   postRefreshProbeLatencyThresholdMs?: number;
+  preferredEndpoint?: string;
 };
 
 type SiteSaveAction =
@@ -86,6 +88,7 @@ export function emptySiteForm(): SiteForm {
     customHeadersOverrideRequestHeaders: false,
     globalWeight: '1',
     maxConcurrency: '0',
+    preferredEndpoint: '',
   };
 }
 
@@ -137,7 +140,7 @@ function parseApiEndpointsForEditor(raw: unknown): SiteApiEndpointField[] {
   return ensureSiteApiEndpointRows(rows);
 }
 
-export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'customHeadersOverrideRequestHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy' | 'maxConcurrency'>> & {
+export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'customHeadersOverrideRequestHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy' | 'maxConcurrency' | 'preferredEndpoint'>> & {
   externalCheckinUrl?: string | null;
   proxyUrl?: string | null;
   useSystemProxy?: boolean | null;
@@ -151,6 +154,7 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
   customHeaders?: string | null;
   globalWeight?: number | string | null;
   maxConcurrency?: number | string | null;
+  preferredEndpoint?: string | null;
 }): SiteForm {
   const globalWeightRaw = Number(site.globalWeight);
   const globalWeight = Number.isFinite(globalWeightRaw) && globalWeightRaw > 0 ? String(globalWeightRaw) : '1';
@@ -169,6 +173,7 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     maxConcurrency: Number.isSafeInteger(Number(site.maxConcurrency)) && Number(site.maxConcurrency) >= 0
       ? String(Math.trunc(Number(site.maxConcurrency)))
       : '0',
+    preferredEndpoint: typeof site.preferredEndpoint === 'string' ? site.preferredEndpoint.trim() : '',
   };
 }
 

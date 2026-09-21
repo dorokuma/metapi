@@ -2125,6 +2125,12 @@
           "notNull": true,
           "defaultValue": "0",
           "primaryKey": false
+        },
+        "preferred_endpoint": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": "''",
+          "primaryKey": false
         }
       }
     },

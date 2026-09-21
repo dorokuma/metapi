@@ -265,4 +265,26 @@ describe('upstreamEndpointDerivation', () => {
 
     expect(order).toEqual(['responses']);
   });
+
+  it('keeps native responses file-url requests responses-only even when a different endpoint is pinned', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: {
+          ...baseContext.site,
+          platform: 'new-api',
+          preferredEndpoint: 'chat',
+        },
+      },
+      'gpt-5.3',
+      'responses',
+      undefined,
+      undefined,
+      {
+        requiresNativeResponsesFileUrl: true,
+      },
+    );
+
+    expect(order).toEqual(['responses']);
+  });
 });

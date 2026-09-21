@@ -2009,10 +2009,10 @@ export default function Sites() {
                 value={form.preferredEndpoint}
                 onChange={(nextValue) => setForm((prev) => ({ ...prev, preferredEndpoint: nextValue }))}
                 options={PREFERRED_ENDPOINT_OPTIONS.map((option) => ({ ...option, label: tr(option.label) }))}
-                placeholder="上游端点：自动（跟随平台）"
+                placeholder={tr('上游端点：自动（跟随平台）')}
               />
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                指定该站点优先级最高的上游接口协议；仍保留其余候选作为回退。自动=跟随平台默认。
+                {tr('指定该站点优先级最高的上游接口协议；仍保留其余候选作为回退。自动=跟随平台默认。')}
               </div>
             </div>
           </ResponsiveFormGrid>

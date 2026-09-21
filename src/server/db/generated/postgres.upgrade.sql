@@ -1,1 +1,1 @@
--- no schema changes detected for postgres
+ALTER TABLE "sites" ADD COLUMN "preferred_endpoint" TEXT DEFAULT '';

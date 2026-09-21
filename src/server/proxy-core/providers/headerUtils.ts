@@ -194,6 +194,11 @@ export function buildClaudeRuntimeHeaders(input: {
   anthropicVersion: string;
   stream: boolean;
   isClaudeOauthUpstream: boolean;
+  /** True only when the upstream site itself is an Anthropic-native `claude`
+   *  platform. Omitted/false means the upstream is an OpenAI-compatible
+   *  gateway that exposes `/v1/messages` (e.g. Prism), which authenticates
+   *  with `Authorization: Bearer` rather than `x-api-key`. */
+  isClaudePlatform?: boolean;
   tokenValue: string;
   extraBetas?: string[];
   defaultBetaHeader?: string;
@@ -239,7 +244,15 @@ export function buildClaudeRuntimeHeaders(input: {
     Accept: input.stream ? 'text/event-stream' : 'application/json',
     'Accept-Encoding': 'gzip, deflate, br, zstd',
   };
-  if (input.isClaudeOauthUpstream) {
+  // The credential header must follow the *upstream* platform's convention, not
+  // the downstream protocol that produced the Anthropic-shaped body. An
+  // Anthropic-native upstream expects `x-api-key`; an OAuth-backed Claude
+  // upstream expects `Authorization: Bearer`. Any other platform (an
+  // OpenAI-compatible gateway such as Prism or New API that also exposes
+  // `/v1/messages`) expects `Authorization: Bearer` as well — sending
+  // `x-api-key` there yields a 401 that the balance/alert layer then
+  // misclassifies as an expired token and permanently disables the account.
+  if (input.isClaudeOauthUpstream || !input.isClaudePlatform) {
     headers.Authorization = `Bearer ${input.tokenValue}`;
   } else {
     headers['x-api-key'] = input.tokenValue;

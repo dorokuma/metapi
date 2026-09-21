@@ -695,6 +695,7 @@ export function buildUpstreamEndpointRequest(input: {
       anthropicVersion,
       stream: input.stream,
       isClaudeOauthUpstream,
+      isClaudePlatform: isClaudeUpstream,
       tokenValue: input.tokenValue,
     });
 
@@ -884,6 +885,7 @@ export function buildClaudeCountTokensUpstreamRequest(input: {
     anthropicVersion,
     stream: false,
     isClaudeOauthUpstream,
+    isClaudePlatform: sitePlatform === 'claude',
     tokenValue: input.tokenValue,
   });
 

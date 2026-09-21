@@ -84,7 +84,7 @@ describe('resolveProviderProfile', () => {
     expect(result.body).toBe(protocolBody);
   });
 
-  it('drops oauth-only claude betas for api-key upstreams', () => {
+  it('drops oauth-only claude betas for claude api-key upstreams', () => {
     const profile = resolveProviderProfile('claude');
     expect(profile?.id).toBe('claude');
 
@@ -92,8 +92,9 @@ describe('resolveProviderProfile', () => {
       endpoint: 'messages',
       modelName: 'claude-opus-4-6',
       stream: false,
-      tokenValue: 'sk-claude-api-key',
-      sitePlatform: 'openai',
+      tokenValue: 'claude-managed-key',
+      sitePlatform: 'claude',
+      oauthProvider: null,
       baseHeaders: {
         'Content-Type': 'application/json',
       },
@@ -106,9 +107,40 @@ describe('resolveProviderProfile', () => {
     });
 
     expect(result.headers.Authorization).toBeUndefined();
-    expect(result.headers['x-api-key']).toBe('sk-claude-api-key');
+    expect(result.headers['x-api-key']).toBe('claude-managed-key');
     expect(result.headers['anthropic-beta']).not.toContain('oauth-2025-04-20');
     expect(result.headers['anthropic-beta']).toContain('fine-grained-tool-streaming-2025-05-14');
+  });
+
+  it('uses Bearer auth for openai-compatible gateways exposing /v1/messages', () => {
+    // An OpenAI-compatible upstream (e.g. Prism) serves /v1/messages but
+    // authenticates with `Authorization: Bearer`, not Anthropic's `x-api-key`.
+    // Sending `x-api-key` there yields a 401 that the balance/alert layer
+    // misclassifies as an expired token and permanently disables the account.
+    const profile = resolveProviderProfile('claude');
+    expect(profile?.id).toBe('claude');
+
+    const result = profile!.prepareRequest({
+      endpoint: 'messages',
+      modelName: 'grok-4.6',
+      stream: false,
+      tokenValue: 'prism-managed-key',
+      sitePlatform: 'openai',
+      oauthProvider: null,
+      baseHeaders: {
+        'Content-Type': 'application/json',
+      },
+      claudeHeaders: {},
+      body: {
+        model: 'grok-4.6',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(result.headers['x-api-key']).toBeUndefined();
+    expect(result.headers.Authorization).toBe('Bearer prism-managed-key');
+    expect(result.headers['anthropic-beta']).not.toContain('oauth-2025-04-20');
   });
 
   it('adds token-counting beta when building claude count_tokens requests', () => {

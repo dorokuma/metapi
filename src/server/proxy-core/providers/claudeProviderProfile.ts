@@ -16,6 +16,7 @@ export const claudeProviderProfile: ProviderProfile = {
     );
     const isClaudeOauthUpstream = input.sitePlatform?.trim().toLowerCase() === 'claude'
       && input.oauthProvider === 'claude';
+    const isClaudePlatform = input.sitePlatform?.trim().toLowerCase() === 'claude';
     const isCountTokens = input.action === 'countTokens';
 
     return {
@@ -26,6 +27,7 @@ export const claudeProviderProfile: ProviderProfile = {
         anthropicVersion,
         stream: isCountTokens ? false : input.stream,
         isClaudeOauthUpstream,
+        isClaudePlatform,
         tokenValue: input.tokenValue,
         defaultBetaHeader: isClaudeOauthUpstream
           ? CLAUDE_DEFAULT_BETA_HEADER

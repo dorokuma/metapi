@@ -2187,7 +2187,7 @@ export default function Settings() {
                 启动时自动补齐 OAuth 站点
               </span>
               <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
-                每次启动会把 codex / claude / gemini-cli / antigravity 四个 OAuth 站点自动加回站点列表。删了又长回来就关掉它（关闭后仅在你主动发起 OAuth 登录时才创建）。
+                勾选后，每次服务启动会自动补齐 codex / claude / gemini-cli / antigravity 四个 OAuth 站点（缺失时才创建）。关闭后，启动不再重建这些站点；仅在主动发起 OAuth 登录时按需创建。
               </span>
             </span>
           </label>

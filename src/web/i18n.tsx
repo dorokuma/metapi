@@ -42,6 +42,8 @@ const zhToEn: Record<string, string> = {
   '控制台': 'Console',
   '仪表盘': 'Dashboard',
   '站点': 'Sites',
+  '启动时自动补齐 OAuth 站点': 'Auto-create OAuth sites on startup',
+  '勾选后，每次服务启动会自动补齐 codex / claude / gemini-cli / antigravity 四个 OAuth 站点（缺失时才创建）。关闭后，启动不再重建这些站点；仅在主动发起 OAuth 登录时按需创建。': 'When enabled, each startup re-creates missing codex / claude / gemini-cli / antigravity OAuth sites. When disabled, startup no longer recreates them; sites are created on demand only when you start an OAuth login.',
   '自动（跟随平台默认）': 'Auto (follow platform default)',
   'OpenAI Chat (/v1/chat/completions · 旧)': 'OpenAI Chat (/v1/chat/completions · legacy)',
   'OpenAI Responses (/v1/responses · 新)': 'OpenAI Responses (/v1/responses · new)',

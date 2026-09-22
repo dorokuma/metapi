@@ -3,6 +3,7 @@ import { db, schema } from '../../db/index.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
 import { listOAuthProviderDefinitions, type OAuthProviderDefinition } from './providers.js';
 import { upsertSetting } from '../../db/upsertSetting.js';
+import { config } from '../../config.js';
 
 /**
  * 启动时是否自动补齐 OAuth provider 站点。默认 true（保持历史行为）；
@@ -15,11 +16,17 @@ export async function isOauthProviderSiteAutoCreateEnabled(): Promise<boolean> {
     .from(schema.settings)
     .where(eq(schema.settings.key, OAUTH_PROVIDER_SITE_AUTOCREATE_SETTING_KEY))
     .get();
-  if (!row?.value) return true;
+  if (!row?.value) {
+    // 无显式设置项时回落到已 hydrate 的 config（env 显式关闭同样生效），
+    // config 默认 true 保持历史行为——不会因为缺行就改变默认补种语义。
+    return config.oauthProviderSiteAutoCreateEnabled;
+  }
   try {
-    return JSON.parse(row.value) === true;
+    const parsed = JSON.parse(row.value);
+    if (typeof parsed === 'boolean') return parsed;
+    return config.oauthProviderSiteAutoCreateEnabled;
   } catch {
-    return true;
+    return config.oauthProviderSiteAutoCreateEnabled;
   }
 }
 

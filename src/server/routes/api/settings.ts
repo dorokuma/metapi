@@ -440,6 +440,11 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.disableCrossProtocolFallback = value;
       return;
     }
+    case 'oauth_provider_site_autocreate_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.oauthProviderSiteAutoCreateEnabled = value;
+      return;
+    }
     case 'proxy_error_keywords': {
       try {
         config.proxyErrorKeywords = parseProxyErrorKeywords(value);
@@ -1248,10 +1253,13 @@ export async function settingsRoutes(app: FastifyInstance) {
         });
       }
 
-      await setOauthProviderSiteAutoCreateEnabled(nextValue);
-      changedLabels.push(nextValue
-        ? '启动时自动补齐 OAuth 站点'
-        : '重启后不再自动创建 OAuth 站点（OAuth 登录时仍会按需创建）');
+      if (nextValue !== config.oauthProviderSiteAutoCreateEnabled) {
+        changedLabels.push(nextValue
+          ? '启动时自动补齐 OAuth 站点'
+          : '重启后不再自动创建 OAuth 站点（OAuth 登录时仍会按需创建）');
+        config.oauthProviderSiteAutoCreateEnabled = nextValue;
+        await setOauthProviderSiteAutoCreateEnabled(nextValue);
+      }
     }
 
     if (body.proxySessionChannelConcurrencyLimit !== undefined) {

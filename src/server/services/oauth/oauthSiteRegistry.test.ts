@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +22,10 @@ describe('oauth site registry', () => {
 
   beforeEach(async () => {
     await db.delete(schema.sites).run();
+    // 开关是运行期设置，用例之间必须清掉，否则"缺行默认 true"的前提不成立。
+    await db.delete(schema.settings)
+      .where(eq(schema.settings.key, 'oauth_provider_site_autocreate_enabled'))
+      .run();
   });
 
   afterAll(() => {
@@ -47,6 +52,35 @@ describe('oauth site registry', () => {
     expect(rows.filter((row) => row.platform === 'gemini-cli')).toHaveLength(1);
     expect(rows.filter((row) => row.platform === 'antigravity')).toHaveLength(1);
     expect(rows.filter((row) => row.platform === 'claude')).toHaveLength(1);
+  });
+
+  it('falls back to the hydrated config flag when the stored value is malformed', async () => {
+    await db.insert(schema.settings).values({
+      key: 'oauth_provider_site_autocreate_enabled',
+      value: 'not-json',
+    }).run();
+
+    const { isOauthProviderSiteAutoCreateEnabled } = await import('./oauthSiteRegistry.js');
+    await expect(isOauthProviderSiteAutoCreateEnabled()).resolves.toBe(true);
+
+    // env 显式关闭且无合法库行时：守卫必须尊重 config，而不是死守 true
+    process.env.OAUTH_PROVIDER_SITE_AUTOCREATE_ENABLED = 'false';
+    const { config } = await import('../../config.js');
+    const previous = config.oauthProviderSiteAutoCreateEnabled;
+    config.oauthProviderSiteAutoCreateEnabled = false;
+    try {
+      await db.delete(schema.settings)
+        .where(eq(schema.settings.key, 'oauth_provider_site_autocreate_enabled'))
+        .run();
+      await expect(isOauthProviderSiteAutoCreateEnabled()).resolves.toBe(false);
+
+      const { ensureOauthProviderSitesExist } = await import('./oauthSiteRegistry.js');
+      await ensureOauthProviderSitesExist();
+      expect(await db.select().from(schema.sites).all()).toHaveLength(0);
+    } finally {
+      config.oauthProviderSiteAutoCreateEnabled = previous;
+      delete process.env.OAUTH_PROVIDER_SITE_AUTOCREATE_ENABLED;
+    }
   });
 
   it('does not recreate deleted oauth provider sites when the switch is off', async () => {

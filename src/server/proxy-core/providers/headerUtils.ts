@@ -195,10 +195,14 @@ export function buildClaudeRuntimeHeaders(input: {
   stream: boolean;
   isClaudeOauthUpstream: boolean;
   /** True only when the upstream site itself is an Anthropic-native `claude`
-   *  platform. Omitted/false means the upstream is an OpenAI-compatible
-   *  gateway that exposes `/v1/messages` (e.g. Prism), which authenticates
-   *  with `Authorization: Bearer` rather than `x-api-key`. */
-  isClaudePlatform?: boolean;
+   *  platform, which is the only case that authenticates with `x-api-key`.
+   *  Every other platform is an OpenAI-compatible gateway that may expose
+   *  `/v1/messages` (e.g. Prism) and authenticates with `Authorization: Bearer`;
+   *  sending `x-api-key` there yields a 401 that the balance/alert layer
+   *  misclassifies as an expired token and permanently disables the account.
+   *  Required so a future caller cannot silently fall back to a credential
+   *  header the upstream will reject. */
+  isClaudePlatform: boolean;
   tokenValue: string;
   extraBetas?: string[];
   defaultBetaHeader?: string;

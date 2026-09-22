@@ -255,4 +255,47 @@ describe('upstreamRequestBuilder', () => {
     expect(request.headers['anthropic-beta']).toContain('header-beta');
     expect(request.headers['anthropic-beta']).toContain('beta-from-body');
   });
+
+  // A non-claude platform that exposes /v1/messages (an OpenAI-compatible
+  // gateway such as Prism) authenticates with `Authorization: Bearer`, not
+  // Anthropic's `x-api-key`. Sending `x-api-key` there yields a 401 that the
+  // balance/alert layer misclassifies as an expired token and permanently
+  // disables the account. `resolveProviderProfile('openai')` is null, so the
+  // real production path is this builder's messages fallback — the profile
+  // level test cannot cover it.
+  it('sends bearer auth for openai-compatible gateways routed to /v1/messages', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'grok-4.6',
+      stream: false,
+      tokenValue: 'gateway-test-token',
+      sitePlatform: 'openai',
+      openaiBody: {
+        model: 'grok-4.6',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.headers['x-api-key']).toBeUndefined();
+    expect(request.headers.Authorization).toBe('Bearer gateway-test-token');
+  });
+
+  it('sends x-api-key auth for anthropic-native claude platforms routed to /v1/messages', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-4-6',
+      stream: false,
+      tokenValue: 'anthropic-test-token',
+      sitePlatform: 'claude',
+      openaiBody: {
+        model: 'claude-opus-4-6',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.headers.Authorization).toBeUndefined();
+    expect(request.headers['x-api-key']).toBe('anthropic-test-token');
+  });
 });

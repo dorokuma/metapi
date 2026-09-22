@@ -13,18 +13,24 @@ const {
   getUpdateCenterHelperStatusMock,
   streamUpdateCenterDeployMock,
   streamUpdateCenterRollbackMock,
+  pinnedRuntimeVersion,
 } = vi.hoisted(() => ({
   fetchLatestStableGitHubReleaseMock: vi.fn(),
   fetchDockerHubTagCandidatesMock: vi.fn(),
   getUpdateCenterHelperStatusMock: vi.fn(),
   streamUpdateCenterDeployMock: vi.fn(),
   streamUpdateCenterRollbackMock: vi.fn(),
+  // Pin the runtime version to an old, fixed value so assertions stay version-agnostic:
+  // the real package.json version keeps moving forward, which would make every
+  // "candidate is newer than the running version" assertion rot on each bump.
+  pinnedRuntimeVersion: '1.2.0',
 }));
 
 vi.mock('../../services/updateCenterVersionService.js', async () => {
   const actual = await vi.importActual<typeof import('../../services/updateCenterVersionService.js')>('../../services/updateCenterVersionService.js');
   return {
     ...actual,
+    getCurrentRuntimeVersion: () => pinnedRuntimeVersion,
     fetchLatestStableGitHubRelease: (...args: unknown[]) => fetchLatestStableGitHubReleaseMock(...args),
     fetchDockerHubTagCandidates: (...args: unknown[]) => fetchDockerHubTagCandidatesMock(...args),
   };
@@ -890,6 +896,8 @@ describe('update center routes', () => {
         targetVersion: '1.3.1',
       },
     });
+
+    expect(deployResponse.statusCode).toBe(202);
 
     const deployBody = deployResponse.json() as { task: { id: string } };
 

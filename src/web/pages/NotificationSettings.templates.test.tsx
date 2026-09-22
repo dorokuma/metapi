@@ -296,4 +296,54 @@ describe('NotificationSettings templates', () => {
       root?.unmount();
     }
   });
+
+  it('keeps the body focused while clicking a variable chip (preventDefault when focused)', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {},
+    });
+
+    const root = await renderPage();
+    try {
+      const body = findInputByTestId(root, 'template-body-input');
+      await act(async () => {
+        body.props.onChange({ target: { value: 'hello world' } });
+      });
+      // 聚焦文本框：chip onMouseDown 必须 preventDefault，防止按钮抢走 textarea 焦点
+      await act(async () => {
+        body.props.onFocus?.();
+      });
+
+      const countChip = root.root.findAll((node) => (
+        node.type === 'button' && node.props.title === '风暴聚合累计次数'
+      ))[0];
+
+      const preventDefault = vi.fn();
+      await act(async () => {
+        countChip.props.onMouseDown({ preventDefault });
+      });
+      // 正文已聚焦：阻止 mousedown 默认行为以保住焦点（不能是删掉也绿的摆设断言）
+      expect(preventDefault).toHaveBeenCalled();
+
+      await act(async () => {
+        countChip.props.onClick();
+      });
+      const updated = findInputByTestId(root, 'template-body-input');
+      // chip 插入行为本身不回归（拦截默认行为不能影响写入）
+      expect(updated.props.value).toContain('{{count}}');
+
+      // 未聚焦时不得阻止默认行为
+      await act(async () => {
+        body.props.onBlur?.();
+      });
+      const preventDefaultUnfocused = vi.fn();
+      await act(async () => {
+        countChip.props.onMouseDown({ preventDefault: preventDefaultUnfocused });
+      });
+      expect(preventDefaultUnfocused).not.toHaveBeenCalled();
+    } finally {
+      root?.unmount();
+    }
+  });
 });

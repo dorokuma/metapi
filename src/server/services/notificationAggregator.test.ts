@@ -463,46 +463,66 @@ describe('notificationAggregator', () => {
     expect(row?.value).toContain('lastPushAtMs');
   });
 
-  it('storm seal write failure preserves old storm object (behavior)', async () => {
+  it('storm seal write failure keeps the pending storm, its event row and its count (behavior)', async () => {
     const { evaluateAggregatedNotification, flushAggregatedState, getAggregatorEntry } = await import('./notificationAggregator.js');
     const { buildAggregatedSignature } = await import('./notificationAggregator.js');
-    const { resetAggregatedNotificationState } = await import('./notificationAggregator.js');
 
-    // 先创建一个带 eventId 的 storm
+    // 第一段风暴：落一条 events 行并推送
     await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'first storm' });
     await flushAggregatedState();
     const sig = buildAggregatedSignature('error', '代理全部失败');
-    const entryBefore = getAggregatorEntry(sig);
-    expect(entryBefore).toBeDefined();
+    const firstRows = await db.select().from(schema.events).all();
+    expect(firstRows).toHaveLength(1);
+    const oldEventId = firstRows[0].id;
+    const oldMessage = firstRows[0].message;
+    expect(getAggregatorEntry(sig)).toBeDefined();
 
-    // 让 storm 过期：静默超过 10 分钟
-    const stored = JSON.parse(
-      (await db.select().from(schema.settings)
-        .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
-        .get())?.value || '{}',
-    ) as Record<string, { lastPushAtMs: number; storm?: { lastAtMs: number } | null }>;
-    for (const key of Object.keys(stored)) {
-      if (stored[key].storm && stored[key].storm.lastAtMs) {
-        stored[key].storm!.lastAtMs = Date.now() - 11 * 60 * 1000;
-      }
+    // 静默超过 10 分钟：旧 storm 在内存中变为 inactive，等待封板写回。
+    // 不依赖 load 过期丢弃（那会让封板分支根本进不去），而是让 flush 真正走封板写失败路径。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+      // 模拟封板写失败
+      (globalThis as any).__metapi_test_simulate_write_error = true;
+      const reopened = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'second' });
+      expect(reopened.shouldPush).toBe(true);
+      expect(reopened.count).toBe(1);
+
+      // 封板失败后必须保留 pending 与旧 storm，不得插入新行
+      const afterFailure = await db.select().from(schema.events).all();
+      expect(afterFailure).toHaveLength(2);
+      const pendingEventId = afterFailure.map((row) => row.id).find((id) => id !== oldEventId) as number;
+      expect(pendingEventId).toBeGreaterThan(0);
+
+      // 立刻再评估一次：必须续写原 pendingStorm 原对象，禁止新建、禁止再 insert
+      const continued = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.8', reason: 'third' });
+      expect(continued.shouldPush).toBe(false);
+      // 计数不丢：pendingStorm 的 count 延续上一段，而不是回 1
+      expect(continued.count).toBe(2);
+      expect(continued.mergedCount).toBe(1);
+
+      // 行数守恒：仍然只有旧行 + pending 行，没有第三条孤儿行
+      const rows = await db.select().from(schema.events).all();
+      expect(rows).toHaveLength(2);
+
+      // 旧 eventId 保留：旧行内容未被改写
+      const oldRow = rows.find((row) => row.id === oldEventId);
+      expect(oldRow).toBeDefined();
+      expect(oldRow?.message).toBe(oldMessage);
+
+      // 新风暴行承载两段累计，不是停在 baseMessage 的孤儿行
+      const pendingRow = rows.find((row) => row.id === pendingEventId);
+      expect(pendingRow?.message).toContain('已累计 2 次');
+      expect(pendingRow?.message).toContain('grok-4.7');
+      expect(pendingRow?.message).toContain('grok-4.8');
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
     }
-    const { upsertSetting } = await import('../db/upsertSetting.js');
-    await upsertSetting('notification_aggregator_state_v1', stored);
-    await resetAggregatedNotificationState();
-
-    // 模拟封板写失败
-    (globalThis as any).__metapi_test_simulate_write_error = true;
-
-    // 下一次评估应触发新 storm 封板写回
-    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'second' });
-    const entryDuring = getAggregatorEntry(sig);
-    // entryDuring 应该仍然存在（旧 storm 引用未被替换）
-    expect(entryDuring).toBeDefined();
-
-    vi.restoreAllMocks();
   });
 
-  it('release uses generation saved before send (behavior)', async () => {
+  it('release uses the generation saved before send: stale generation keeps the window, fresh generation rewrites it (behavior)', async () => {
     const { evaluateAggregatedNotification, releaseAggregatedPushWindow, flushAggregatedState, getAggregatorEntry } = await import('./notificationAggregator.js');
     const { buildAggregatedSignature } = await import('./notificationAggregator.js');
     config.notifyCooldownSec = 1;
@@ -510,21 +530,99 @@ describe('notificationAggregator', () => {
     const first = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'r1' });
     expect(first.shouldPush).toBe(true);
     const sig = buildAggregatedSignature('error', '代理全部失败');
+    // 发送前保存当时的代际与窗口（与 alertService 的取值时机一致）
     const savedGeneration = getAggregatorEntry(sig)?.pushGeneration ?? 0;
+    const windowAfterFirstPush = getAggregatorEntry(sig)?.lastPushAtMs ?? 0;
+    expect(savedGeneration).toBeGreaterThan(0);
+    expect(windowAfterFirstPush).toBeGreaterThan(0);
 
-    // 等待 cooldown 过期，模拟发送挂起期间有新推送（代际前进）
-    await new Promise(r => setTimeout(r, 1500));
-    const second = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'r2' });
-    expect(second.shouldPush).toBe(true);
+    // 发送挂起期间：冷静期过去，新推送把代际加一并前移窗口
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 1500);
+      const second = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'r2' });
+      expect(second.shouldPush).toBe(true);
+      await flushAggregatedState();
+
+      const generationAfterNewPush = getAggregatorEntry(sig)?.pushGeneration ?? 0;
+      const windowAfterNewPush = getAggregatorEntry(sig)?.lastPushAtMs ?? 0;
+      expect(generationAfterNewPush).toBeGreaterThan(savedGeneration);
+      expect(windowAfterNewPush).toBeGreaterThan(windowAfterFirstPush);
+
+      // 迟到 release：用发送前保存的代际，必须保持窗口不变（不能用 >0 这种恒真断言）
+      await releaseAggregatedPushWindow('error', '代理全部失败', savedGeneration);
+      const windowAfterStaleRelease = getAggregatorEntry(sig)?.lastPushAtMs ?? 0;
+      expect(windowAfterStaleRelease).toBe(windowAfterNewPush);
+
+      // 用发送后的新代际 release：必须真正改写窗口（now - cooldown + 60s）
+      await releaseAggregatedPushWindow('error', '代理全部失败', generationAfterNewPush);
+      const windowAfterFreshRelease = getAggregatorEntry(sig)?.lastPushAtMs ?? 0;
+      expect(windowAfterFreshRelease).not.toBe(windowAfterNewPush);
+      // 改写后的窗口应指向 now-cooldown+60s：距 now 约 60 秒之后
+      expect(Date.now() - windowAfterFreshRelease).toBeLessThanOrEqual(0);
+
+      // 窗口被改写为未来时刻后，下一次评估应被冷静期拦住（不推送）
+      const third = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.8', reason: 'r3' });
+      expect(third.shouldPush).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('persists and restores the pending storm so a restart does not lose the storm (behavior)', async () => {
+    const { evaluateAggregatedNotification, flushAggregatedState, resetAggregatedNotificationState } = await import('./notificationAggregator.js');
+
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'r1' });
     await flushAggregatedState();
-    const generationAfter = getAggregatorEntry(sig)?.pushGeneration ?? 0;
-    expect(generationAfter).toBeGreaterThan(savedGeneration);
+    const beforeRestart = await db.select().from(schema.events).all();
+    expect(beforeRestart).toHaveLength(1);
+    const oldEventId = beforeRestart[0].id;
 
-    // 用旧代际 release，不应改动窗口
-    await releaseAggregatedPushWindow('error', '代理全部失败', savedGeneration);
-    const entryAfterRelease = getAggregatorEntry(sig);
-    // 代际不匹配，release 应该是 no-op，lastPushAtMs 应保持不变（第二个推送的时间）
-    expect(entryAfterRelease?.lastPushAtMs).toBeGreaterThan(0);
+    // 构造"新风暴已插入 events 行、但旧风暴尚未封板"的中间态，然后模拟进程重启
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+      (globalThis as any).__metapi_test_simulate_write_error = true;
+      await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'r2' });
+      const midState = await db.select().from(schema.events).all();
+      expect(midState).toHaveLength(2);
+      const pendingEventId = midState.map((row) => row.id).find((id) => id !== oldEventId) as number;
+
+      // 持久化的 JSON blob 必须带上 pendingStorm（settings JSON，无需 schema 迁移）
+      const persisted = JSON.parse(
+        (await db.select().from(schema.settings)
+          .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
+          .get())?.value || '{}',
+      ) as Record<string, { pendingStorm?: { eventId?: number; count?: number } | null; storm?: { finalWritten?: boolean } | null }>;
+      const persistedEntry = Object.values(persisted)[0];
+      expect(persistedEntry?.pendingStorm?.eventId).toBe(pendingEventId);
+      // finalWritten 必须落库，否则重启后无法区分"已封板可丢弃"与"未封板需重试"
+      expect(persistedEntry?.storm).toHaveProperty('finalWritten');
+
+      // 进程重启：清空内存态，下一次 evaluate 触发 load
+      await resetAggregatedNotificationState();
+      (globalThis as any).__metapi_test_simulate_write_error = false;
+
+      // 旧风暴已超过 10 分钟但未封板：必须被恢复并允许重试封板，
+      // 而不是连同 pendingStorm 一起被丢弃（那会让整段新风暴静默丢失）
+      const resumed = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.8', reason: 'r3' });
+      expect(resumed.count).toBe(2);
+      expect(resumed.shouldPush).toBe(false);
+
+      await flushAggregatedState();
+      const afterRestart = await db.select().from(schema.events).all();
+      // 行数守恒：没有因为重启而多插入孤儿行
+      expect(afterRestart).toHaveLength(2);
+      // 新风暴行承载两段累计，中间行不再永远停在 baseMessage
+      const pendingRow = afterRestart.find((row) => row.id === pendingEventId);
+      expect(pendingRow?.message).toContain('已累计 2 次');
+      expect(pendingRow?.message).toContain('grok-4.7');
+      expect(pendingRow?.message).toContain('grok-4.8');
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
   });
 
   it('keeps event rows when the cooldown is disabled', async () => {

@@ -62,12 +62,19 @@ type AggregatorEntry = {
   pendingStorm: StormEntry | null;
 };
 
-type PersistedStorm = Omit<StormEntry, 'finalWritten'>;
+/**
+ * 持久化风暴条目，与内存中的 StormEntry 完全一致。
+ * finalWritten 必须落库：重启后要据此区分"旧风暴已封板、可随过期一起丢弃"与
+ * "旧风暴未封板、必须恢复并重试封板"，否则整段新风暴会随旧风暴一起被丢弃。
+ */
+type PersistedStorm = StormEntry;
 type PersistedEntry = {
   lastPushAtMs: number;
   suppressedCount: number;
   pushGeneration: number;
   storm?: PersistedStorm | null;
+  /** 尚未发布的下一段风暴：已插入 events 行但还没替换旧 storm，崩溃后必须可恢复 */
+  pendingStorm?: PersistedStorm | null;
 };
 type PersistedState = Record<string, PersistedEntry>;
 
@@ -144,25 +151,18 @@ function loadPersistedState(): Promise<void> {
           pushGeneration: Number(value.pushGeneration) || 0,
           pendingStorm: null,
         };
-        const storm = value.storm;
-        if (
-          storm
-          && Number.isFinite(storm.eventId)
-          && storm.eventId > 0
-          && storm.meta
-          && (nowMs - Number(storm.lastAtMs || 0)) <= STORM_CLOSE_MS
-        ) {
-          entry.storm = {
-            eventId: Number(storm.eventId),
-            count: Number(storm.count) || 1,
-            models: Array.isArray(storm.models) ? storm.models.filter((item) => typeof item === 'string') : [],
-            reasons: Array.isArray(storm.reasons) ? storm.reasons.filter((item) => typeof item === 'string') : [],
-            firstAtMs: Number(storm.firstAtMs) || nowMs,
-            lastAtMs: Number(storm.lastAtMs) || nowMs,
-            active: true,
-            finalWritten: false,
-            meta: storm.meta,
-          };
+        // M2: 旧风暴未封板（finalWritten=false）即使已超过 STORM_CLOSE_MS 也要恢复，
+        // 让 flush 能重试封板；仅丢弃已封板的旧风暴。若连同 pendingStorm 一起丢弃，
+        // 崩溃/重启会静默丢掉整段新风暴（含已插入 events 行的计数）。
+        const storm = restoreStorm(value.storm, nowMs, false);
+        if (storm) entry.storm = storm;
+        // M2: pendingStorm 与 storm 一样必须恢复，否则重启后上一段计数与 eventId 丢失。
+        const pendingStorm = restoreStorm(value.pendingStorm, nowMs, true);
+        if (pendingStorm) entry.pendingStorm = pendingStorm;
+        // 有待重试的封板/发布时标记 dirty，重启后即使没有新告警也能在下一个周期完成写回
+        if (entry.pendingStorm || (entry.storm && !entry.storm.finalWritten)) {
+          dirtyGeneration += 1;
+          dirty = true;
         }
         memoryState.set(key, entry);
       }
@@ -175,6 +175,33 @@ function loadPersistedState(): Promise<void> {
   return loadPromise;
 }
 
+/**
+ * 从持久化 JSON 还原风暴条目。
+ * - storm：未封板的一律恢复（哪怕已过期），已封板的过期风暴才丢弃；
+ * - pendingStorm：同样一律恢复，它是"已插入 events 行但尚未发布"的计数，丢了就是静默丢数据。
+ */
+function restoreStorm(value: PersistedStorm | null | undefined, nowMs: number, isPending: boolean): StormEntry | null {
+  if (!value || typeof value !== 'object') return null;
+  const eventId = Number(value.eventId);
+  if (!Number.isFinite(eventId) || eventId <= 0) return null;
+  if (!value.meta || typeof value.meta !== 'object') return null;
+  const finalWritten = value.finalWritten === true;
+  // pendingStorm 永远保留；旧 storm 仅在"已封板且已过期"时丢弃
+  if (!isPending && finalWritten && (nowMs - Number(value.lastAtMs || 0)) > STORM_CLOSE_MS) return null;
+  return {
+    eventId,
+    count: Number(value.count) || 1,
+    models: Array.isArray(value.models) ? value.models.filter((item) => typeof item === 'string') : [],
+    reasons: Array.isArray(value.reasons) ? value.reasons.filter((item) => typeof item === 'string') : [],
+    firstAtMs: Number(value.firstAtMs) || nowMs,
+    lastAtMs: Number(value.lastAtMs) || nowMs,
+    // 过期风暴恢复为非 active，等 closeExpiredStorm/下一次评估时走封板路径
+    active: isPending ? true : (nowMs - Number(value.lastAtMs || 0)) <= STORM_CLOSE_MS,
+    finalWritten,
+    meta: value.meta,
+  };
+}
+
 async function persistState(): Promise<void> {
   const payload: PersistedState = {};
   for (const [key, value] of memoryState.entries()) {
@@ -184,8 +211,12 @@ async function persistState(): Promise<void> {
       pushGeneration: value.pushGeneration,
     };
     if (value.storm && value.storm.eventId > 0) {
-      const { finalWritten: _finalWritten, ...storm } = value.storm;
-      entry.storm = storm;
+      entry.storm = { ...value.storm };
+    }
+    // M2: pendingStorm 必须落库，否则进程崩溃/重启后上一段风暴（连同已插入的
+    // events 行与计数）会被静默丢弃——"最多丢 5 秒"的说法不成立。
+    if (value.pendingStorm && value.pendingStorm.eventId > 0) {
+      entry.pendingStorm = { ...value.pendingStorm };
     }
     payload[key] = entry;
   }
@@ -422,7 +453,11 @@ export async function evaluateAggregatedNotification(input: {
     const stormExpired = !entry.storm
       || !entry.storm.active
       || (nowMs - entry.storm.lastAtMs) > STORM_CLOSE_MS;
-    if (stormExpired) {
+    // M1: 旧 storm 已 inactive 但上一段 pendingStorm 还没发布（封板写失败、或进程刚恢复）时，
+    // 必须续写原对象而不是无条件新建：新建会丢掉 pendingStorm 连同它已插入的 events 行与
+    // 计数，并再 insert 一条孤儿行（旧行永远停在 baseMessage、count 回 1）。
+    // 新 storm 的发布权只属于 flush：封板写成功后才替换旧 storm。
+    if (stormExpired && !entry.pendingStorm) {
       entry.pendingStorm = {
         eventId: 0,
         count: 0,

@@ -275,7 +275,9 @@ describe('claude count_tokens proxy route', () => {
 
     const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
     expect(targetUrl).toBe('https://gateway.example.com/v1/messages/count_tokens?beta=true');
-    expect(options.headers['x-api-key']).toBe('sk-gateway');
+    // openai-platform 网关不是 Anthropic 原生站点：用 Authorization Bearer，不能用 x-api-key
+    expect(options.headers['x-api-key']).toBeUndefined();
+    expect(options.headers.Authorization).toBe('Bearer sk-gateway');
     expect(options.headers['anthropic-version']).toBe('2023-06-01');
   });
 

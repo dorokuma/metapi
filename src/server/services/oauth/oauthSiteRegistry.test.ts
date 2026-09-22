@@ -48,4 +48,30 @@ describe('oauth site registry', () => {
     expect(rows.filter((row) => row.platform === 'antigravity')).toHaveLength(1);
     expect(rows.filter((row) => row.platform === 'claude')).toHaveLength(1);
   });
+
+  it('does not recreate deleted oauth provider sites when the switch is off', async () => {
+    const {
+      ensureOauthProviderSitesExist,
+      setOauthProviderSiteAutoCreateEnabled,
+    } = await import('./oauthSiteRegistry.js');
+
+    await setOauthProviderSiteAutoCreateEnabled(true);
+    await ensureOauthProviderSitesExist();
+    expect(await db.select().from(schema.sites).all()).toHaveLength(4);
+
+    await setOauthProviderSiteAutoCreateEnabled(false);
+    await db.delete(schema.sites).run();
+
+    await ensureOauthProviderSitesExist();
+    const rows = await db.select().from(schema.sites).all();
+    expect(rows.filter((row) => row.platform === 'codex')).toHaveLength(0);
+    expect(rows.filter((row) => row.platform === 'claude')).toHaveLength(0);
+    expect(rows.filter((row) => row.platform === 'gemini-cli')).toHaveLength(0);
+    expect(rows.filter((row) => row.platform === 'antigravity')).toHaveLength(0);
+
+    // 开关拨回 true 后恢复自动补齐行为（保持历史语义）
+    await setOauthProviderSiteAutoCreateEnabled(true);
+    await ensureOauthProviderSitesExist();
+    expect(await db.select().from(schema.sites).all()).toHaveLength(4);
+  });
 });

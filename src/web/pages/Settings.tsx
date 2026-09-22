@@ -71,6 +71,7 @@ type RuntimeSettings = {
   codexUpstreamWebsocketEnabled: boolean;
   responsesCompactFallbackToResponsesEnabled: boolean;
   disableCrossProtocolFallback: boolean;
+  oauthProviderSiteAutoCreateEnabled: boolean;
   proxySessionChannelConcurrencyLimit: number;
   proxySessionChannelQueueWaitMs: number;
   routingFallbackUnitCost: number;
@@ -353,6 +354,7 @@ export default function Settings() {
     codexUpstreamWebsocketEnabled: false,
     responsesCompactFallbackToResponsesEnabled: false,
     disableCrossProtocolFallback: false,
+    oauthProviderSiteAutoCreateEnabled: true,
     proxySessionChannelConcurrencyLimit: 2,
     proxySessionChannelQueueWaitMs: 1500,
     routingFallbackUnitCost: 1,
@@ -678,6 +680,7 @@ export default function Settings() {
         codexUpstreamWebsocketEnabled: !!runtimeInfo.codexUpstreamWebsocketEnabled,
         responsesCompactFallbackToResponsesEnabled: !!runtimeInfo.responsesCompactFallbackToResponsesEnabled,
         disableCrossProtocolFallback: !!runtimeInfo.disableCrossProtocolFallback,
+        oauthProviderSiteAutoCreateEnabled: runtimeInfo.oauthProviderSiteAutoCreateEnabled !== false,
         proxySessionChannelConcurrencyLimit: Number(runtimeInfo.proxySessionChannelConcurrencyLimit) >= 0
           ? Math.trunc(Number(runtimeInfo.proxySessionChannelConcurrencyLimit))
           : 2,
@@ -1059,6 +1062,9 @@ export default function Settings() {
           runtime.routeFailureCooldownMaxUnit,
         ),
         disableCrossProtocolFallback: runtime.disableCrossProtocolFallback,
+        ...(runtime.oauthProviderSiteAutoCreateEnabled !== undefined
+          ? { oauthProviderSiteAutoCreateEnabled: runtime.oauthProviderSiteAutoCreateEnabled }
+          : {}),
       });
       toast.success('Routing weights saved');
     } catch (err: any) {
@@ -2161,6 +2167,27 @@ export default function Settings() {
               </span>
               <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
                 仅影响 chat / messages / responses 之间的协议切换；不会关闭同协议兼容重试、OAuth 刷新或通道级重试。
+              </span>
+            </span>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 12, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              data-testid="settings-oauth-site-autocreate-toggle"
+              checked={runtime.oauthProviderSiteAutoCreateEnabled}
+              onChange={(e) => setRuntime((prev) => ({
+                ...prev,
+                oauthProviderSiteAutoCreateEnabled: e.target.checked,
+              }))}
+              style={{ marginTop: 2 }}
+            />
+            <span>
+              <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                启动时自动补齐 OAuth 站点
+              </span>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
+                每次启动会把 codex / claude / gemini-cli / antigravity 四个 OAuth 站点自动加回站点列表。删了又长回来就关掉它（关闭后仅在你主动发起 OAuth 登录时才创建）。
               </span>
             </span>
           </label>

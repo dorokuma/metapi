@@ -45,6 +45,7 @@ import {
   stopModelAvailabilityProbeScheduler,
 } from '../../services/modelAvailabilityProbeService.js';
 import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
+import { setOauthProviderSiteAutoCreateEnabled } from '../../services/oauth/oauthSiteRegistry.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -56,6 +57,7 @@ interface RuntimeSettingsBody {
   codexUpstreamWebsocketEnabled?: boolean;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
+  oauthProviderSiteAutoCreateEnabled?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
   proxyDebugTraceEnabled?: boolean;
@@ -725,6 +727,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     codexUpstreamWebsocketEnabled: config.codexUpstreamWebsocketEnabled,
     responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
+    oauthProviderSiteAutoCreateEnabled: config.oauthProviderSiteAutoCreateEnabled,
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
     proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
@@ -1232,6 +1235,23 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.disableCrossProtocolFallback = nextValue;
       upsertSetting('disable_cross_protocol_fallback', config.disableCrossProtocolFallback);
+    }
+
+    if (body.oauthProviderSiteAutoCreateEnabled !== undefined) {
+      let nextValue = true;
+      try {
+        nextValue = parseBooleanFlag(body.oauthProviderSiteAutoCreateEnabled, 'OAuth 站点自动创建开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || 'OAuth 站点自动创建开关格式无效',
+        });
+      }
+
+      await setOauthProviderSiteAutoCreateEnabled(nextValue);
+      changedLabels.push(nextValue
+        ? '启动时自动补齐 OAuth 站点'
+        : '重启后不再自动创建 OAuth 站点（OAuth 登录时仍会按需创建）');
     }
 
     if (body.proxySessionChannelConcurrencyLimit !== undefined) {

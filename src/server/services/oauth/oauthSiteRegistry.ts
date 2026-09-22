@@ -2,6 +2,30 @@ import { and, eq, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
 import { listOAuthProviderDefinitions, type OAuthProviderDefinition } from './providers.js';
+import { upsertSetting } from '../../db/upsertSetting.js';
+
+/**
+ * 启动时是否自动补齐 OAuth provider 站点。默认 true（保持历史行为）；
+ * 置为 false 后，即使库里的 OAuth 站点被删掉也不会在重启时重建。
+ */
+export const OAUTH_PROVIDER_SITE_AUTOCREATE_SETTING_KEY = 'oauth_provider_site_autocreate_enabled';
+
+export async function isOauthProviderSiteAutoCreateEnabled(): Promise<boolean> {
+  const row = await db.select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(eq(schema.settings.key, OAUTH_PROVIDER_SITE_AUTOCREATE_SETTING_KEY))
+    .get();
+  if (!row?.value) return true;
+  try {
+    return JSON.parse(row.value) === true;
+  } catch {
+    return true;
+  }
+}
+
+export async function setOauthProviderSiteAutoCreateEnabled(enabled: boolean): Promise<void> {
+  await upsertSetting(OAUTH_PROVIDER_SITE_AUTOCREATE_SETTING_KEY, enabled);
+}
 
 function isUniqueConstraintError(error: unknown): boolean {
   if (!error) return false;
@@ -55,6 +79,7 @@ export async function ensureOauthProviderSite(definition: OAuthProviderDefinitio
 }
 
 export async function ensureOauthProviderSitesExist(): Promise<void> {
+  if (!(await isOauthProviderSiteAutoCreateEnabled())) return;
   const definitions = listOAuthProviderDefinitions();
   for (const definition of definitions) {
     await ensureOauthProviderSite(definition);

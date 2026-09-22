@@ -68,6 +68,11 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.disableCrossProtocolFallback = disableCrossProtocolFallback;
   }
 
+  const oauthProviderSiteAutoCreateEnabled = parseSettingFromMap<boolean>(settingsMap, 'oauth_provider_site_autocreate_enabled');
+  if (typeof oauthProviderSiteAutoCreateEnabled === 'boolean') {
+    config.oauthProviderSiteAutoCreateEnabled = oauthProviderSiteAutoCreateEnabled;
+  }
+
   const proxyErrorKeywords = parseSettingFromMap<string[] | string>(settingsMap, 'proxy_error_keywords');
   if (proxyErrorKeywords !== undefined) {
     config.proxyErrorKeywords = toStringList(proxyErrorKeywords);

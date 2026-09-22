@@ -104,12 +104,12 @@ describe('notification templates', () => {
     expect(rendered).toMatchObject({ title: 'default-title', body: 'default-body', usedTemplate: false });
   });
 
-  it('applies the telegram template body and markdown parse mode', async () => {
+  it('applies the telegram template body with the storm count and merges the title into the text', async () => {
     const { saveNotificationTemplates } = await import('./notificationTemplates.js');
     await saveNotificationTemplates({
       telegram: {
         title: 'TG {{level}}',
-        body: '*{{title}}*\n`{{message}}`\n累计 {{count}} 次',
+        body: '*{{title}}*\n{{message}}\n累计 {{count}} 次，涉及：{{models}}',
         parseMode: 'Markdown',
       },
     });
@@ -123,13 +123,83 @@ describe('notification templates', () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
 
     const { sendNotification } = await import('./notifyService.js');
-    const result = await sendNotification('代理全部失败', '模型=grok-4.6', 'error');
+    const result = await sendNotification('代理全部失败', '模型=grok-4.6', 'error', {
+      storm: { count: 6, models: ['grok-4.6', 'grok-4.7'] },
+    });
     expect(result.succeeded).toBe(1);
 
     const [, init] = fetchMock.mock.calls[0] as [string, any];
     const payload = JSON.parse(init.body);
     expect(payload.parse_mode).toBe('Markdown');
-    expect(payload.text).toBe('*代理全部失败*\n`模型=grok-4.6`\n累计 0 次');
+    // 标题模板不再被丢弃：拼在正文前方
+    expect(payload.text).toContain('TG error');
+    expect(payload.text).toContain('累计 6 次，涉及：grok-4.6 / grok-4.7');
+  });
+
+  it('renders count and models as empty strings for non-storm alerts', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({
+      telegram: { body: '{{title}}｜累计 {{count}} 次｜{{models}}' },
+    });
+
+    const { config } = await import('../config.js');
+    config.telegramEnabled = true;
+    config.telegramBotToken = 'tg-token';
+    config.telegramChatId = 'chat-1';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('Token 已失效', '账号 a 失效', 'error');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, any];
+    expect(JSON.parse(init.body).text).toBe('Token 已失效｜累计  次｜');
+  });
+
+  it('retries telegram without parse_mode when the markup is rejected', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({
+      telegram: { body: '*{{title}}*\n{{message}}', parseMode: 'Markdown' },
+    });
+
+    const { config } = await import('../config.js');
+    config.telegramEnabled = true;
+    config.telegramBotToken = 'tg-token';
+    config.telegramChatId = 'chat-1';
+    config.smtpEnabled = false;
+
+    // 第一次带 parse_mode 被拒，第二次去掉 parse_mode 成功
+    fetchMock
+      .mockResolvedValueOnce({ ok: false, status: 400 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    const result = await sendNotification('代理全部失败', '含 _ 下划线 的消息', 'error');
+    expect(result.succeeded).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const [, secondInit] = fetchMock.mock.calls[1] as [string, any];
+    expect(JSON.parse(secondInit.body).parse_mode).toBeUndefined();
+  });
+
+  it('drops the official wrapper for wecom when a template is set', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({ webhook: { body: '自定义：{{title}} - {{message}}' } });
+
+    const { config } = await import('../config.js');
+    config.webhookEnabled = true;
+    config.webhookUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ errcode: 0 }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    const result = await sendNotification('代理全部失败', '模型=x', 'error');
+    expect(result.succeeded).toBe(1);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, any];
+    const payload = JSON.parse(init.body);
+    expect(payload.text.content).toBe('自定义：代理全部失败 - 模型=x');
+    expect(payload.text.content).not.toContain('[metapi]');
   });
 
   it('keeps the default telegram payload shape when no template is set', async () => {
@@ -178,6 +248,25 @@ describe('notification templates', () => {
 
     const [, init] = fetchMock.mock.calls[0] as [string, any];
     expect(JSON.parse(init.body).message).toBe('W:代理全部失败::模型=x::error');
+  });
+
+  it('validates template payloads strictly instead of silently clearing them', async () => {
+    const { parseNotificationTemplatesInput } = await import('./notificationTemplates.js');
+
+    expect(parseNotificationTemplatesInput(undefined)).toEqual({ success: true, data: {} });
+    expect(parseNotificationTemplatesInput({ telegram: { body: 'ok' } })).toEqual({
+      success: true,
+      data: { telegram: { body: 'ok' } },
+    });
+
+    // 非对象：以前会被静默收成 {}（等于清空），现在必须报错
+    expect(parseNotificationTemplatesInput('nope').success).toBe(false);
+    expect(parseNotificationTemplatesInput(null).success).toBe(false);
+    expect(parseNotificationTemplatesInput([]).success).toBe(false);
+    expect(parseNotificationTemplatesInput({ unknownChannel: {} }).success).toBe(false);
+    expect(parseNotificationTemplatesInput({ telegram: { body: 42 } }).success).toBe(false);
+    expect(parseNotificationTemplatesInput({ telegram: { parseMode: 'Sideways' } }).success).toBe(false);
+    expect(parseNotificationTemplatesInput({ telegram: { body: 'x'.repeat(5000) } }).success).toBe(false);
   });
 
   it('truncates oversized template bodies to the documented limit', async () => {

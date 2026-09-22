@@ -43,7 +43,9 @@ export type NotificationTemplateVars = {
   title: string;
   message: string;
   level: string;
+  /** 风暴聚合累计次数；仅聚合路径有值，未提供时渲染为空串而非 0。 */
   count?: number;
+  /** 涉及模型列表；未提供时渲染为空串。 */
   models?: string[];
   localTime: string;
   timeZone: string;
@@ -52,6 +54,62 @@ export type NotificationTemplateVars = {
 
 const CHANNELS: NotificationTemplateChannel[] = ['webhook', 'bark', 'serverchan', 'telegram', 'smtp'];
 const PARSE_MODES: NotificationParseMode[] = ['', 'Markdown', 'HTML'];
+
+export type NotificationTemplatesParseResult =
+  | { success: true; data: NotificationTemplates }
+  | { success: false; error: string };
+
+/**
+ * 路由层用的严格校验：拒绝非法结构而不是静默清空/截断。
+ * 备份导入等内部路径仍可走宽松的 normalizeNotificationTemplates。
+ */
+export function parseNotificationTemplatesInput(raw: unknown): NotificationTemplatesParseResult {
+  if (raw === undefined) return { success: true, data: {} };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { success: false, error: 'Invalid notificationTemplates. Expected an object keyed by channel.' };
+  }
+
+  const record = raw as Record<string, unknown>;
+  const next: NotificationTemplates = {};
+  for (const key of Object.keys(record)) {
+    if (!(CHANNELS as string[]).includes(key)) {
+      return { success: false, error: `Invalid notificationTemplates channel: ${key}.` };
+    }
+    const channel = key as NotificationTemplateChannel;
+    const value = record[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      return { success: false, error: `Invalid notificationTemplates.${key}. Expected an object.` };
+    }
+
+    const template = value as Record<string, unknown>;
+    const normalized: NotificationTemplate = {};
+    for (const field of ['title', 'body'] as const) {
+      const rawField = template[field];
+      if (rawField === undefined || rawField === null) continue;
+      if (typeof rawField !== 'string') {
+        return { success: false, error: `Invalid notificationTemplates.${key}.${field}. Expected a string.` };
+      }
+      const trimmed = rawField.trim();
+      const limit = field === 'title' ? NOTIFICATION_TEMPLATE_MAX_TITLE_LENGTH : NOTIFICATION_TEMPLATE_MAX_BODY_LENGTH;
+      if (trimmed.length > limit) {
+        return { success: false, error: `Invalid notificationTemplates.${key}.${field}. Max length is ${limit}.` };
+      }
+      if (trimmed) normalized[field] = trimmed;
+    }
+    if (template.parseMode !== undefined && template.parseMode !== null) {
+      if (typeof template.parseMode !== 'string' || !(PARSE_MODES as string[]).includes(template.parseMode)) {
+        return { success: false, error: `Invalid notificationTemplates.${key}.parseMode. Expected '', Markdown or HTML.` };
+      }
+      if (template.parseMode) normalized.parseMode = template.parseMode as NotificationParseMode;
+    }
+    if (normalized.title || normalized.body || normalized.parseMode) {
+      next[channel] = normalized;
+    }
+  }
+
+  return { success: true, data: next };
+}
 
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -108,17 +166,25 @@ export async function saveNotificationTemplates(raw: unknown): Promise<Notificat
 }
 
 export function buildTemplateVarRecord(vars: NotificationTemplateVars): Record<string, string> {
-  return {
+  const record: Record<string, string> = {
     title: vars.title,
     message: vars.message,
     level: vars.level,
-    count: String(vars.count ?? 0),
-    models: (vars.models || []).join(' / '),
+    // count/models 只在风暴聚合路径有值；未提供时渲染为空串，避免误导性的 "0"
+    count: '',
+    models: '',
     local_time: vars.localTime,
     utc_time: new Date().toISOString(),
     timezone: vars.timeZone,
     app: vars.app || 'metapi',
   };
+  if (typeof vars.count === 'number' && Number.isFinite(vars.count)) {
+    record.count = String(Math.max(0, Math.trunc(vars.count)));
+  }
+  if (Array.isArray(vars.models)) {
+    record.models = vars.models.join(' / ');
+  }
+  return record;
 }
 
 export type RenderedNotificationTemplate = {

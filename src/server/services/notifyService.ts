@@ -16,12 +16,17 @@ import {
 } from './notificationTemplates.js';
 import { formatLocalDateTime, getResolvedTimeZone } from './localTimeService.js';
 
+const BARK_MAX_BODY_LENGTH = 3500;
+const TELEGRAM_MAX_TEXT_LENGTH = 3900;
+
 type NotificationChannel = 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp';
 
 export type SendNotificationOptions = {
   bypassThrottle?: boolean;
   requireChannel?: boolean;
   throwOnFailure?: boolean;
+  /** 风暴聚合上下文：供 {{count}} / {{models}} 变量渲染。 */
+  storm?: { count?: number; models?: string[] };
 };
 
 export type NotificationDispatchResult = {
@@ -142,7 +147,7 @@ export async function sendNotification(
 ): Promise<NotificationDispatchResult> {
   const now = new Date();
   const timeFootnote = buildTimeFootnote(now);
-  const { bypassThrottle = false, requireChannel = false, throwOnFailure = false } = options;
+  const { bypassThrottle = false, requireChannel = false, throwOnFailure = false, storm } = options;
   const cooldownMs = Math.max(0, Math.trunc(config.notifyCooldownSec)) * 1000;
   let resolvedMessage = message;
   if (!bypassThrottle && cooldownMs > 0) {
@@ -173,6 +178,8 @@ export async function sendNotification(
     localTime: formatLocalDateTime(now),
     timeZone: getResolvedTimeZone(),
   };
+  if (typeof storm?.count === 'number') templateVars.count = storm.count;
+  if (Array.isArray(storm?.models)) templateVars.models = storm.models;
   const renderChannel = (
     channel: 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp',
     fallback: { title: string; body: string },
@@ -182,25 +189,32 @@ export async function sendNotification(
 
   if (config.webhookEnabled && config.webhookUrl) {
     const webhookRendered = renderChannel('webhook', { title, body: resolvedMessage });
+    const isWeComWebhook = isWeComBotWebhook(config.webhookUrl);
+    const isFeishuWebhook = isFeishuBotWebhook(config.webhookUrl);
+    // 自定义模板时不套官方 [metapi][LEVEL] 头与时间脚注，内容完全由模板决定
+    const weComFeishuContent = webhookRendered.usedTemplate
+      ? [
+        templates.webhook?.title ? webhookRendered.title : '',
+        webhookRendered.body,
+      ].filter(Boolean).join('\n')
+      : null;
     tasks.push(
       {
         channel: 'webhook',
         run: async () => {
-          const isWeComWebhook = isWeComBotWebhook(config.webhookUrl);
-          const isFeishuWebhook = isFeishuBotWebhook(config.webhookUrl);
           let body: string;
           if (isWeComWebhook) {
             body = JSON.stringify({
               msgtype: 'text',
               text: {
-                content: buildWeComText(webhookRendered.title, webhookRendered.body, level, timeFootnote),
+                content: weComFeishuContent ?? buildWeComText(title, resolvedMessage, level, timeFootnote),
               },
             });
           } else if (isFeishuWebhook) {
             body = JSON.stringify({
               msg_type: 'text',
               content: {
-                text: buildFeishuText(webhookRendered.title, webhookRendered.body, level, timeFootnote),
+                text: weComFeishuContent ?? buildFeishuText(title, resolvedMessage, level, timeFootnote),
               },
             });
           } else {
@@ -251,7 +265,11 @@ export async function sendNotification(
   if (config.barkEnabled && config.barkUrl) {
     const barkRendered = renderChannel('bark', { title, body: resolvedMessage });
     const barkBase = config.barkUrl.replace(/\/+$/, '');
-    const url = `${barkBase}/${encodeURIComponent(barkRendered.title)}/${encodeURIComponent(barkRendered.body)}?group=AllApiHub&level=${encodeURIComponent(level)}`;
+    // Bark 把正文放进 URL：超长正文会导致请求失败，按渠道上限截断并保留提示
+    const barkBody = barkRendered.body.length > BARK_MAX_BODY_LENGTH
+      ? `${barkRendered.body.slice(0, BARK_MAX_BODY_LENGTH)}…`
+      : barkRendered.body;
+    const url = `${barkBase}/${encodeURIComponent(barkRendered.title)}/${encodeURIComponent(barkBody)}?group=AllApiHub&level=${encodeURIComponent(level)}`;
     tasks.push({
       channel: 'bark',
       run: async () => {
@@ -292,40 +310,55 @@ export async function sendNotification(
       body: buildTelegramText(title, resolvedMessage, level, timeFootnote),
     });
     const telegramText = telegramRendered.usedTemplate
-      ? telegramRendered.body
+      ? [
+        templates.telegram?.title ? telegramRendered.title : '',
+        telegramRendered.body,
+      ].filter(Boolean).join('\n')
       : buildTelegramText(title, resolvedMessage, level, timeFootnote);
     const telegramApiBaseUrl = String(config.telegramApiBaseUrl || 'https://api.telegram.org').replace(/\/+$/, '');
     const telegramApiUrl = `${telegramApiBaseUrl}/bot${config.telegramBotToken}/sendMessage`;
     const telegramMessageThreadId = Number.parseInt(String(config.telegramMessageThreadId || '').trim(), 10);
+    const telegramParseMode = telegramRendered.parseMode;
+    const sendTelegram = async (withParseMode: boolean): Promise<void> => {
+      const response = await fetch(telegramApiUrl, withExplicitProxyRequestInit(
+        config.telegramUseSystemProxy ? config.systemProxyUrl : null,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: config.telegramChatId,
+            ...(Number.isFinite(telegramMessageThreadId) && telegramMessageThreadId > 0
+              ? { message_thread_id: telegramMessageThreadId }
+              : {}),
+            text: telegramText.length > TELEGRAM_MAX_TEXT_LENGTH
+              ? `${telegramText.slice(0, TELEGRAM_MAX_TEXT_LENGTH)}\n\n...(truncated)`
+              : telegramText,
+            disable_web_page_preview: true,
+            ...(withParseMode && telegramParseMode ? { parse_mode: telegramParseMode } : {}),
+          }),
+        },
+      ));
+      if (!response.ok) {
+        throw new Error(`Telegram 响应状态 ${response.status}`);
+      }
+      let payload: { ok?: boolean; description?: string } | null = null;
+      try {
+        payload = await response.json() as { ok?: boolean; description?: string };
+      } catch {}
+      if (payload?.ok === false) {
+        throw new Error(payload.description || 'Telegram 返回失败');
+      }
+    };
     tasks.push({
       channel: 'telegram',
       run: async () => {
-        const telegramRequestInit = withExplicitProxyRequestInit(
-          config.telegramUseSystemProxy ? config.systemProxyUrl : null,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: config.telegramChatId,
-              ...(Number.isFinite(telegramMessageThreadId) && telegramMessageThreadId > 0
-                ? { message_thread_id: telegramMessageThreadId }
-                : {}),
-              text: telegramText,
-              disable_web_page_preview: true,
-              ...(telegramRendered.parseMode ? { parse_mode: telegramRendered.parseMode } : {}),
-            }),
-          },
-        );
-        const response = await fetch(telegramApiUrl, telegramRequestInit);
-        if (!response.ok) {
-          throw new Error(`Telegram 响应状态 ${response.status}`);
-        }
-        let payload: { ok?: boolean; description?: string } | null = null;
         try {
-          payload = await response.json() as { ok?: boolean; description?: string };
-        } catch {}
-        if (payload?.ok === false) {
-          throw new Error(payload.description || 'Telegram 返回失败');
+          await sendTelegram(true);
+        } catch (error) {
+          // parse_mode 被拒收（上游原因里的 _ * 等）时去掉解析模式重发一次，
+          // 避免整场告警因为格式问题彻底丢失
+          if (!telegramParseMode) throw error;
+          await sendTelegram(false);
         }
       },
     });

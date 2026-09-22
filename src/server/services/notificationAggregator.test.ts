@@ -126,10 +126,76 @@ describe('notificationAggregator', () => {
     expect(first.shouldPush).toBe(true);
     expect(second.shouldPush).toBe(true);
 
+    // 冷静期为 0 时保持历史行为：逐条落库，消息中心不为空
     const rows = await db.select().from(schema.events)
       .where(eq(schema.events.title, '代理全部失败'))
       .all();
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(2);
+  });
+
+  it('serializes concurrent alerts so only one row and one push happen at storm open', async () => {
+    const { evaluateAggregatedNotification, flushAggregatedState } = await import('./notificationAggregator.js');
+
+    // 并发打开发瞬间：代理失败是 fire-and-forget 的，历史上每个调用都会占一个坑
+    const decisions = await Promise.all(Array.from({ length: 12 }, (_unused, index) => evaluateAggregatedNotification({
+      ...ALERT,
+      message: `模型=model-${index}, 原因=No available channels after retries`,
+      model: `model-${index}`,
+      reason: 'No available channels after retries',
+    })));
+
+    const pushed = decisions.filter((decision) => decision.shouldPush);
+    expect(pushed).toHaveLength(1);
+    // 首推发生在队列最前，此刻风暴计数为 1；其余 11 条在冷却期内被累计进行情行
+    expect(pushed[0].count).toBe(1);
+
+    await flushAggregatedState();
+    const rows = await db.select().from(schema.events)
+      .where(eq(schema.events.title, '代理全部失败'))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toContain('已累计 12 次');
+  });
+
+  it('does not consume the window when every channel fails and a retry is allowed', async () => {
+    const { releaseAggregatedPushWindow } = await import('./notificationAggregator.js');
+
+    const first = await evaluateOnce('grok-4.6', 'No available channels after retries');
+    expect(first.shouldPush).toBe(true);
+
+    // 模拟推送失败：调用方释放窗口
+    await releaseAggregatedPushWindow('error', '代理全部失败');
+
+    const second = await evaluateOnce('grok-4.7', 'upstream returned HTTP 400');
+    expect(second.shouldPush).toBe(true);
+  });
+
+  it('re-creates the storm row when the events row was cleaned up', async () => {
+    const { evaluateAggregatedNotification, flushAggregatedState } = await import('./notificationAggregator.js');
+
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'first' });
+    await flushAggregatedState();
+    expect(await db.select().from(schema.events).all()).toHaveLength(1);
+
+    // 用户在消息中心清空（或日志清理）后，聚合器必须重插而不是刷幽灵 id
+    await db.delete(schema.events).run();
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'second' });
+    await flushAggregatedState();
+
+    const after = await db.select().from(schema.events).all();
+    expect(after).toHaveLength(1);
+    expect(after[0].message).toContain('涉及模型');
+  });
+
+  it('keeps event rows when the cooldown is disabled', async () => {
+    config.notifyCooldownSec = 0;
+    await evaluateOnce('grok-4.6', 'No available channels after retries');
+    await evaluateOnce('grok-4.7', 'upstream returned HTTP 400');
+
+    const rows = await db.select().from(schema.events)
+      .where(eq(schema.events.title, '代理全部失败'))
+      .all();
+    expect(rows).toHaveLength(2);
   });
 
   it('opens a new storm row after the storm goes quiet', async () => {
@@ -137,19 +203,31 @@ describe('notificationAggregator', () => {
 
     await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'first storm' });
     await flushAggregatedState();
+    expect(await db.select().from(schema.events).all()).toHaveLength(1);
 
-    // 直接把冷却窗口拨到已过期，模拟冷静期结束
+    // 模拟进程重启：清空内存但保留 settings 状态（含风暴行引用）
+    const { resetAggregatedNotificationState } = await import('./notificationAggregator.js');
+    await resetAggregatedNotificationState();
+
+    // 静默未满 10 分钟：重启后续写原行，不开新行
+    const resumed = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'still same storm' });
+    expect(resumed.shouldPush).toBe(false);
+    await flushAggregatedState();
+    expect(await db.select().from(schema.events).all()).toHaveLength(1);
+
+    // 把持久化状态里的风暴静默期拨到 10 分钟以上，再重启：应当开新行
     const stored = JSON.parse(
       (await db.select().from(schema.settings)
         .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
         .get())?.value || '{}',
-    ) as Record<string, { lastPushAtMs: number }>;
+    ) as Record<string, { lastPushAtMs: number; storm?: { lastAtMs: number } | null }>;
     for (const key of Object.keys(stored)) {
       stored[key].lastPushAtMs = Date.now() - 400_000;
+      if (stored[key].storm) stored[key].storm!.lastAtMs = Date.now() - 11 * 60 * 1000;
     }
     const { upsertSetting } = await import('../db/upsertSetting.js');
     await upsertSetting('notification_aggregator_state_v1', stored);
-    await resetForSecondStorm();
+    await resetAggregatedNotificationState();
 
     const decision = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'second storm' });
     expect(decision.shouldPush).toBe(true);

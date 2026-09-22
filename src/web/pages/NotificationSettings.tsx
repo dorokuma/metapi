@@ -50,14 +50,18 @@ function renderPreview(template: NotificationTemplate | undefined, channel: Temp
     const render = (input: string) => input.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, name: string) => (
         Object.prototype.hasOwnProperty.call(PREVIEW_VARS, name) ? PREVIEW_VARS[name] : match
     ));
+    // 与 notifyService 的 subject 规则保持一致：无自定义标题时 SMTP 带官方前缀
+    const fallbackTitle = channel === 'smtp'
+        ? `[metapi][${PREVIEW_VARS.level.toUpperCase()}] ${PREVIEW_VARS.title}`
+        : PREVIEW_VARS.title;
     if (!template || (!template.title && !template.body)) {
         return channel === 'smtp'
-            ? { title: '[metapi][ERROR] 代理全部失败', body: `${PREVIEW_VARS.message}\n\nLevel: error\nLocal Time: ${PREVIEW_VARS.local_time}` }
-            : { title: '代理全部失败', body: `[metapi][ERROR] 代理全部失败\n\n${PREVIEW_VARS.message}\n\nLevel: error\nLocal Time: ${PREVIEW_VARS.local_time}` };
+            ? { title: fallbackTitle, body: `${PREVIEW_VARS.message}\n\nLevel: ${PREVIEW_VARS.level}\nLocal Time: ${PREVIEW_VARS.local_time}` }
+            : { title: fallbackTitle, body: `[metapi][${PREVIEW_VARS.level.toUpperCase()}] ${PREVIEW_VARS.title}\n\n${PREVIEW_VARS.message}\n\nLevel: ${PREVIEW_VARS.level}\nLocal Time: ${PREVIEW_VARS.local_time}` };
     }
     return {
-        title: template.title ? render(template.title) : '代理全部失败',
-        body: template.body ? render(template.body) : `${PREVIEW_VARS.message}\n\nLevel: error`,
+        title: template.title ? render(template.title) : fallbackTitle,
+        body: template.body ? render(template.body) : `${PREVIEW_VARS.message}\n\nLevel: ${PREVIEW_VARS.level}`,
     };
 }
 
@@ -113,6 +117,7 @@ function TemplatePreview({ channel, template }: { channel: TemplateChannel; temp
 }
 
 export default function NotificationSettings() {
+    const templateBodyRef = React.useRef<HTMLTextAreaElement | null>(null);
     const [runtime, setRuntime] = useState<RuntimeSettings>({
         webhookUrl: '',
         barkUrl: '',
@@ -320,7 +325,10 @@ export default function NotificationSettings() {
                             type="button"
                             className="btn btn-ghost"
                             style={{ border: '1px solid var(--color-border)', fontSize: 12 }}
-                            onClick={() => setRuntime((prev) => ({ ...prev, notificationTemplates: {} }))}
+                            onClick={() => {
+                                if (!window.confirm('确定清空所有渠道的自定义模板并恢复默认样式吗？')) return;
+                                setRuntime((prev) => ({ ...prev, notificationTemplates: {} }));
+                            }}
                         >
                             全部恢复默认
                         </button>
@@ -388,16 +396,37 @@ export default function NotificationSettings() {
                                         title={variable.hint}
                                         onClick={() => {
                                             const token = `{{${variable.name}}}`;
+                                            const textarea = templateBodyRef.current;
+                                            const currentBody = runtime.notificationTemplates[activeTemplateChannel]?.body || '';
+                                            let nextBody = `${currentBody}${token}`;
+                                            if (textarea) {
+                                                // 插入到光标处；输入框未聚焦过时退化为追加
+                                                const start = Number.isFinite(textarea.selectionStart)
+                                                    ? Number(textarea.selectionStart)
+                                                    : currentBody.length;
+                                                const end = Number.isFinite(textarea.selectionEnd)
+                                                    ? Number(textarea.selectionEnd)
+                                                    : start;
+                                                nextBody = `${currentBody.slice(0, start)}${token}${currentBody.slice(end)}`;
+                                            }
                                             setRuntime((prev) => {
                                                 const current = prev.notificationTemplates[activeTemplateChannel] || {};
                                                 return {
                                                     ...prev,
                                                     notificationTemplates: {
                                                         ...prev.notificationTemplates,
-                                                        [activeTemplateChannel]: { ...current, body: `${current.body || ''}${token}` },
+                                                        [activeTemplateChannel]: { ...current, body: nextBody },
                                                     },
                                                 };
                                             });
+                                            if (typeof requestAnimationFrame === 'function') {
+                                                requestAnimationFrame(() => {
+                                                    if (!textarea) return;
+                                                    const caret = nextBody.indexOf(token) + token.length;
+                                                    textarea.focus();
+                                                    textarea.setSelectionRange(caret, caret);
+                                                });
+                                            }
                                         }}
                                         style={{
                                             padding: '3px 10px',
@@ -415,6 +444,7 @@ export default function NotificationSettings() {
                                 ))}
                             </div>
                             <textarea
+                                ref={templateBodyRef}
                                 data-testid="template-body-input"
                                 value={runtime.notificationTemplates[activeTemplateChannel]?.body || ''}
                                 onChange={(e) => setRuntime((prev) => {

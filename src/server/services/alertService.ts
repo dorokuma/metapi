@@ -1,7 +1,10 @@
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
-import { evaluateAggregatedNotification } from './notificationAggregator.js';
+import {
+  evaluateAggregatedNotification,
+  releaseAggregatedPushWindow,
+} from './notificationAggregator.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { appendSessionTokenRebindHint } from './alertRules.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
@@ -61,10 +64,19 @@ export async function reportProxyAllFailed(params: { model: string; reason: stri
 
   if (!decision.shouldPush) return;
 
-  await sendNotification(
+  const result = await sendNotification(
     '代理全部失败',
     decision.message,
     'error',
-    { bypassThrottle: true },
+    {
+      bypassThrottle: true,
+      storm: { count: decision.count, models: decision.models },
+    },
   );
+
+  // 渠道存在但全部发送失败（如 Telegram 拒收）时释放冷却窗口，
+  // 避免一次失败把整个冷静期消耗掉。无渠道时不释放（没有重试意义）。
+  if (result.attempted > 0 && result.succeeded === 0) {
+    await releaseAggregatedPushWindow('error', '代理全部失败');
+  }
 }

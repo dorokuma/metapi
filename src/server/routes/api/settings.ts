@@ -49,6 +49,7 @@ import { setOauthProviderSiteAutoCreateEnabled } from '../../services/oauth/oaut
 import {
   NOTIFICATION_TEMPLATE_VARIABLES,
   loadNotificationTemplates,
+  parseNotificationTemplatesInput,
   saveNotificationTemplates,
   type NotificationTemplates,
 } from '../../services/notificationTemplates.js';
@@ -1275,17 +1276,15 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     if (body.notificationTemplates !== undefined) {
-      let savedTemplates: NotificationTemplates;
-      try {
-        savedTemplates = await saveNotificationTemplates(body.notificationTemplates);
-      } catch (err: any) {
+      const parsedTemplates = parseNotificationTemplatesInput(body.notificationTemplates);
+      if (!parsedTemplates.success) {
         return reply.code(400).send({
           success: false,
-          message: err?.message || '推送模板格式无效',
+          message: parsedTemplates.error,
         });
       }
+      await saveNotificationTemplates(parsedTemplates.data);
       changedLabels.push('推送模板');
-      void savedTemplates;
     }
 
     if (body.proxySessionChannelConcurrencyLimit !== undefined) {

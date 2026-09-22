@@ -183,53 +183,41 @@ describe('NotificationSettings templates', () => {
       notifyCooldownSec: 300,
       notificationTemplates: {},
     });
-    // 模拟未聚焦：textarea 的 selectionStart/selectionEnd 为 0
-    const origSelectionStart = global.HTMLTextAreaElement?.prototype?.selectionStart;
-    const origSelectionEnd = global.HTMLTextAreaElement?.prototype?.selectionEnd;
+    // 模拟未聚焦：document.activeElement 不是 textarea
+    let origActiveElement: any;
+    let hadActiveElement = false;
+    if (typeof document !== 'undefined') {
+      origActiveElement = document.activeElement;
+      hadActiveElement = true;
+      Object.defineProperty(document, 'activeElement', {
+        configurable: true,
+        get() { return null; },
+      });
+    }
+
+    const root = await renderPage();
     try {
-      if (!global.HTMLTextAreaElement) {
-        (global as any).HTMLTextAreaElement = class TextArea {};
-      }
-      Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionStart', {
-        configurable: true,
-        get() { return 0; },
-      });
-      Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionEnd', {
-        configurable: true,
-        get() { return 0; },
+      const body = findInputByTestId(root, 'template-body-input');
+      await act(async () => {
+        body.props.onChange({ target: { value: 'prefix' } });
       });
 
-      const root = await renderPage();
-      try {
-        const body = findInputByTestId(root, 'template-body-input');
-        await act(async () => {
-          body.props.onChange({ target: { value: 'prefix' } });
-        });
+      const countChip = root.root.findAll((node) => (
+        node.type === 'button' && node.props.title === '风暴聚合累计次数'
+      ))[0];
+      await act(async () => {
+        countChip.props.onClick();
+      });
 
-        const countChip = root.root.findAll((node) => (
-          node.type === 'button' && node.props.title === '风暴聚合累计次数'
-        ))[0];
-        await act(async () => {
-          countChip.props.onClick();
-        });
-
-        const updated = findInputByTestId(root, 'template-body-input');
-        // 未聚焦时 selectionStart=0，追加到末尾（不插入到开头）
-        expect(updated.props.value).toBe('prefix{{count}}');
-      } finally {
-        root?.unmount();
-      }
+      const updated = findInputByTestId(root, 'template-body-input');
+      // 未聚焦时追加到末尾（不插入到开头）
+      expect(updated.props.value).toBe('prefix{{count}}');
     } finally {
-      if (origSelectionStart !== undefined) {
-        Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionStart', {
+      root?.unmount();
+      if (hadActiveElement && typeof document !== 'undefined') {
+        Object.defineProperty(document, 'activeElement', {
           configurable: true,
-          get() { return origSelectionStart; },
-        });
-      }
-      if (origSelectionEnd !== undefined) {
-        Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionEnd', {
-          configurable: true,
-          get() { return origSelectionEnd; },
+          get() { return origActiveElement; },
         });
       }
     }

@@ -374,22 +374,6 @@ export async function evaluateAggregatedNotification(input: {
     const withinCooldown = (nowMs - entry.lastPushAtMs) < cooldownMs;
     closeExpiredStorm(entry, nowMs);
 
-    // 替换旧风暴前把它的最终计数写回行内，避免未刷数据随对象替换丢失
-    // 封板写回已在 closeExpiredStorm 中通过 flushAggregatedState 处理；
-    // 此处保留兜底写回（不进 flush 锁也不改写 entry.storm 引用）
-    if (
-      entry.storm
-      && !entry.storm.active
-      && entry.storm.eventId > 0
-      && !entry.storm.finalWritten
-    ) {
-      try {
-        await writeStormRow(entry);
-      } catch {
-        dirty = true;
-      }
-    }
-
     const stormExpired = !entry.storm
       || !entry.storm.active
       || (nowMs - entry.storm.lastAtMs) > STORM_CLOSE_MS;
@@ -451,6 +435,7 @@ export async function evaluateAggregatedNotification(input: {
 
     if (withinCooldown) {
       entry.suppressedCount += 1;
+      dirtyGeneration += 1;
       await flushAggregatedState();
       return {
         shouldPush: false,
@@ -464,6 +449,7 @@ export async function evaluateAggregatedNotification(input: {
     entry.lastPushAtMs = nowMs;
     entry.suppressedCount = 0;
     entry.pushGeneration = (entry.pushGeneration || 0) + 1;
+    dirtyGeneration += 1;
     await flushAggregatedState();
     return {
       shouldPush: true,
@@ -480,20 +466,30 @@ export async function evaluateAggregatedNotification(input: {
  * 仅当代际仍匹配时才释放（防止迟到 release 覆盖更新后的成功窗口）；
  * 窗口改为 now-cooldown+60s 而不是写 0，避免下一条代理失败立刻再推。
  */
-export async function releaseAggregatedPushWindow(level: string, title: string): Promise<void> {
+export async function releaseAggregatedPushWindow(level: string, title: string, pushGeneration: number): Promise<void> {
   const signature = buildAggregatedSignature(level, title);
   await withSignatureLock(signature, async () => {
     await loadPersistedState();
     const entry = memoryState.get(signature);
     if (!entry) return;
     const cooldownMs = Math.max(0, Math.trunc(config.notifyCooldownSec)) * 1000;
-    const expectedGeneration = entry.pushGeneration;
-    if (entry.pushGeneration !== expectedGeneration) return;
+    // 仅当代际仍匹配时才释放（防止迟到 release 覆盖更新后的成功窗口）
+    if (entry.pushGeneration !== pushGeneration) return;
     entry.lastPushAtMs = Math.max(0, Date.now() - cooldownMs + 60_000);
     entry.suppressedCount = 0;
+    dirtyGeneration += 1;
     dirty = true;
     await flushAggregatedState();
   });
+}
+
+/**
+ * 仅测试使用：读取内存中的聚合器状态。
+ */
+export function getAggregatorEntry(signature: string): { pushGeneration: number; lastPushAtMs: number } | undefined {
+  const entry = memoryState.get(signature);
+  if (!entry) return undefined;
+  return { pushGeneration: entry.pushGeneration, lastPushAtMs: entry.lastPushAtMs };
 }
 
 /** 仅测试使用：清空内存与持久化状态。 */

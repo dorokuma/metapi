@@ -115,7 +115,7 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** Markdown 特殊字符转义（用于变量值渲染时，按渠道规则） */
+/** Markdown 特殊字符转义（用于变量值渲染时，按渠道规则）；不转义反斜杠 */
 function escapeMarkdown(value: string): string {
   return value
     .split('\\').join('\\\\')
@@ -124,6 +124,14 @@ function escapeMarkdown(value: string): string {
     .split('`').join('\\`')
     .split('[').join('\\[')
     .split(']').join('\\]');
+}
+
+/** HTML 特殊字符转义：仅转义 & < > */
+function escapeHtml(value: string): string {
+  return value
+    .split('&').join('&amp;')
+    .split('<').join('&lt;')
+    .split('>').join('&gt;');
 }
 
 function normalizeParseMode(value: unknown): NotificationParseMode {
@@ -198,14 +206,18 @@ export function buildTemplateVarRecord(vars: NotificationTemplateVars): Record<s
   return record;
 }
 
-/** 对变量值做 Markdown 转义，防止变量内容（如 model 名含链接语法）被 Markdown 解析 */
-function buildEscapedTemplateVarRecord(vars: NotificationTemplateVars): Record<string, string> {
+/** 对变量值做转义，防止变量内容被 Markdown/HTML 解析 */
+function buildEscapedTemplateVarRecord(
+  vars: NotificationTemplateVars,
+  parseMode: NotificationParseMode,
+): Record<string, string> {
   const raw = buildTemplateVarRecord(vars);
   const escaped: Record<string, string> = { ...raw };
+  const escapeFn = parseMode === 'HTML' ? escapeHtml : escapeMarkdown;
   // 只转义可变内容字段，不转义固定元数据
   for (const key of ['title', 'message', 'level', 'count', 'models', 'local_time', 'utc_time', 'timezone', 'app']) {
     if (Object.prototype.hasOwnProperty.call(escaped, key)) {
-      escaped[key] = escapeMarkdown(escaped[key]);
+      escaped[key] = escapeFn(escaped[key]);
     }
   }
   return escaped;
@@ -227,8 +239,9 @@ export function renderNotificationTemplate(
   fallback: { title: string; body: string },
   escapeMarkdownValues = false,
 ): RenderedNotificationTemplate {
+  const parseMode = template?.parseMode || '';
   const record = escapeMarkdownValues
-    ? buildEscapedTemplateVarRecord(vars)
+    ? buildEscapedTemplateVarRecord(vars, parseMode)
     : buildTemplateVarRecord(vars);
   const render = (input: string): string => input.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, name: string) => (
     Object.prototype.hasOwnProperty.call(record, name) ? record[name] : match

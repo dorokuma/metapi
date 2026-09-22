@@ -400,8 +400,8 @@ export default function NotificationSettings() {
                                             const currentBody = runtime.notificationTemplates[activeTemplateChannel]?.body || '';
                                             let nextBody = `${currentBody}${token}`;
                                             let caret = currentBody.length;
-                                            if (textarea) {
-                                                // 插入到光标处；输入框未聚焦过时退化为追加
+                                            if (textarea && document.activeElement === textarea) {
+                                                // 仅当 textarea 是当前聚焦元素时使用 selectionStart，否则追加到末尾
                                                 const start = Number.isFinite(textarea.selectionStart)
                                                     ? Number(textarea.selectionStart)
                                                     : currentBody.length;

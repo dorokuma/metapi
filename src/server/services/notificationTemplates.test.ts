@@ -337,4 +337,87 @@ describe('notification templates', () => {
     expect(rendered.title).toBe('*italic*');
     expect(rendered.body).toBe('_underscore_');
   });
+
+  it('escapes only & < > for HTML parseMode, not Markdown chars', async () => {
+    const { renderEscapedNotificationTemplate } = await import('./notificationTemplates.js');
+    const rendered = renderEscapedNotificationTemplate(
+      { title: '{{title}}', body: '{{message}} | {{level}}', parseMode: 'HTML' },
+      {
+        title: '错误 & 异常 <script>',
+        message: '模型<敏感> _下划线_ *星号*',
+        level: 'error',
+        count: 1,
+        models: ['gpt-4'],
+        localTime: 'now',
+        timeZone: 'UTC',
+      },
+      { title: 'fallback', body: 'fallback' },
+    );
+    // HTML 渠道：仅 & < > 被转义
+    expect(rendered.title).toBe('错误 &amp; 异常 &lt;script&gt;');
+    expect(rendered.body).toContain('模型&lt;敏感&gt;');
+    // Markdown 字符不转义
+    expect(rendered.body).toContain('_下划线_');
+    expect(rendered.body).toContain('*星号*');
+    expect(rendered.parseMode).toBe('HTML');
+    expect(rendered.usedTemplate).toBe(true);
+  });
+
+  it('truncates Bark body by encoded URL length with suffix counted in budget', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({ bark: { title: 'T', body: '{{message}}' } });
+
+    const { config } = await import('../config.js');
+    config.barkEnabled = true;
+    config.barkUrl = 'https://api.day.app/example';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true });
+
+    const { sendNotification } = await import('./notifyService.js');
+    // Use a body long enough to exceed the encoded URL budget (7943 bytes)
+    // so that truncation with '…' is guaranteed
+    const longBody = 'y '.repeat(3000); // each space encodes to %20 (3x), total 9000 encoded chars
+    await sendNotification('标题', longBody, 'info');
+
+    const firstCall = fetchMock.mock.calls[0] as [string | Request, any] | undefined;
+    expect(firstCall).toBeTruthy();
+    const [callArg] = firstCall!;
+    const url = typeof callArg === 'string' ? callArg : (callArg instanceof Request ? callArg.url : String(callArg));
+    // URL 总长度不超过 8000
+    expect(url.length).toBeLessThanOrEqual(8000);
+    // 正文已被截断
+    const bodyMatch = url.match(/\/T\/([^?]+)/);
+    expect(bodyMatch).toBeTruthy();
+    const decodedBody = decodeURIComponent(bodyMatch![1]);
+    expect(decodedBody).toContain('…');
+    // Budget constraint forces truncation of 3000-char body
+    expect(decodedBody.length).toBeLessThan(longBody.length);
+  });
+
+  it('truncates Feishu custom webhook body by UTF-8 bytes with suffix', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    // 自定义 webhook 模板 + 超长 body
+    await saveNotificationTemplates({
+      webhook: { title: 'W:{{title}}', body: '{{message}}' },
+    });
+
+    const { config } = await import('../config.js');
+    config.webhookEnabled = true;
+    config.webhookUrl = 'https://open.feishu.cn/open-apis/bot/v2/hook/test';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true });
+
+    const { truncateUtf8Bytes, sendNotification } = await import('./notifyService.js');
+    const longMessage = '中'.repeat(2000); // 6000 UTF-8 bytes
+    await sendNotification('告警', longMessage, 'error');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, any];
+    const payload = JSON.parse(init.body);
+    const content = payload.content.text;
+    // FEISHU_MAX_BODY_BYTES = 3900，应被截断
+    // truncateUtf8Bytes adds '…' (3-byte UTF-8); title prefix 'W:告警' + '\n' = 9 bytes
+    const EXPECTED_MAX = 9 + 3900 + Buffer.byteLength('…', 'utf8') + Buffer.byteLength('\n...(truncated)', 'utf8');
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(EXPECTED_MAX);
+    expect(content).toContain('…');
+  });
 });

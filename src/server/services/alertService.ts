@@ -77,6 +77,10 @@ export async function reportProxyAllFailed(params: { model: string; reason: stri
   // 渠道存在但全部发送失败（如 Telegram 拒收）时释放冷却窗口，
   // 避免一次失败把整个冷静期消耗掉。无渠道时不释放（没有重试意义）。
   if (result.attempted > 0 && result.succeeded === 0) {
-    await releaseAggregatedPushWindow('error', '代理全部失败');
+    // 将当前代际传给 release，防止迟到 release 覆盖新的成功窗口
+    const { buildAggregatedSignature, getAggregatorEntry, releaseAggregatedPushWindow } = await import('./notificationAggregator.js');
+    const signature = buildAggregatedSignature('error', '代理全部失败');
+    const generation = getAggregatorEntry(signature)?.pushGeneration ?? 0;
+    await releaseAggregatedPushWindow('error', '代理全部失败', generation);
   }
 }

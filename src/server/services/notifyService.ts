@@ -23,7 +23,7 @@ const WECHAT_MAX_BODY_BYTES = 1900;
 const FEISHU_MAX_BODY_BYTES = 3900;
 
 /** UTF-8 字节截断：超长时逐字符回退，确保不破坏多字节字符 */
-function truncateUtf8Bytes(text: string, maxBytes: number): string {
+export function truncateUtf8Bytes(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
   let truncated = text.slice(0, maxBytes);
   // 确保不在多字节字符中间截断
@@ -225,11 +225,16 @@ export async function sendNotification(
     fallback: { title: string; body: string },
   ): RenderedNotificationTemplate => {
     const chTemplate = templates[channel];
-    // Markdown 模式渠道：变量值转义，防止注入 Markdown 语法
-    const shouldEscape = ['Markdown', 'HTML'].includes(chTemplate?.parseMode ?? '');
-    return shouldEscape
-      ? renderEscapedNotificationTemplate(chTemplate, templateVars, fallback)
-      : renderNotificationTemplate(chTemplate, templateVars, fallback);
+    const parseMode = chTemplate?.parseMode ?? '';
+    if (parseMode === 'HTML') {
+      // HTML 渠道：仅转义 & < >
+      return renderEscapedNotificationTemplate(chTemplate, templateVars, fallback);
+    }
+    if (parseMode === 'Markdown') {
+      // Markdown 渠道：转义 _ * ` [ ]
+      return renderEscapedNotificationTemplate(chTemplate, templateVars, fallback);
+    }
+    return renderNotificationTemplate(chTemplate, templateVars, fallback);
   };
 
   const tasks: Array<{ channel: NotificationChannel; run: () => Promise<unknown> }> = [];
@@ -239,11 +244,29 @@ export async function sendNotification(
     const isWeComWebhook = isWeComBotWebhook(config.webhookUrl);
     const isFeishuWebhook = isFeishuBotWebhook(config.webhookUrl);
     // 自定义模板时不套官方 [metapi][LEVEL] 头与时间脚注，内容完全由模板决定
+    const makeWeComFeishuBody = (customContent: string | null): string => {
+      if (!customContent) return customContent as unknown as string;
+      if (isWeComWebhook) {
+        const maxBytes = WECHAT_MAX_BODY_BYTES;
+        if (Buffer.byteLength(customContent, 'utf8') > maxBytes) {
+          return `${truncateUtf8Bytes(customContent, maxBytes)}\n...(truncated)`;
+        }
+        return customContent;
+      }
+      if (isFeishuWebhook) {
+        const maxBytes = FEISHU_MAX_BODY_BYTES;
+        if (Buffer.byteLength(customContent, 'utf8') > maxBytes) {
+          return `${truncateUtf8Bytes(customContent, maxBytes)}\n...(truncated)`;
+        }
+        return customContent;
+      }
+      return customContent;
+    };
     const weComFeishuContent = webhookRendered.usedTemplate
-      ? [
+      ? makeWeComFeishuBody([
         templates.webhook?.title ? webhookRendered.title : '',
         webhookRendered.body,
-      ].filter(Boolean).join('\n')
+      ].filter(Boolean).join('\n'))
       : null;
     tasks.push(
       {
@@ -314,11 +337,24 @@ export async function sendNotification(
   if (config.barkEnabled && config.barkUrl) {
     const barkRendered = renderChannel('bark', { title, body: resolvedMessage });
     const barkBase = config.barkUrl.replace(/\/+$/, '');
-    // Bark 把正文放进 URL：超长正文会导致请求失败，按渠道上限截断并保留提示
-    const barkBody = barkRendered.body.length > BARK_MAX_BODY_LENGTH
-      ? `${barkRendered.body.slice(0, BARK_MAX_BODY_LENGTH)}…`
+    // Bark 把正文放进 URL：超长正文会导致请求失败，按 encode 后 URL 总长度截断
+    const prefix = `${barkBase}/${encodeURIComponent(barkRendered.title)}/`;
+    const suffix = `?group=AllApiHub&level=${encodeURIComponent(level)}`;
+    const budget = Math.max(1, 8000 - prefix.length - suffix.length);
+    const encoded = encodeURIComponent(barkRendered.body);
+    const truncateEncoded = (enc: string, maxBytes: number): string => {
+      // We have maxBytes for the percent-encoded body. Back-decide raw char budget:
+      // iteratively reduce raw text until encodeURIComponent fits in maxBytes.
+      let raw = barkRendered.body;
+      while (encodeURIComponent(raw + '…').length > maxBytes && raw.length > 0) {
+        raw = raw.slice(0, -1);
+      }
+      return raw ? `${raw}…` : '…';
+    };
+    const barkBody = encoded.length > budget
+      ? truncateEncoded(encoded, budget)
       : barkRendered.body;
-    const url = `${barkBase}/${encodeURIComponent(barkRendered.title)}/${encodeURIComponent(barkBody)}?group=AllApiHub&level=${encodeURIComponent(level)}`;
+    const url = `${prefix}${encodeURIComponent(barkBody)}${suffix}`;
     tasks.push({
       channel: 'bark',
       run: async () => {

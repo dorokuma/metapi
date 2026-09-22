@@ -242,6 +242,26 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成，已推送到 PR 分支；本次日志修正随当前文档提交同步。
 
+## 2026-09-22
+
+### 14. 锁死 /v1/messages 兜底路径的 Bearer 认证并收紧 isClaudePlatform 类型
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：Prism（`platform=openai` 的 OpenAI 兼容网关，同时暴露 `/v1/messages`）因收到 `x-api-key` 而非 `Authorization: Bearer` 返回 401，随后被 balance/alert 层误判为 token 永久过期并禁用账号，导致 grok-4.6 无可用通道、下游持续 503。为根因修复补齐真实生产路径的回归锁，并防止未来调用方漏传平台判断而重新触发同一条误判链。
+- **实现范围**：
+  - `src/server/proxy-core/providers/headerUtils.ts`：`buildClaudeRuntimeHeaders` 的 `isClaudePlatform` 从可选改为必填，并重写注释说明为何只有 Anthropic 原生 claude 平台使用 `x-api-key`、其余平台必须用 `Authorization: Bearer`。
+  - `src/server/services/upstreamRequestBuilder.test.ts`：新增两条 builder 级测试。因为 `resolveProviderProfile('openai')` 返回 null，生产的 `/v1/messages` 请求走的是 builder 兜底分支而非 claude provider profile，原有 profile 级测试覆盖不到真实路径。
+- **主要文件**：
+  - `src/server/proxy-core/providers/headerUtils.ts`
+  - `src/server/services/upstreamRequestBuilder.test.ts`
+- **验证**：
+  - `npx vitest run src/server/proxy-core/providers/registry.test.ts src/server/proxy-core/providers/headerUtils.test.ts src/server/services/upstreamRequestBuilder.test.ts src/server/routes/proxy/chat.stream.test.ts src/server/routes/proxy/upstreamEndpoint.test.ts src/server/services/platforms/claude.test.ts src/server/services/platforms/llmUpstream.test.ts`：7 文件 204 个测试通过（较此前 202 新增 2 条）。
+  - `npm run typecheck`：web / web:test / server / desktop 四段全部通过；必填改造后 3 个生产调用点无一处漏传。
+  - 本次不改运行时行为：3 个调用点在必填化之前本就显式传值，故线上行为不变。
+- **交付物**：代码、测试与持续变更日志；无 PDF 或截图。
+- **状态**：已完成。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

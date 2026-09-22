@@ -163,6 +163,10 @@ function loadPersistedState(): Promise<void> {
         if (entry.pendingStorm || (entry.storm && !entry.storm.finalWritten)) {
           dirtyGeneration += 1;
           dirty = true;
+          // 静默重启（没有新告警触发评估）时也必须启动 flush 定时器，否则 dirty 永远
+          // 等不到写回，events 行会停在 baseMessage。flush 成功后清 dirty，不会形成
+          // 写放大循环；定时器本身是单例（ensureFlushTimer 内部判重）。
+          ensureFlushTimer();
         }
         memoryState.set(key, entry);
       }

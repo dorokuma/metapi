@@ -635,6 +635,140 @@ describe('notificationAggregator', () => {
       .all();
     expect(rows).toHaveLength(2);
   });
+
+  async function seedUnsealedStorm(lastAtOffsetMs: number): Promise<number> {
+    await db.insert(schema.events).values({
+      type: 'proxy',
+      title: '代理全部失败',
+      message: '旧风暴基线消息',
+      level: 'error',
+      relatedType: 'route',
+    }).run();
+    const stormRowId = (await db.select().from(schema.events).all())[0].id;
+    const nowMs = Date.now();
+    const { buildAggregatedSignature } = await import('./notificationAggregator.js');
+    const { upsertSetting } = await import('../db/upsertSetting.js');
+    await upsertSetting('notification_aggregator_state_v1', {
+      [buildAggregatedSignature('error', '代理全部失败')]: {
+        lastPushAtMs: nowMs - 60_000,
+        suppressedCount: 0,
+        pushGeneration: 1,
+        storm: {
+          eventId: stormRowId,
+          count: 3,
+          models: ['grok-4.6'],
+          reasons: ['No available channels after retries'],
+          firstAtMs: nowMs + lastAtOffsetMs,
+          lastAtMs: nowMs + lastAtOffsetMs,
+          active: true,
+          // 生产 blob 形态：未封板，重启后必须重试封板而不是丢弃
+          finalWritten: false,
+          meta: {
+            level: 'error',
+            title: '代理全部失败',
+            type: 'proxy',
+            relatedType: 'route',
+            baseMessage: '旧风暴基线消息',
+          },
+        },
+      },
+    });
+    const { resetAggregatedNotificationState } = await import('./notificationAggregator.js');
+    await resetAggregatedNotificationState();
+    return stormRowId;
+  }
+
+  it('writes back an unsealed storm after a silent restart with no new alert (behavior)', async () => {
+    const stormRowId = await seedUnsealedStorm(-60_000);
+    const { evaluateAggregatedNotification } = await import('./notificationAggregator.js');
+
+    // 冷静期关闭：这次评估走历史逐条分支，不会触碰聚合器自己的 ensureFlushTimer。
+    // 因此写回只能来自"load 标 dirty 时启动的 flush 定时器"——静默重启（无新告警）也要落盘。
+    config.notifyCooldownSec = 0;
+
+    vi.useFakeTimers();
+    try {
+      const decision = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'silent restart' });
+      expect(decision.shouldPush).toBe(true);
+
+      // 推进一个 flush 周期：期间没有任何新告警，写回也必须发生
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const stormRow = (await db.select().from(schema.events).all()).find((row) => row.id === stormRowId);
+      expect(stormRow?.message).toContain('已累计 3 次');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores an expired but unsealed old storm after restart and retries sealing it (behavior)', async () => {
+    const { evaluateAggregatedNotification, flushAggregatedState } = await import('./notificationAggregator.js');
+    const stormRowId = await seedUnsealedStorm(-11 * 60 * 1000);
+
+    // 重启后第一条告警触发 load：旧风暴已过期但未封板，必须被恢复（而不是连同它一起丢弃）
+    config.notifyCooldownSec = 0;
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'after restart' });
+
+    // flush 重试封板：旧 storm 行被原地更新，而不是永远停在 baseMessage
+    await flushAggregatedState();
+
+    const stormRow = (await db.select().from(schema.events).all()).find((row) => row.id === stormRowId);
+    expect(stormRow?.message).toContain('已累计 3 次');
+
+    // 落库状态里的旧 storm 仍在且已封板：证明它被恢复并走完了封板，而不是被 restoreStorm 丢弃
+    const persisted = JSON.parse(
+      (await db.select().from(schema.settings)
+        .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
+        .get())?.value || '{}',
+    ) as Record<string, { storm?: { eventId?: number; finalWritten?: boolean } | null }>;
+    const persistedStorm = Object.values(persisted)[0]?.storm;
+    expect(persistedStorm?.eventId).toBe(stormRowId);
+    expect(persistedStorm?.finalWritten).toBe(true);
+  });
+
+  it('seal write failure keeps both the old storm and the pending storm in the same round (behavior)', async () => {
+    const { evaluateAggregatedNotification, flushAggregatedState } = await import('./notificationAggregator.js');
+
+    // 第一段风暴：落一条 events 行并推送
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'first storm' });
+    await flushAggregatedState();
+    const firstRows = await db.select().from(schema.events).all();
+    expect(firstRows).toHaveLength(1);
+    const oldEventId = firstRows[0].id;
+    const oldMessage = firstRows[0].message;
+
+    // 静默超过 10 分钟：旧 storm 在内存中过期 inactive，新风暴开启，本轮封板写失败
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+      (globalThis as any).__metapi_test_simulate_write_error = true;
+
+      const reopened = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'second storm' });
+      expect(reopened.shouldPush).toBe(true);
+
+      // 写失败的当轮：blob 必须同时保留旧 storm 与 pendingStorm（写失败不得发布/替换）
+      const persisted = JSON.parse(
+        (await db.select().from(schema.settings)
+          .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
+          .get())?.value || '{}',
+      ) as Record<string, {
+        storm?: { eventId?: number; finalWritten?: boolean } | null;
+        pendingStorm?: { eventId?: number } | null;
+      }>;
+      const persistedEntry = Object.values(persisted)[0];
+      expect(persistedEntry?.storm?.eventId).toBe(oldEventId);
+      expect(persistedEntry?.storm?.finalWritten).toBe(false);
+      expect(persistedEntry?.pendingStorm?.eventId).toBeGreaterThan(0);
+      expect(persistedEntry?.pendingStorm?.eventId).not.toBe(oldEventId);
+
+      // 旧行内容未被改写（封板写失败时不得动旧 storm 行）
+      const oldRow = (await db.select().from(schema.events).all()).find((row) => row.id === oldEventId);
+      expect(oldRow?.message).toBe(oldMessage);
+    } finally {
+      (globalThis as any).__metapi_test_simulate_write_error = false;
+      vi.useRealTimers();
+    }
+  });
 });
 
 function srcPath(): string {

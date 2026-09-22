@@ -1,7 +1,65 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { api, type RuntimeSettingsPayload } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
+
+type TemplateChannel = 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp';
+type TemplateParseMode = '' | 'Markdown' | 'HTML';
+
+type NotificationTemplate = {
+    title?: string;
+    body?: string;
+    parseMode?: TemplateParseMode;
+};
+
+type NotificationTemplates = Partial<Record<TemplateChannel, NotificationTemplate>>;
+
+const TEMPLATE_CHANNELS: Array<{ value: TemplateChannel; label: string }> = [
+    { value: 'telegram', label: 'Telegram' },
+    { value: 'webhook', label: 'Webhook' },
+    { value: 'bark', label: 'Bark' },
+    { value: 'serverchan', label: 'Server酱' },
+    { value: 'smtp', label: 'SMTP 邮件' },
+];
+
+const TEMPLATE_VARIABLES: Array<{ name: string; hint: string }> = [
+    { name: 'title', hint: '告警标题' },
+    { name: 'message', hint: '告警正文' },
+    { name: 'level', hint: '级别 info/warning/error' },
+    { name: 'count', hint: '风暴聚合累计次数' },
+    { name: 'models', hint: '涉及模型列表' },
+    { name: 'local_time', hint: '本地时间' },
+    { name: 'utc_time', hint: 'UTC 时间' },
+    { name: 'timezone', hint: '时区' },
+    { name: 'app', hint: '应用名 metapi' },
+];
+
+const PREVIEW_VARS: Record<string, string> = {
+    title: '代理全部失败',
+    message: '模型=grok-4.6, 原因=No available channels after retries',
+    level: 'error',
+    count: '6',
+    models: 'grok-4.6 / grok-4.7 / glm-5.3-flash',
+    local_time: '2026-09-22 10:30:00',
+    utc_time: '2026-09-22T02:30:00.000Z',
+    timezone: 'Asia/Shanghai',
+    app: 'metapi',
+};
+
+function renderPreview(template: NotificationTemplate | undefined, channel: TemplateChannel): { title: string; body: string } {
+    const render = (input: string) => input.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, name: string) => (
+        Object.prototype.hasOwnProperty.call(PREVIEW_VARS, name) ? PREVIEW_VARS[name] : match
+    ));
+    if (!template || (!template.title && !template.body)) {
+        return channel === 'smtp'
+            ? { title: '[metapi][ERROR] 代理全部失败', body: `${PREVIEW_VARS.message}\n\nLevel: error\nLocal Time: ${PREVIEW_VARS.local_time}` }
+            : { title: '代理全部失败', body: `[metapi][ERROR] 代理全部失败\n\n${PREVIEW_VARS.message}\n\nLevel: error\nLocal Time: ${PREVIEW_VARS.local_time}` };
+    }
+    return {
+        title: template.title ? render(template.title) : '代理全部失败',
+        body: template.body ? render(template.body) : `${PREVIEW_VARS.message}\n\nLevel: error`,
+    };
+}
 
 type RuntimeSettings = {
     webhookUrl: string;
@@ -25,7 +83,34 @@ type RuntimeSettings = {
     serverChanKeyMasked?: string;
     telegramBotTokenMasked?: string;
     notifyCooldownSec: number;
+    notificationTemplates: NotificationTemplates;
 };
+
+function TemplatePreview({ channel, template }: { channel: TemplateChannel; template: NotificationTemplate | undefined }) {
+    const preview = useMemo(() => renderPreview(template, channel), [template, channel]);
+    return (
+        <div
+            data-testid="template-preview"
+            style={{
+                padding: 14,
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-border-light)',
+                background: 'var(--color-bg)',
+                fontSize: 13,
+                lineHeight: 1.8,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--color-text-secondary)',
+                maxHeight: 260,
+                overflow: 'auto',
+            }}
+        >
+            <div style={{ fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 6 }}>{preview.title}</div>
+            <div>{preview.body}</div>
+        </div>
+    );
+}
 
 export default function NotificationSettings() {
     const [runtime, setRuntime] = useState<RuntimeSettings>({
@@ -47,7 +132,10 @@ export default function NotificationSettings() {
         smtpFrom: '',
         smtpTo: '',
         notifyCooldownSec: 300,
+        notificationTemplates: {},
     });
+
+    const [activeTemplateChannel, setActiveTemplateChannel] = useState<TemplateChannel>('telegram');
 
     const [serverChanKey, setServerChanKey] = useState('');
     const [telegramBotToken, setTelegramBotToken] = useState('');
@@ -97,6 +185,7 @@ export default function NotificationSettings() {
                 notifyCooldownSec: Number.isFinite(Number(runtimeInfo.notifyCooldownSec))
                     ? Math.max(0, Math.trunc(Number(runtimeInfo.notifyCooldownSec)))
                     : 300,
+                notificationTemplates: (runtimeInfo.notificationTemplates || {}) as NotificationTemplates,
             });
         } catch (err: any) {
             toast.error(err?.message || '加载通知设置失败');
@@ -131,6 +220,7 @@ export default function NotificationSettings() {
                 smtpFrom: runtime.smtpFrom,
                 smtpTo: runtime.smtpTo,
                 notifyCooldownSec: Math.max(0, Math.trunc(Number(runtime.notifyCooldownSec) || 0)),
+                notificationTemplates: runtime.notificationTemplates,
             };
             if (serverChanKey.trim()) payload.serverChanKey = serverChanKey.trim();
             if (telegramBotToken.trim()) payload.telegramBotToken = telegramBotToken.trim();
@@ -211,6 +301,189 @@ export default function NotificationSettings() {
                             }))}
                             style={inputStyle}
                         />
+                    </div>
+                </div>
+
+                {/* 卡片：推送模板 */}
+                <div className="card animate-slide-up stagger-2" style={{ padding: 24 }} data-testid="notification-template-card">
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--color-primary-light)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
+                            </div>
+                            <div>
+                                <div style={{ fontWeight: 600, fontSize: 15 }}>推送模板</div>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>自定义各渠道收到的消息格式，留空的渠道沿用默认样式；保存通知设置后生效</div>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{ border: '1px solid var(--color-border)', fontSize: 12 }}
+                            onClick={() => setRuntime((prev) => ({ ...prev, notificationTemplates: {} }))}
+                        >
+                            全部恢复默认
+                        </button>
+                    </div>
+
+                    {/* 渠道 Tab */}
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+                        {TEMPLATE_CHANNELS.map((channel) => {
+                            const active = channel.value === activeTemplateChannel;
+                            const customized = !!(runtime.notificationTemplates[channel.value]?.title || runtime.notificationTemplates[channel.value]?.body);
+                            return (
+                                <button
+                                    key={channel.value}
+                                    type="button"
+                                    data-testid={`template-tab-${channel.value}`}
+                                    onClick={() => setActiveTemplateChannel(channel.value)}
+                                    style={{
+                                        padding: '6px 14px',
+                                        borderRadius: 'var(--radius-sm)',
+                                        fontSize: 13,
+                                        cursor: 'pointer',
+                                        border: `1px solid ${active ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                                        background: active ? 'var(--color-primary-light)' : 'var(--color-bg)',
+                                        color: active ? 'var(--color-primary)' : 'var(--color-text-secondary)',
+                                        fontWeight: active ? 600 : 400,
+                                    }}
+                                >
+                                    {channel.label}
+                                    {customized && <span style={{ marginLeft: 6, color: 'var(--color-primary)' }}>·</span>}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px 20px' }}>
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>标题模板</div>
+                            <input
+                                data-testid="template-title-input"
+                                value={runtime.notificationTemplates[activeTemplateChannel]?.title || ''}
+                                onChange={(e) => setRuntime((prev) => {
+                                    const current = prev.notificationTemplates[activeTemplateChannel] || {};
+                                    return {
+                                        ...prev,
+                                        notificationTemplates: {
+                                            ...prev.notificationTemplates,
+                                            [activeTemplateChannel]: { ...current, title: e.target.value },
+                                        },
+                                    };
+                                })}
+                                placeholder="留空使用默认标题"
+                                style={inputStyle}
+                            />
+                        </div>
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                                <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-text-secondary)' }}>正文模板</span>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>点击变量插入到光标处</span>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                                {TEMPLATE_VARIABLES.map((variable) => (
+                                    <button
+                                        key={variable.name}
+                                        type="button"
+                                        title={variable.hint}
+                                        onClick={() => {
+                                            const token = `{{${variable.name}}}`;
+                                            setRuntime((prev) => {
+                                                const current = prev.notificationTemplates[activeTemplateChannel] || {};
+                                                return {
+                                                    ...prev,
+                                                    notificationTemplates: {
+                                                        ...prev.notificationTemplates,
+                                                        [activeTemplateChannel]: { ...current, body: `${current.body || ''}${token}` },
+                                                    },
+                                                };
+                                            });
+                                        }}
+                                        style={{
+                                            padding: '3px 10px',
+                                            fontSize: 12,
+                                            fontFamily: 'var(--font-mono)',
+                                            borderRadius: 999,
+                                            border: '1px solid var(--color-border)',
+                                            background: 'var(--color-bg)',
+                                            color: 'var(--color-text-secondary)',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        {`{{${variable.name}}}`}
+                                    </button>
+                                ))}
+                            </div>
+                            <textarea
+                                data-testid="template-body-input"
+                                value={runtime.notificationTemplates[activeTemplateChannel]?.body || ''}
+                                onChange={(e) => setRuntime((prev) => {
+                                    const current = prev.notificationTemplates[activeTemplateChannel] || {};
+                                    return {
+                                        ...prev,
+                                        notificationTemplates: {
+                                            ...prev.notificationTemplates,
+                                            [activeTemplateChannel]: { ...current, body: e.target.value },
+                                        },
+                                    };
+                                })}
+                                placeholder="留空使用默认正文，例如：\n*{{title}}*\n{{message}}\n累计 {{count}} 次"
+                                rows={6}
+                                style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--font-mono)', lineHeight: 1.7 }}
+                            />
+                        </div>
+
+                        {activeTemplateChannel === 'telegram' && (
+                            <div style={{ gridColumn: '1 / -1' }}>
+                                <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>解析模式</div>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    {([
+                                        { value: '', label: '纯文本' },
+                                        { value: 'Markdown', label: 'Markdown' },
+                                        { value: 'HTML', label: 'HTML' },
+                                    ] as Array<{ value: TemplateParseMode; label: string }>).map((mode) => (
+                                        <button
+                                            key={mode.value || 'plain'}
+                                            type="button"
+                                            data-testid={`template-parse-mode-${mode.value || 'plain'}`}
+                                            onClick={() => setRuntime((prev) => {
+                                                const current = prev.notificationTemplates.telegram || {};
+                                                return {
+                                                    ...prev,
+                                                    notificationTemplates: {
+                                                        ...prev.notificationTemplates,
+                                                        telegram: { ...current, parseMode: mode.value },
+                                                    },
+                                                };
+                                            })}
+                                            style={{
+                                                padding: '5px 14px',
+                                                fontSize: 12,
+                                                borderRadius: 'var(--radius-sm)',
+                                                cursor: 'pointer',
+                                                border: `1px solid ${(runtime.notificationTemplates.telegram?.parseMode || '') === mode.value ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                                                background: (runtime.notificationTemplates.telegram?.parseMode || '') === mode.value ? 'var(--color-primary-light)' : 'var(--color-bg)',
+                                                color: (runtime.notificationTemplates.telegram?.parseMode || '') === mode.value ? 'var(--color-primary)' : 'var(--color-text-secondary)',
+                                            }}
+                                        >
+                                            {mode.label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    选择 Markdown / HTML 时，Telegram 会按对应语法渲染；注意特殊字符需按该模式转义，否则 Telegram 会拒收整条消息。
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 实时预览 */}
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>实时预览（示例数据）</div>
+                            <TemplatePreview
+                                channel={activeTemplateChannel}
+                                template={runtime.notificationTemplates[activeTemplateChannel]}
+                            />
+                        </div>
                     </div>
                 </div>
 

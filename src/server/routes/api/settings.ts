@@ -46,6 +46,12 @@ import {
 } from '../../services/modelAvailabilityProbeService.js';
 import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
 import { setOauthProviderSiteAutoCreateEnabled } from '../../services/oauth/oauthSiteRegistry.js';
+import {
+  NOTIFICATION_TEMPLATE_VARIABLES,
+  loadNotificationTemplates,
+  saveNotificationTemplates,
+  type NotificationTemplates,
+} from '../../services/notificationTemplates.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -89,6 +95,7 @@ interface RuntimeSettingsBody {
   telegramChatId?: string;
   telegramUseSystemProxy?: boolean;
   telegramMessageThreadId?: string;
+  notificationTemplates?: unknown;
   smtpEnabled?: boolean;
   smtpHost?: string;
   smtpPort?: number;
@@ -733,6 +740,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     oauthProviderSiteAutoCreateEnabled: config.oauthProviderSiteAutoCreateEnabled,
+    notificationTemplateVariables: [...NOTIFICATION_TEMPLATE_VARIABLES],
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
     proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
@@ -853,7 +861,11 @@ function buildRuntimeDatabaseState(saved: RuntimeDatabaseConfig | null) {
 export async function settingsRoutes(app: FastifyInstance) {
   await app.get('/api/settings/runtime', async (request) => {
     const currentAdminIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
-    return getRuntimeSettingsResponse(currentAdminIp);
+    const notificationTemplates = await loadNotificationTemplates();
+    return {
+      ...getRuntimeSettingsResponse(currentAdminIp),
+      notificationTemplates,
+    };
   });
 
   app.get('/api/settings/brand-list', async () => {
@@ -1260,6 +1272,20 @@ export async function settingsRoutes(app: FastifyInstance) {
         config.oauthProviderSiteAutoCreateEnabled = nextValue;
         await setOauthProviderSiteAutoCreateEnabled(nextValue);
       }
+    }
+
+    if (body.notificationTemplates !== undefined) {
+      let savedTemplates: NotificationTemplates;
+      try {
+        savedTemplates = await saveNotificationTemplates(body.notificationTemplates);
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '推送模板格式无效',
+        });
+      }
+      changedLabels.push('推送模板');
+      void savedTemplates;
     }
 
     if (body.proxySessionChannelConcurrencyLimit !== undefined) {

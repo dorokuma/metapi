@@ -8,6 +8,12 @@ import {
   pruneNotificationThrottleState,
   type NotificationThrottleState,
 } from './notificationThrottle.js';
+import {
+  loadNotificationTemplates,
+  renderNotificationTemplate,
+  type NotificationTemplateVars,
+  type RenderedNotificationTemplate,
+} from './notificationTemplates.js';
 import { formatLocalDateTime, getResolvedTimeZone } from './localTimeService.js';
 
 type NotificationChannel = 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp';
@@ -158,9 +164,24 @@ export async function sendNotification(
     }
   }
 
+  // 自定义模板：留空渠道沿用默认渲染，行为零变化
+  const templates = await loadNotificationTemplates();
+  const templateVars: NotificationTemplateVars = {
+    title,
+    message: resolvedMessage,
+    level,
+    localTime: formatLocalDateTime(now),
+    timeZone: getResolvedTimeZone(),
+  };
+  const renderChannel = (
+    channel: 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp',
+    fallback: { title: string; body: string },
+  ): RenderedNotificationTemplate => renderNotificationTemplate(templates[channel], templateVars, fallback);
+
   const tasks: Array<{ channel: NotificationChannel; run: () => Promise<unknown> }> = [];
 
   if (config.webhookEnabled && config.webhookUrl) {
+    const webhookRendered = renderChannel('webhook', { title, body: resolvedMessage });
     tasks.push(
       {
         channel: 'webhook',
@@ -172,20 +193,20 @@ export async function sendNotification(
             body = JSON.stringify({
               msgtype: 'text',
               text: {
-                content: buildWeComText(title, resolvedMessage, level, timeFootnote),
+                content: buildWeComText(webhookRendered.title, webhookRendered.body, level, timeFootnote),
               },
             });
           } else if (isFeishuWebhook) {
             body = JSON.stringify({
               msg_type: 'text',
               content: {
-                text: buildFeishuText(title, resolvedMessage, level, timeFootnote),
+                text: buildFeishuText(webhookRendered.title, webhookRendered.body, level, timeFootnote),
               },
             });
           } else {
             body = JSON.stringify({
-              title,
-              message: resolvedMessage,
+              title: webhookRendered.title,
+              message: webhookRendered.body,
               level,
               timestamp: now.toISOString(),
               localTime: formatLocalDateTime(now),
@@ -228,8 +249,9 @@ export async function sendNotification(
   }
 
   if (config.barkEnabled && config.barkUrl) {
+    const barkRendered = renderChannel('bark', { title, body: resolvedMessage });
     const barkBase = config.barkUrl.replace(/\/+$/, '');
-    const url = `${barkBase}/${encodeURIComponent(title)}/${encodeURIComponent(resolvedMessage)}?group=AllApiHub&level=${encodeURIComponent(level)}`;
+    const url = `${barkBase}/${encodeURIComponent(barkRendered.title)}/${encodeURIComponent(barkRendered.body)}?group=AllApiHub&level=${encodeURIComponent(level)}`;
     tasks.push({
       channel: 'bark',
       run: async () => {
@@ -242,9 +264,10 @@ export async function sendNotification(
   }
 
   if (config.serverChanEnabled && config.serverChanKey) {
+    const serverChanRendered = renderChannel('serverchan', { title, body: resolvedMessage });
     const form = new URLSearchParams({
-      title,
-      desp: `${resolvedMessage}\n\nLevel: ${level}\n${timeFootnote}`,
+      title: serverChanRendered.title,
+      desp: `${serverChanRendered.body}\n\nLevel: ${level}\n${timeFootnote}`,
     });
     tasks.push(
       {
@@ -264,9 +287,15 @@ export async function sendNotification(
   }
 
   if (config.telegramEnabled && config.telegramBotToken && config.telegramChatId) {
+    const telegramRendered = renderChannel('telegram', {
+      title,
+      body: buildTelegramText(title, resolvedMessage, level, timeFootnote),
+    });
+    const telegramText = telegramRendered.usedTemplate
+      ? telegramRendered.body
+      : buildTelegramText(title, resolvedMessage, level, timeFootnote);
     const telegramApiBaseUrl = String(config.telegramApiBaseUrl || 'https://api.telegram.org').replace(/\/+$/, '');
     const telegramApiUrl = `${telegramApiBaseUrl}/bot${config.telegramBotToken}/sendMessage`;
-    const text = buildTelegramText(title, resolvedMessage, level, timeFootnote);
     const telegramMessageThreadId = Number.parseInt(String(config.telegramMessageThreadId || '').trim(), 10);
     tasks.push({
       channel: 'telegram',
@@ -281,8 +310,9 @@ export async function sendNotification(
               ...(Number.isFinite(telegramMessageThreadId) && telegramMessageThreadId > 0
                 ? { message_thread_id: telegramMessageThreadId }
                 : {}),
-              text,
+              text: telegramText,
               disable_web_page_preview: true,
+              ...(telegramRendered.parseMode ? { parse_mode: telegramRendered.parseMode } : {}),
             }),
           },
         );
@@ -308,6 +338,7 @@ export async function sendNotification(
     config.smtpFrom &&
     config.smtpTo
   ) {
+    const smtpRendered = renderChannel('smtp', { title, body: resolvedMessage });
     const transporter = getSmtpTransporter();
     tasks.push(
       {
@@ -315,8 +346,10 @@ export async function sendNotification(
         run: () => transporter.sendMail({
           from: config.smtpFrom,
           to: config.smtpTo,
-          subject: `[metapi][${level.toUpperCase()}] ${title}`,
-          text: `${resolvedMessage}\n\nLevel: ${level}\n${timeFootnote}`,
+          subject: smtpRendered.title === title
+            ? `[metapi][${level.toUpperCase()}] ${title}`
+            : smtpRendered.title,
+          text: `${smtpRendered.body}\n\nLevel: ${level}\n${timeFootnote}`,
         }),
       },
     );

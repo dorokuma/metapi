@@ -367,6 +367,7 @@ export type RuntimeSettingsPayload = {
   codexUpstreamWebsocketEnabled?: boolean;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
+  notificationTemplates?: Record<string, { title?: string; body?: string; parseMode?: '' | 'Markdown' | 'HTML' }>;
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
   proxyDebugTraceEnabled?: boolean;

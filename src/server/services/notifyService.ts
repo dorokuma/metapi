@@ -26,11 +26,10 @@ const FEISHU_MAX_BODY_BYTES = 3900;
 export function truncateUtf8Bytes(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
   let truncated = text.slice(0, maxBytes);
-  // 确保不在多字节字符中间截断
   while (truncated.length > 0 && Buffer.byteLength(truncated, 'utf8') > maxBytes) {
     truncated = truncated.slice(0, -1);
   }
-  return `${truncated}…`;
+  return truncated;
 }
 
 type NotificationChannel = 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp';
@@ -136,10 +135,12 @@ function buildWeComTextUtf8(
   timeFootnote: string,
 ): string {
   const maxBytes = WECHAT_MAX_BODY_BYTES;
+  const suffix = '\n…\n...(truncated)';
   const raw = `[metapi][${level.toUpperCase()}] ${title}\n\n${message}\n\n${timeFootnote}`;
+  const suffixBytes = Buffer.byteLength(suffix, 'utf8');
   if (Buffer.byteLength(raw, 'utf8') <= maxBytes) return raw;
-  const truncated = truncateUtf8Bytes(raw, maxBytes);
-  return `${truncated}\n...(truncated)`;
+  const truncated = truncateUtf8Bytes(raw, Math.max(0, maxBytes - suffixBytes));
+  return `${truncated}${suffix}`;
 }
 
 function isFeishuBotWebhook(url: string): boolean {
@@ -173,10 +174,12 @@ function buildFeishuTextUtf8(
   timeFootnote: string,
 ): string {
   const maxBytes = FEISHU_MAX_BODY_BYTES;
+  const suffix = '\n…\n...(truncated)';
   const raw = `[metapi][${level.toUpperCase()}] ${title}\n\n${message}\n\n${timeFootnote}`;
+  const suffixBytes = Buffer.byteLength(suffix, 'utf8');
   if (Buffer.byteLength(raw, 'utf8') <= maxBytes) return raw;
-  const truncated = truncateUtf8Bytes(raw, maxBytes);
-  return `${truncated}\n...(truncated)`;
+  const truncated = truncateUtf8Bytes(raw, Math.max(0, maxBytes - suffixBytes));
+  return `${truncated}${suffix}`;
 }
 
 export async function sendNotification(
@@ -246,17 +249,20 @@ export async function sendNotification(
     // 自定义模板时不套官方 [metapi][LEVEL] 头与时间脚注，内容完全由模板决定
     const makeWeComFeishuBody = (customContent: string | null): string => {
       if (!customContent) return customContent as unknown as string;
+      const suffix = '\n…\n...(truncated)';
       if (isWeComWebhook) {
         const maxBytes = WECHAT_MAX_BODY_BYTES;
+        const suffixBytes = Buffer.byteLength(suffix, 'utf8');
         if (Buffer.byteLength(customContent, 'utf8') > maxBytes) {
-          return `${truncateUtf8Bytes(customContent, maxBytes)}\n...(truncated)`;
+          return `${truncateUtf8Bytes(customContent, Math.max(0, maxBytes - suffixBytes))}${suffix}`;
         }
         return customContent;
       }
       if (isFeishuWebhook) {
         const maxBytes = FEISHU_MAX_BODY_BYTES;
+        const suffixBytes = Buffer.byteLength(suffix, 'utf8');
         if (Buffer.byteLength(customContent, 'utf8') > maxBytes) {
-          return `${truncateUtf8Bytes(customContent, maxBytes)}\n...(truncated)`;
+          return `${truncateUtf8Bytes(customContent, Math.max(0, maxBytes - suffixBytes))}${suffix}`;
         }
         return customContent;
       }

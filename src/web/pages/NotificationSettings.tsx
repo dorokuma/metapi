@@ -118,6 +118,7 @@ function TemplatePreview({ channel, template }: { channel: TemplateChannel; temp
 
 export default function NotificationSettings() {
     const templateBodyRef = React.useRef<HTMLTextAreaElement | null>(null);
+    const [isBodyFocused, setIsBodyFocused] = useState(false);
     const [runtime, setRuntime] = useState<RuntimeSettings>({
         webhookUrl: '',
         barkUrl: '',
@@ -394,14 +395,18 @@ export default function NotificationSettings() {
                                         key={variable.name}
                                         type="button"
                                         title={variable.hint}
+                                        onMouseDown={(e) => {
+                                            if (isBodyFocused) {
+                                                e.preventDefault();
+                                            }
+                                        }}
                                         onClick={() => {
                                             const token = `{{${variable.name}}}`;
                                             const textarea = templateBodyRef.current;
                                             const currentBody = runtime.notificationTemplates[activeTemplateChannel]?.body || '';
                                             let nextBody = `${currentBody}${token}`;
                                             let caret = currentBody.length;
-                                            if (textarea && document.activeElement === textarea) {
-                                                // 仅当 textarea 是当前聚焦元素时使用 selectionStart，否则追加到末尾
+                                            if (isBodyFocused && textarea) {
                                                 const start = Number.isFinite(textarea.selectionStart)
                                                     ? Number(textarea.selectionStart)
                                                     : currentBody.length;
@@ -458,6 +463,8 @@ export default function NotificationSettings() {
                                         },
                                     };
                                 })}
+                                onFocus={() => setIsBodyFocused(true)}
+                                onBlur={() => setIsBodyFocused(false)}
                                 placeholder="留空使用默认正文，例如：\n*{{title}}*\n{{message}}\n累计 {{count}} 次"
                                 rows={6}
                                 style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--font-mono)', lineHeight: 1.7 }}

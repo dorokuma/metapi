@@ -1,5 +1,7 @@
+/** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { createRoot } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 const { apiMock } = vi.hoisted(() => ({
@@ -37,6 +39,35 @@ async function flush() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function findFiber(node: any, predicate: (fiber: any) => boolean): any {
+  if (predicate(node)) return node;
+  if (node.child) {
+    const found = findFiber(node.child, predicate);
+    if (found) return found;
+  }
+  if (node.sibling) {
+    const found = findFiber(node.sibling, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
+function setComponentRef(root: ReactTestRenderer, targetType: any, refValue: any): any {
+  const rootFiber = (root.root as any)._fiber;
+  if (!rootFiber) return null;
+  const fiber = findFiber(rootFiber, (f: any) => f.type === targetType);
+  if (!fiber) return null;
+  let state = fiber.memoizedState;
+  while (state) {
+    if (state.memoizedState && typeof state.memoizedState === 'object' && 'current' in state.memoizedState) {
+      state.memoizedState.current = refValue;
+      return state.memoizedState;
+    }
+    state = state.next;
+  }
+  return null;
 }
 
 describe('NotificationSettings templates', () => {
@@ -220,6 +251,49 @@ describe('NotificationSettings templates', () => {
           get() { return origActiveElement; },
         });
       }
+    }
+  });
+
+  it('inserts a variable chip at the caret position when textarea is focused', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {},
+    });
+
+    const mockTextarea = {
+      selectionStart: 5,
+      selectionEnd: 5,
+      focus: () => {},
+      setSelectionRange: () => {},
+    };
+
+    const root = await renderPage();
+    try {
+      const body = findInputByTestId(root, 'template-body-input');
+      await act(async () => {
+        body.props.onChange({ target: { value: 'hello world' } });
+      });
+      // 模拟 textarea 聚焦
+      await act(async () => {
+        body.props.onFocus?.();
+      });
+
+      setComponentRef(root, NotificationSettings, mockTextarea);
+
+      const countChip = root.root.findAll((node) => (
+        node.type === 'button' && node.props.title === '风暴聚合累计次数'
+      ))[0];
+
+      await act(async () => {
+        countChip.props.onClick();
+      });
+
+      const updated = findInputByTestId(root, 'template-body-input');
+      // 聚焦时 chip 插入到光标位置
+      expect(updated.props.value).toBe('hello{{count}} world');
+    } finally {
+      root?.unmount();
     }
   });
 });

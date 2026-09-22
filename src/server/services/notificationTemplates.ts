@@ -115,15 +115,13 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** Markdown 特殊字符转义（用于变量值渲染时，按渠道规则）；不转义反斜杠 */
+/** Markdown 特殊字符转义（用于变量值渲染时，按渠道规则）；legacy 只转义 _ * ` [ 四个字符 */
 function escapeMarkdown(value: string): string {
   return value
-    .split('\\').join('\\\\')
     .split('*').join('\\*')
     .split('_').join('\\_')
     .split('`').join('\\`')
-    .split('[').join('\\[')
-    .split(']').join('\\]');
+    .split('[').join('\\[');
 }
 
 /** HTML 特殊字符转义：仅转义 & < > */

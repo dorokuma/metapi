@@ -312,12 +312,48 @@ describe('notification templates', () => {
       { title: 'fallback', body: 'fallback' },
     );
     // 链接语法不应被 Markdown 解析
-    expect(rendered.title).toContain('\\[vulnerable\\]');
+    expect(rendered.title).toContain('\\[vulnerable]');
     expect(rendered.body).toContain('\\_ 下划线');
     expect(rendered.body).toContain('\\* 星号');
-    expect(rendered.body).toContain('gpt-\\[evil\\](x)');
+    expect(rendered.body).toContain('gpt-\\[evil](x)');
     // 模板骨架不动
     expect(rendered.usedTemplate).toBe(true);
+  });
+
+  it('escapes only _ * ` [ for legacy Markdown, not backslash or closing bracket', async () => {
+    const { renderEscapedNotificationTemplate } = await import('./notificationTemplates.js');
+    const rendered = renderEscapedNotificationTemplate(
+      { title: '{{title}}', body: '{{message}}', parseMode: 'Markdown' },
+      {
+        title: 'path\\\\to\\\\file]',
+        message: 'contains \\\\] and \\\\\\',
+        level: 'info',
+        localTime: 'now',
+        timeZone: 'UTC',
+      },
+      { title: 'fallback', body: 'fallback' },
+    );
+    // 反斜杠和 ] 不被额外转义
+    expect(rendered.title).toBe('path\\\\to\\\\file]');
+    expect(rendered.body).toBe('contains \\\\] and \\\\\\');
+  });
+
+  it('escapes brackets to block link injection in legacy Markdown', async () => {
+    const { renderEscapedNotificationTemplate } = await import('./notificationTemplates.js');
+    const rendered = renderEscapedNotificationTemplate(
+      { title: '{{title}}', body: '{{message}}', parseMode: 'Markdown' },
+      {
+        title: 'Click [here](https://evil.example)',
+        message: 'Visit [evil](https://evil.example) now',
+        level: 'info',
+        localTime: 'now',
+        timeZone: 'UTC',
+      },
+      { title: 'fallback', body: 'fallback' },
+    );
+    // [ 被转义，链接注入被挡住
+    expect(rendered.title).toContain('\\[here]');
+    expect(rendered.body).toContain('\\[evil]');
   });
 
   it('does not escape variable values when no parseMode is set', async () => {
@@ -415,9 +451,8 @@ describe('notification templates', () => {
     const payload = JSON.parse(init.body);
     const content = payload.content.text;
     // FEISHU_MAX_BODY_BYTES = 3900，应被截断
-    // truncateUtf8Bytes adds '…' (3-byte UTF-8); title prefix 'W:告警' + '\n' = 9 bytes
-    const EXPECTED_MAX = 9 + 3900 + Buffer.byteLength('…', 'utf8') + Buffer.byteLength('\n...(truncated)', 'utf8');
-    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(EXPECTED_MAX);
+    // 后缀 '\n…\n...(truncated)' 计入预算
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(3900);
     expect(content).toContain('…');
   });
 });

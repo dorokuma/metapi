@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const sendMailMock = vi.fn();
 const createTransportMock = vi.fn(() => ({
@@ -29,6 +32,19 @@ vi.mock('./siteProxy.js', () => ({
 }));
 
 describe('notifyService', () => {
+  let dataDir = '';
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-notify-service-'));
+    process.env.DATA_DIR = dataDir;
+    await import('../db/migrate.js');
+  });
+
+  afterAll(() => {
+    delete process.env.DATA_DIR;
+    if (dataDir) rmSync(dataDir, { recursive: true, force: true });
+  });
+
   beforeEach(async () => {
     vi.resetModules();
     sendMailMock.mockReset();
@@ -376,5 +392,32 @@ describe('notifyService', () => {
     expect(payload.msg_type).toBe('text');
     expect(payload.content?.text || '').toContain('[metapi][WARNING] 测试通知');
     expect(payload.content?.text || '').toContain('lark message');
+  });
+
+  it('truncates WeCom custom webhook body by UTF-8 bytes with suffix counted in budget', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({
+      webhook: { title: 'W:{{title}}', body: '{{message}}' },
+    });
+
+    const { config } = await import('../config.js');
+    config.webhookEnabled = true;
+    config.webhookUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true });
+
+    const { sendNotification } = await import('./notifyService.js');
+    const longMessage = '中'.repeat(2000); // 6000 UTF-8 bytes
+    await sendNotification('告警', longMessage, 'error');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, any];
+    const payload = JSON.parse(init.body);
+    const content = payload.text.content;
+    const WECHAT_MAX_BODY_BYTES = 1900;
+    const suffix = '\n...(truncated)';
+    const suffixBytes = Buffer.byteLength(suffix, 'utf8');
+    // 修复后：后缀计入预算，总字节数不超过上限
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(WECHAT_MAX_BODY_BYTES);
+    expect(content).toContain('…');
   });
 });

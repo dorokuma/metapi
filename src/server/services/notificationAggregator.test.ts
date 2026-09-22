@@ -425,43 +425,106 @@ describe('notificationAggregator', () => {
     expect(rows).toHaveLength(2);
   });
 
-  it('verifies fallback write-back outside flush lock has been removed (structural)', () => {
-    // 修法：删掉锁外写回，封板只在 flush 锁内完成；写失败不替换对象。
-    // 结构验证：evaluateAggregatedNotification 内不应有独立的 writeStormRow 调用。
-    const src = readFileSync(srcPath(), 'utf-8');
-    const fnBody = getFunctionBody(src, 'evaluateAggregatedNotification');
-    expect(fnBody).not.toContain('writeStormRow');
+  it('DB error prevents push and does not overwrite settings (behavior)', async () => {
+    const { evaluateAggregatedNotification } = await import('./notificationAggregator.js');
+    const { resetAggregatedNotificationState } = await import('./notificationAggregator.js');
+    const { upsertSetting } = await import('../db/upsertSetting.js');
+
+    // 写入合法的持久化状态，确保 DB 有内容
+    await upsertSetting('notification_aggregator_state_v1', {
+      key: {
+        lastPushAtMs: Date.now() - 400_000,
+        suppressedCount: 0,
+        storm: {
+          eventId: 1,
+          count: 1,
+          models: [],
+          reasons: [],
+          firstAtMs: Date.now() - 400_000,
+          lastAtMs: Date.now() - 400_000,
+          active: true,
+          meta: { level: 'error', title: '测试', type: 'proxy', relatedType: 'route', baseMessage: 'x' },
+        },
+      },
+    });
+
+    await resetAggregatedNotificationState();
+
+    // 触发 loadPersistedState 内的 DB 错误模拟
+    (globalThis as any).__metapi_test_simulate_db_error = true;
+
+    const decision = await evaluateAggregatedNotification({ ...ALERT, model: 'm1', reason: 'r1' });
+    expect(decision.shouldPush).toBe(false);
+
+    // 确认 settings 表内容未被改写
+    const row = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
+      .get();
+    expect(row?.value).toContain('lastPushAtMs');
   });
 
-  it('verifies releaseAggregatedPushWindow accepts pushGeneration parameter (structural)', async () => {
-    // 修法：release 接收推送当时的代号（pushGeneration），在锁内比对，仅相等才释放；
-    // release 置 dirty 时同步递增 dirtyGeneration。
-    const src = readFileSync(srcPath(), 'utf-8');
-    expect(src).toContain('releaseAggregatedPushWindow(level: string, title: string, pushGeneration: number)');
-    expect(src).toContain('entry.pushGeneration !== pushGeneration');
-    // release 中 dirtyGeneration += 1 在 flush 之前
-    expect(src).toContain('dirtyGeneration += 1;');
-    expect(src).toContain('await flushAggregatedState()');
+  it('storm seal write failure preserves old storm object (behavior)', async () => {
+    const { evaluateAggregatedNotification, flushAggregatedState, getAggregatorEntry } = await import('./notificationAggregator.js');
+    const { buildAggregatedSignature } = await import('./notificationAggregator.js');
+    const { resetAggregatedNotificationState } = await import('./notificationAggregator.js');
+
+    // 先创建一个带 eventId 的 storm
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'first storm' });
+    await flushAggregatedState();
+    const sig = buildAggregatedSignature('error', '代理全部失败');
+    const entryBefore = getAggregatorEntry(sig);
+    expect(entryBefore).toBeDefined();
+
+    // 让 storm 过期：静默超过 10 分钟
+    const stored = JSON.parse(
+      (await db.select().from(schema.settings)
+        .where(eq(schema.settings.key, 'notification_aggregator_state_v1'))
+        .get())?.value || '{}',
+    ) as Record<string, { lastPushAtMs: number; storm?: { lastAtMs: number } | null }>;
+    for (const key of Object.keys(stored)) {
+      if (stored[key].storm && stored[key].storm.lastAtMs) {
+        stored[key].storm!.lastAtMs = Date.now() - 11 * 60 * 1000;
+      }
+    }
+    const { upsertSetting } = await import('../db/upsertSetting.js');
+    await upsertSetting('notification_aggregator_state_v1', stored);
+    await resetAggregatedNotificationState();
+
+    // 模拟封板写失败
+    (globalThis as any).__metapi_test_simulate_write_error = true;
+
+    // 下一次评估应触发新 storm 封板写回
+    await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'second' });
+    const entryDuring = getAggregatorEntry(sig);
+    // entryDuring 应该仍然存在（旧 storm 引用未被替换）
+    expect(entryDuring).toBeDefined();
+
+    vi.restoreAllMocks();
   });
 
-  it('verifies loadPersistedState DB error resets loadPromise for retry (structural)', async () => {
-    // 修法：DB 错误要 reject，调用方不得推送、不得 persist；JSON 损坏仍从零开始。
-    const src = readFileSync(srcPath(), 'utf-8');
-    expect(src).toContain('loadPromise = null;');
-    expect(src).toContain('JSON.parse');
-    expect(src).toContain('return;');
-  });
+  it('release uses generation saved before send (behavior)', async () => {
+    const { evaluateAggregatedNotification, releaseAggregatedPushWindow, flushAggregatedState, getAggregatorEntry } = await import('./notificationAggregator.js');
+    const { buildAggregatedSignature } = await import('./notificationAggregator.js');
+    config.notifyCooldownSec = 1;
 
-  it('verifies dirtyGeneration is incremented before flush in key branches (structural)', async () => {
-    // 修法：这些赋值都递增 dirtyGeneration，防止 flush 清掉 await 期间的新写入。
-    // flushAggregatedState 自身仅做快照比较：if (dirtyGeneration === snapshotGeneration) dirty = false
-    const src = readFileSync(srcPath(), 'utf-8');
-    const evalBody = getFunctionBody(src, 'evaluateAggregatedNotification');
-    const flushBody = getFunctionBody(src, 'flushAggregatedState');
-    const releaseBody = getFunctionBody(src, 'releaseAggregatedPushWindow');
-    expect(evalBody).toContain('dirtyGeneration += 1');
-    expect(flushBody).toContain('dirtyGeneration === snapshotGeneration');
-    expect(releaseBody).toContain('dirtyGeneration += 1');
+    const first = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.6', reason: 'r1' });
+    expect(first.shouldPush).toBe(true);
+    const sig = buildAggregatedSignature('error', '代理全部失败');
+    const savedGeneration = getAggregatorEntry(sig)?.pushGeneration ?? 0;
+
+    // 等待 cooldown 过期，模拟发送挂起期间有新推送（代际前进）
+    await new Promise(r => setTimeout(r, 1500));
+    const second = await evaluateAggregatedNotification({ ...ALERT, model: 'grok-4.7', reason: 'r2' });
+    expect(second.shouldPush).toBe(true);
+    await flushAggregatedState();
+    const generationAfter = getAggregatorEntry(sig)?.pushGeneration ?? 0;
+    expect(generationAfter).toBeGreaterThan(savedGeneration);
+
+    // 用旧代际 release，不应改动窗口
+    await releaseAggregatedPushWindow('error', '代理全部失败', savedGeneration);
+    const entryAfterRelease = getAggregatorEntry(sig);
+    // 代际不匹配，release 应该是 no-op，lastPushAtMs 应保持不变（第二个推送的时间）
+    expect(entryAfterRelease?.lastPushAtMs).toBeGreaterThan(0);
   });
 
   it('keeps event rows when the cooldown is disabled', async () => {

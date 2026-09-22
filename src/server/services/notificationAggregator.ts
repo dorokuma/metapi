@@ -4,6 +4,12 @@ import { insertAndGetById } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { config } from '../config.js';
 
+const isTestEnv = (): boolean => {
+  if (typeof process !== 'undefined' && (process as any).env?.NODE_ENV === 'test') return true;
+  if (typeof import.meta !== 'undefined' && (import.meta as any).env?.MODE === 'test') return true;
+  return false;
+};
+
 /**
  * 告警风暴聚合器。
  *
@@ -53,12 +59,14 @@ type AggregatorEntry = {
   storm: StormEntry | null;
   /** 每次更新 lastPushAtMs 递增，用于 release 时识别过期代际 */
   pushGeneration: number;
+  pendingStorm: StormEntry | null;
 };
 
 type PersistedStorm = Omit<StormEntry, 'finalWritten'>;
 type PersistedEntry = {
   lastPushAtMs: number;
   suppressedCount: number;
+  pushGeneration: number;
   storm?: PersistedStorm | null;
 };
 type PersistedState = Record<string, PersistedEntry>;
@@ -108,6 +116,10 @@ function loadPersistedState(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
     try {
+      if (isTestEnv() && typeof globalThis.__metapi_test_simulate_db_error === 'boolean' && globalThis.__metapi_test_simulate_db_error) {
+        globalThis.__metapi_test_simulate_db_error = false;
+        throw new Error('SQLITE_BUSY');
+      }
       const row = await db.select({ value: schema.settings.value })
         .from(schema.settings)
         .where(eq(schema.settings.key, AGGREGATOR_STATE_SETTING_KEY))
@@ -129,7 +141,8 @@ function loadPersistedState(): Promise<void> {
           lastPushAtMs,
           suppressedCount: Number(value.suppressedCount) || 0,
           storm: null,
-          pushGeneration: 0,
+          pushGeneration: Number(value.pushGeneration) || 0,
+          pendingStorm: null,
         };
         const storm = value.storm;
         if (
@@ -156,6 +169,7 @@ function loadPersistedState(): Promise<void> {
     } catch (dbError) {
       // DB 错误不缓存，允许下次重试（不重置内存态，但 loadPromise 也不会再排队）
       loadPromise = null;
+      throw dbError;
     }
   })();
   return loadPromise;
@@ -167,6 +181,7 @@ async function persistState(): Promise<void> {
     const entry: PersistedEntry = {
       lastPushAtMs: value.lastPushAtMs,
       suppressedCount: value.suppressedCount,
+      pushGeneration: value.pushGeneration,
     };
     if (value.storm && value.storm.eventId > 0) {
       const { finalWritten: _finalWritten, ...storm } = value.storm;
@@ -220,9 +235,14 @@ function closeExpiredStorm(entry: AggregatorEntry, nowMs: number): void {
  * UPDATE 影响 0 行时先 SELECT 确认行是否存在：不存在才重插（修复 SQLite 幽灵行问题）。
  * 行不存在时不设置 finalWritten，使封板状态可在新行上继续完成。
  */
-async function writeStormRow(entry: AggregatorEntry): Promise<void> {
-  const storm = entry.storm;
+async function writeStormRow(entry: AggregatorEntry, stormOverride?: StormEntry): Promise<void> {
+  const storm = stormOverride ?? entry.storm;
   if (!storm || storm.eventId <= 0) return;
+
+  if (isTestEnv() && typeof globalThis.__metapi_test_simulate_write_error === 'boolean' && globalThis.__metapi_test_simulate_write_error) {
+    globalThis.__metapi_test_simulate_write_error = false;
+    throw new Error('simulated write error');
+  }
 
   const message = buildStormMessage(storm.meta.baseMessage, storm);
   const result = await db.update(schema.events)
@@ -274,15 +294,29 @@ export async function flushAggregatedState(): Promise<void> {
     const snapshotGeneration = dirtyGeneration;
     let ok = true;
     for (const entry of memoryState.values()) {
-      if (!entry.storm) continue;
+      let pendingSeal = false;
+
       // 封板写回放进 flush 锁内：写失败不替换旧 storm，避免计数丢失
-      if (!entry.storm.active && entry.storm.eventId > 0 && !entry.storm.finalWritten) {
+      if (entry.pendingStorm && entry.storm && !entry.storm.active && entry.storm.eventId > 0 && !entry.storm.finalWritten) {
         try {
-          await writeStormRow(entry);
+          await writeStormRow(entry, entry.storm);
         } catch {
           ok = false;
+          pendingSeal = true;
+        }
+        if (!pendingSeal) {
+          entry.storm.finalWritten = true;
         }
       }
+
+      if (pendingSeal) continue;
+
+      // 写成功后发布新 storm
+      if (entry.pendingStorm) {
+        entry.storm = entry.pendingStorm;
+        entry.pendingStorm = null;
+      }
+
       if (!entry.storm) continue;
       if (!entry.storm.active && entry.storm.finalWritten) continue;
       try {
@@ -331,7 +365,18 @@ export async function evaluateAggregatedNotification(input: {
 }): Promise<AggregatedNotificationDecision> {
   const signature = buildAggregatedSignature(input.level, input.title);
   return withSignatureLock(signature, async () => {
-    await loadPersistedState();
+    try {
+      await loadPersistedState();
+    } catch {
+      // DB 错误不推送、不落盘，正常返回
+      return {
+        shouldPush: false,
+        mergedCount: 0,
+        message: input.message,
+        models: [],
+        count: 1,
+      };
+    }
 
     const cooldownMs = Math.max(0, Math.trunc(config.notifyCooldownSec)) * 1000;
     const model = normalizeText(input.model, 80);
@@ -367,7 +412,7 @@ export async function evaluateAggregatedNotification(input: {
 
     let entry = memoryState.get(signature);
     if (!entry) {
-      entry = { lastPushAtMs: 0, suppressedCount: 0, storm: null, pushGeneration: 0 };
+      entry = { lastPushAtMs: 0, suppressedCount: 0, storm: null, pushGeneration: 0, pendingStorm: null };
       memoryState.set(signature, entry);
     }
 
@@ -378,7 +423,7 @@ export async function evaluateAggregatedNotification(input: {
       || !entry.storm.active
       || (nowMs - entry.storm.lastAtMs) > STORM_CLOSE_MS;
     if (stormExpired) {
-      entry.storm = {
+      entry.pendingStorm = {
         eventId: 0,
         count: 0,
         models: [],
@@ -397,7 +442,7 @@ export async function evaluateAggregatedNotification(input: {
       };
     }
 
-    const storm = entry.storm as StormEntry;
+    const storm = (entry.pendingStorm ?? entry.storm) as StormEntry;
     storm.count += 1;
     storm.lastAtMs = nowMs;
     storm.active = true;
@@ -427,9 +472,17 @@ export async function evaluateAggregatedNotification(input: {
           },
           insertErrorMessage: 'failed to create aggregated alert event row',
         });
+        const previousEventId = storm.eventId;
         storm.eventId = created.id;
+        if (previousEventId !== storm.eventId) {
+          dirtyGeneration += 1;
+        }
       } catch {
+        const previousEventId = storm.eventId;
         storm.eventId = 0;
+        if (previousEventId !== 0) {
+          dirtyGeneration += 1;
+        }
       }
     }
 

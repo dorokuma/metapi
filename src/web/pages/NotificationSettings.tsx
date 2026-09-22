@@ -399,6 +399,7 @@ export default function NotificationSettings() {
                                             const textarea = templateBodyRef.current;
                                             const currentBody = runtime.notificationTemplates[activeTemplateChannel]?.body || '';
                                             let nextBody = `${currentBody}${token}`;
+                                            let caret = currentBody.length;
                                             if (textarea) {
                                                 // 插入到光标处；输入框未聚焦过时退化为追加
                                                 const start = Number.isFinite(textarea.selectionStart)
@@ -408,6 +409,7 @@ export default function NotificationSettings() {
                                                     ? Number(textarea.selectionEnd)
                                                     : start;
                                                 nextBody = `${currentBody.slice(0, start)}${token}${currentBody.slice(end)}`;
+                                                caret = start + token.length;
                                             }
                                             setRuntime((prev) => {
                                                 const current = prev.notificationTemplates[activeTemplateChannel] || {};
@@ -422,7 +424,6 @@ export default function NotificationSettings() {
                                             if (typeof requestAnimationFrame === 'function') {
                                                 requestAnimationFrame(() => {
                                                     if (!textarea) return;
-                                                    const caret = nextBody.indexOf(token) + token.length;
                                                     textarea.focus();
                                                     textarea.setSelectionRange(caret, caret);
                                                 });

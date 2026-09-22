@@ -51,6 +51,8 @@ type AggregatorEntry = {
   lastPushAtMs: number;
   suppressedCount: number;
   storm: StormEntry | null;
+  /** 每次更新 lastPushAtMs 递增，用于 release 时识别过期代际 */
+  pushGeneration: number;
 };
 
 type PersistedStorm = Omit<StormEntry, 'finalWritten'>;
@@ -64,6 +66,7 @@ type PersistedState = Record<string, PersistedEntry>;
 const memoryState = new Map<string, AggregatorEntry>();
 let flushTimer: NodeJS.Timeout | null = null;
 let dirty = false;
+let dirtyGeneration = 0;
 let loadPromise: Promise<void> | null = null;
 
 /** 同一 signature 的评估串行化：并发告警不能各插一行、各推一次。 */
@@ -110,7 +113,13 @@ function loadPersistedState(): Promise<void> {
         .where(eq(schema.settings.key, AGGREGATOR_STATE_SETTING_KEY))
         .get();
       if (!row?.value) return;
-      const parsed = JSON.parse(row.value) as PersistedState;
+      let parsed: PersistedState;
+      try {
+        parsed = JSON.parse(row.value) as PersistedState;
+      } catch (jsonError) {
+        // JSON 损坏时从零开始，绝不影响告警主链路
+        return;
+      }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
       const nowMs = Date.now();
       for (const [key, value] of Object.entries(parsed)) {
@@ -120,6 +129,7 @@ function loadPersistedState(): Promise<void> {
           lastPushAtMs,
           suppressedCount: Number(value.suppressedCount) || 0,
           storm: null,
+          pushGeneration: 0,
         };
         const storm = value.storm;
         if (
@@ -143,8 +153,9 @@ function loadPersistedState(): Promise<void> {
         }
         memoryState.set(key, entry);
       }
-    } catch {
-      // 状态损坏时从零开始，绝不影响告警主链路
+    } catch (dbError) {
+      // DB 错误不缓存，允许下次重试（不重置内存态，但 loadPromise 也不会再排队）
+      loadPromise = null;
     }
   })();
   return loadPromise;
@@ -199,12 +210,15 @@ function closeExpiredStorm(entry: AggregatorEntry, nowMs: number): void {
   if (!storm || !storm.active) return;
   if ((nowMs - storm.lastAtMs) <= STORM_CLOSE_MS) return;
   storm.active = false;
+  // 封板写回推迟到 flush 锁内，避免与定时器并发双插
+  dirtyGeneration += 1;
   dirty = true;
 }
 
 /**
- * 把风暴计数刷写到 events 行。行已被清理/删除时（UPDATE 影响 0 行）重插一条，
- * 避免聚合器持续写入一个不存在的 id（幽灵行）。
+ * 把风暴计数刷写到 events 行。
+ * UPDATE 影响 0 行时先 SELECT 确认行是否存在：不存在才重插（修复 SQLite 幽灵行问题）。
+ * 行不存在时不设置 finalWritten，使封板状态可在新行上继续完成。
  */
 async function writeStormRow(entry: AggregatorEntry): Promise<void> {
   const storm = entry.storm;
@@ -217,25 +231,37 @@ async function writeStormRow(entry: AggregatorEntry): Promise<void> {
     .run();
   const changes = Number((result as { changes?: number } | null | undefined)?.changes ?? 0);
 
-  if (changes === 0) {
-    const created = await insertAndGetById<{ id: number }>({
-      table: schema.events,
-      idColumn: schema.events.id,
-      values: {
-        type: storm.meta.type,
-        title: storm.meta.title,
-        message,
-        level: storm.meta.level,
-        relatedType: storm.meta.relatedType,
-      },
-      insertErrorMessage: 'failed to re-create aggregated alert event row',
-    });
-    storm.eventId = created.id;
-    storm.finalWritten = false;
+  if (changes > 0) {
+    if (!storm.active) storm.finalWritten = true;
     return;
   }
 
-  if (!storm.active) storm.finalWritten = true;
+  // UPDATE 影响 0 行：先 SELECT 确认是否存在
+  const existing = await db.select({ id: schema.events.id })
+    .from(schema.events)
+    .where(eq(schema.events.id, storm.eventId))
+    .get();
+  if (existing) {
+    // 行存在但 UPDATE 无影响（SQLite 某些情况），视为已写入
+    if (!storm.active) storm.finalWritten = true;
+    return;
+  }
+
+  // 行不存在：重插一条
+  const created = await insertAndGetById<{ id: number }>({
+    table: schema.events,
+    idColumn: schema.events.id,
+    values: {
+      type: storm.meta.type,
+      title: storm.meta.title,
+      message,
+      level: storm.meta.level,
+      relatedType: storm.meta.relatedType,
+    },
+    insertErrorMessage: 'failed to re-create aggregated alert event row',
+  });
+  storm.eventId = created.id;
+  storm.finalWritten = false;
 }
 
 /**
@@ -245,8 +271,18 @@ async function writeStormRow(entry: AggregatorEntry): Promise<void> {
 export async function flushAggregatedState(): Promise<void> {
   return withFlushLock(async () => {
     if (!dirty) return;
+    const snapshotGeneration = dirtyGeneration;
     let ok = true;
     for (const entry of memoryState.values()) {
+      if (!entry.storm) continue;
+      // 封板写回放进 flush 锁内：写失败不替换旧 storm，避免计数丢失
+      if (!entry.storm.active && entry.storm.eventId > 0 && !entry.storm.finalWritten) {
+        try {
+          await writeStormRow(entry);
+        } catch {
+          ok = false;
+        }
+      }
       if (!entry.storm) continue;
       if (!entry.storm.active && entry.storm.finalWritten) continue;
       try {
@@ -264,7 +300,10 @@ export async function flushAggregatedState(): Promise<void> {
       dirty = true;
       return;
     }
-    dirty = false;
+    // 仅在代数未变时清 dirty，await 期间新写入不会丢失
+    if (dirtyGeneration === snapshotGeneration) {
+      dirty = false;
+    }
   });
 }
 
@@ -328,7 +367,7 @@ export async function evaluateAggregatedNotification(input: {
 
     let entry = memoryState.get(signature);
     if (!entry) {
-      entry = { lastPushAtMs: 0, suppressedCount: 0, storm: null };
+      entry = { lastPushAtMs: 0, suppressedCount: 0, storm: null, pushGeneration: 0 };
       memoryState.set(signature, entry);
     }
 
@@ -336,6 +375,8 @@ export async function evaluateAggregatedNotification(input: {
     closeExpiredStorm(entry, nowMs);
 
     // 替换旧风暴前把它的最终计数写回行内，避免未刷数据随对象替换丢失
+    // 封板写回已在 closeExpiredStorm 中通过 flushAggregatedState 处理；
+    // 此处保留兜底写回（不进 flush 锁也不改写 entry.storm 引用）
     if (
       entry.storm
       && !entry.storm.active
@@ -384,6 +425,7 @@ export async function evaluateAggregatedNotification(input: {
         storm.reasons[storm.reasons.length - 1] = reason;
       }
     }
+    dirtyGeneration += 1;
     dirty = true;
     ensureFlushTimer();
 
@@ -421,6 +463,7 @@ export async function evaluateAggregatedNotification(input: {
 
     entry.lastPushAtMs = nowMs;
     entry.suppressedCount = 0;
+    entry.pushGeneration = (entry.pushGeneration || 0) + 1;
     await flushAggregatedState();
     return {
       shouldPush: true,
@@ -433,8 +476,9 @@ export async function evaluateAggregatedNotification(input: {
 }
 
 /**
- * 推送失败（如 Telegram 因 parse_mode 拒收）时释放冷却窗口，
- * 避免一次发送失败把整个冷静期消耗掉。
+ * 推送失败时释放冷却窗口，避免一次发送失败把整个冷静期消耗掉。
+ * 仅当代际仍匹配时才释放（防止迟到 release 覆盖更新后的成功窗口）；
+ * 窗口改为 now-cooldown+60s 而不是写 0，避免下一条代理失败立刻再推。
  */
 export async function releaseAggregatedPushWindow(level: string, title: string): Promise<void> {
   const signature = buildAggregatedSignature(level, title);
@@ -442,7 +486,10 @@ export async function releaseAggregatedPushWindow(level: string, title: string):
     await loadPersistedState();
     const entry = memoryState.get(signature);
     if (!entry) return;
-    entry.lastPushAtMs = 0;
+    const cooldownMs = Math.max(0, Math.trunc(config.notifyCooldownSec)) * 1000;
+    const expectedGeneration = entry.pushGeneration;
+    if (entry.pushGeneration !== expectedGeneration) return;
+    entry.lastPushAtMs = Math.max(0, Date.now() - cooldownMs + 60_000);
     entry.suppressedCount = 0;
     dirty = true;
     await flushAggregatedState();
@@ -453,6 +500,7 @@ export async function releaseAggregatedPushWindow(level: string, title: string):
 export async function resetAggregatedNotificationState(): Promise<void> {
   memoryState.clear();
   dirty = false;
+  dirtyGeneration = 0;
   loadPromise = null;
   signatureQueues.clear();
   flushChain = Promise.resolve();

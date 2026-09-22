@@ -115,6 +115,17 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/** Markdown 特殊字符转义（用于变量值渲染时，按渠道规则） */
+function escapeMarkdown(value: string): string {
+  return value
+    .split('\\').join('\\\\')
+    .split('*').join('\\*')
+    .split('_').join('\\_')
+    .split('`').join('\\`')
+    .split('[').join('\\[')
+    .split(']').join('\\]');
+}
+
 function normalizeParseMode(value: unknown): NotificationParseMode {
   const normalized = asTrimmedString(value);
   return (PARSE_MODES as string[]).includes(normalized) ? (normalized as NotificationParseMode) : '';
@@ -187,6 +198,19 @@ export function buildTemplateVarRecord(vars: NotificationTemplateVars): Record<s
   return record;
 }
 
+/** 对变量值做 Markdown 转义，防止变量内容（如 model 名含链接语法）被 Markdown 解析 */
+function buildEscapedTemplateVarRecord(vars: NotificationTemplateVars): Record<string, string> {
+  const raw = buildTemplateVarRecord(vars);
+  const escaped: Record<string, string> = { ...raw };
+  // 只转义可变内容字段，不转义固定元数据
+  for (const key of ['title', 'message', 'level', 'count', 'models', 'local_time', 'utc_time', 'timezone', 'app']) {
+    if (Object.prototype.hasOwnProperty.call(escaped, key)) {
+      escaped[key] = escapeMarkdown(escaped[key]);
+    }
+  }
+  return escaped;
+}
+
 export type RenderedNotificationTemplate = {
   title: string;
   body: string;
@@ -201,8 +225,11 @@ export function renderNotificationTemplate(
   template: NotificationTemplate | undefined,
   vars: NotificationTemplateVars,
   fallback: { title: string; body: string },
+  escapeMarkdownValues = false,
 ): RenderedNotificationTemplate {
-  const record = buildTemplateVarRecord(vars);
+  const record = escapeMarkdownValues
+    ? buildEscapedTemplateVarRecord(vars)
+    : buildTemplateVarRecord(vars);
   const render = (input: string): string => input.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, name: string) => (
     Object.prototype.hasOwnProperty.call(record, name) ? record[name] : match
   ));
@@ -234,4 +261,13 @@ export function findUnknownTemplatePlaceholders(template: NotificationTemplate |
     }
   }
   return [...found];
+}
+
+/** 供 notifyService 使用的便捷接口：变量值转义 */
+export function renderEscapedNotificationTemplate(
+  template: NotificationTemplate | undefined,
+  vars: NotificationTemplateVars,
+  fallback: { title: string; body: string },
+): RenderedNotificationTemplate {
+  return renderNotificationTemplate(template, vars, fallback, true);
 }

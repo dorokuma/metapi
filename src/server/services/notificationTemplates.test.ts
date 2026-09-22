@@ -156,7 +156,7 @@ describe('notification templates', () => {
     expect(JSON.parse(init.body).text).toBe('Token 已失效｜累计  次｜');
   });
 
-  it('retries telegram without parse_mode when the markup is rejected', async () => {
+  it('retries telegram without parse_mode only when the error is a parse entity rejection', async () => {
     const { saveNotificationTemplates } = await import('./notificationTemplates.js');
     await saveNotificationTemplates({
       telegram: { body: '*{{title}}*\n{{message}}', parseMode: 'Markdown' },
@@ -168,9 +168,9 @@ describe('notification templates', () => {
     config.telegramChatId = 'chat-1';
     config.smtpEnabled = false;
 
-    // 第一次带 parse_mode 被拒，第二次去掉 parse_mode 成功
+    // 第一次 400 且描述含 parse entity，触发重试；第二次成功
     fetchMock
-      .mockResolvedValueOnce({ ok: false, status: 400 })
+      .mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ ok: false, description: "Bad Request: can't parse entities" }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
 
     const { sendNotification } = await import('./notifyService.js');
@@ -180,6 +180,27 @@ describe('notification templates', () => {
 
     const [, secondInit] = fetchMock.mock.calls[1] as [string, any];
     expect(JSON.parse(secondInit.body).parse_mode).toBeUndefined();
+  });
+
+  it('does not retry telegram for non-parse-entity errors', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({
+      telegram: { body: '*{{title}}*\n{{message}}', parseMode: 'Markdown' },
+    });
+
+    const { config } = await import('../config.js');
+    config.telegramEnabled = true;
+    config.telegramBotToken = 'tg-token';
+    config.telegramChatId = 'chat-1';
+    config.smtpEnabled = false;
+
+    // 429 限流：不应重试
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 429, json: async () => ({ ok: false, description: 'Too Many Requests' }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    const result = await sendNotification('代理全部失败', '消息', 'error');
+    expect(result.succeeded).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('drops the official wrapper for wecom when a template is set', async () => {
@@ -273,5 +294,47 @@ describe('notification templates', () => {
     const { normalizeNotificationTemplates, NOTIFICATION_TEMPLATE_MAX_BODY_LENGTH } = await import('./notificationTemplates.js');
     const normalized = normalizeNotificationTemplates({ bark: { body: 'x'.repeat(10_000) } });
     expect(normalized.bark?.body?.length).toBe(NOTIFICATION_TEMPLATE_MAX_BODY_LENGTH);
+  });
+
+  it('escapes Markdown special characters in variable values when parseMode is set', async () => {
+    const { renderEscapedNotificationTemplate } = await import('./notificationTemplates.js');
+    const rendered = renderEscapedNotificationTemplate(
+      { title: '{{title}}', body: '{{message}} / {{models}}', parseMode: 'Markdown' },
+      {
+        title: '模型[vulnerable](https://evil.example)',
+        message: '含 _ 下划线 和 * 星号',
+        level: 'error',
+        count: 1,
+        models: ['claude-3.5', 'gpt-[evil](x)'],
+        localTime: 'now',
+        timeZone: 'UTC',
+      },
+      { title: 'fallback', body: 'fallback' },
+    );
+    // 链接语法不应被 Markdown 解析
+    expect(rendered.title).toContain('\\[vulnerable\\]');
+    expect(rendered.body).toContain('\\_ 下划线');
+    expect(rendered.body).toContain('\\* 星号');
+    expect(rendered.body).toContain('gpt-\\[evil\\](x)');
+    // 模板骨架不动
+    expect(rendered.usedTemplate).toBe(true);
+  });
+
+  it('does not escape variable values when no parseMode is set', async () => {
+    const { renderNotificationTemplate } = await import('./notificationTemplates.js');
+    const rendered = renderNotificationTemplate(
+      { title: '{{title}}', body: '{{message}}' },
+      {
+        title: '*italic*',
+        message: '_underscore_',
+        level: 'info',
+        localTime: 'now',
+        timeZone: 'UTC',
+      },
+      { title: 'f', body: 'f' },
+    );
+    // 无 parseMode 时，变量值原样保留
+    expect(rendered.title).toBe('*italic*');
+    expect(rendered.body).toBe('_underscore_');
   });
 });

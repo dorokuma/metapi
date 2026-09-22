@@ -176,4 +176,62 @@ describe('NotificationSettings templates', () => {
       root?.unmount();
     }
   });
+
+  it('restores caret after inserting a variable chip when unfocused', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {},
+    });
+    // 模拟未聚焦：textarea 的 selectionStart/selectionEnd 为 0
+    const origSelectionStart = global.HTMLTextAreaElement?.prototype?.selectionStart;
+    const origSelectionEnd = global.HTMLTextAreaElement?.prototype?.selectionEnd;
+    try {
+      if (!global.HTMLTextAreaElement) {
+        (global as any).HTMLTextAreaElement = class TextArea {};
+      }
+      Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionStart', {
+        configurable: true,
+        get() { return 0; },
+      });
+      Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionEnd', {
+        configurable: true,
+        get() { return 0; },
+      });
+
+      const root = await renderPage();
+      try {
+        const body = findInputByTestId(root, 'template-body-input');
+        await act(async () => {
+          body.props.onChange({ target: { value: 'prefix' } });
+        });
+
+        const countChip = root.root.findAll((node) => (
+          node.type === 'button' && node.props.title === '风暴聚合累计次数'
+        ))[0];
+        await act(async () => {
+          countChip.props.onClick();
+        });
+
+        const updated = findInputByTestId(root, 'template-body-input');
+        // 未聚焦时 selectionStart=0，追加到末尾（不插入到开头）
+        expect(updated.props.value).toBe('prefix{{count}}');
+      } finally {
+        root?.unmount();
+      }
+    } finally {
+      if (origSelectionStart !== undefined) {
+        Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionStart', {
+          configurable: true,
+          get() { return origSelectionStart; },
+        });
+      }
+      if (origSelectionEnd !== undefined) {
+        Object.defineProperty((global.HTMLTextAreaElement as any).prototype, 'selectionEnd', {
+          configurable: true,
+          get() { return origSelectionEnd; },
+        });
+      }
+    }
+  });
 });

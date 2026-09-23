@@ -6,7 +6,7 @@ import {
   buildNormalizedFinalToOpenAiChatChunks,
   normalizeOpenAiChatFinalToNormalized,
 } from './responseBridge.js';
-import { openAiChatStream } from './streamBridge.js';
+import { openAiChatStream, buildTerminalUsageRecord } from './streamBridge.js';
 import { config } from '../../../config.js';
 
 type StreamReader = {
@@ -19,6 +19,9 @@ type ChatProxyStreamSessionInput = {
   downstreamFormat: DownstreamFormat;
   modelName: string;
   successfulUpstreamPath: string;
+  // Opt-in terminal usage chunk for the openai downstream format. Claude stays
+  // false (its terminal frame is message_delta/message_stop, never a usage chunk).
+  includeUsage?: boolean;
   onParsedPayload?: (payload: unknown) => void;
   onEventParsed?: (payload: unknown) => void;
   writeLines: (lines: string[]) => void;
@@ -45,6 +48,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       pullSseEvents: openAiChatStream.pullSseEvents,
     };
   const streamContext = downstreamTransformer.createStreamContext(input.modelName);
+  streamContext.includeUsage = input.includeUsage === true;
   const claudeContext = anthropicMessagesTransformer.createDownstreamContext();
   const chatAggregateState = input.downstreamFormat === 'openai'
     ? createOpenAiChatAggregateState()
@@ -82,6 +86,11 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       status: 'failed',
       errorMessage: extractFailureMessage(payload, fallbackMessage),
     };
+    // A failed stream must never gain a trailing usage chunk, even when an
+    // earlier frame already captured terminalUsage; drop the opt-in so
+    // serializeStreamDone emits only [DONE]. Mirrors the suppression in
+    // finalize so the invariant holds regardless of call ordering.
+    streamContext.includeUsage = false;
   };
 
   const hasMeaningfulChatAggregateOutput = (): boolean => {
@@ -192,6 +201,13 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     if (input.downstreamFormat === 'openai' && !forwardedDownstreamOutput) {
       forwardedDownstreamOutput = true;
       flushPendingWrites();
+    }
+
+    // A failed stream must never gain a trailing usage chunk, even when an
+    // earlier frame already captured terminalUsage; drop the opt-in so
+    // serializeStreamDone emits only [DONE].
+    if (terminalResult.status === 'failed') {
+      streamContext.includeUsage = false;
     }
 
     // For native Anthropic streams, EOF without message_stop is not a clean
@@ -316,6 +332,12 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         streamContext.id = normalizedFinal.id;
         streamContext.model = normalizedFinal.model;
         streamContext.created = normalizedFinal.created;
+        // Remember the final usage for the terminal usage chunk without altering
+        // the synthetic chunks emitted by responseBridge.
+        const terminalUsage = buildTerminalUsageRecord(normalizedFinal.usagePayload, normalizedFinal.usageDetails);
+        if (terminalUsage) {
+          streamContext.terminalUsage = terminalUsage;
+        }
         emitLines(
           buildNormalizedFinalToOpenAiChatChunks(normalizedFinal)
             .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),

@@ -793,6 +793,11 @@ export async function handleChatSurfaceRequest(
           downstreamFormat,
           modelName,
           successfulUpstreamPath,
+          // Only opt into a terminal usage chunk for the openai downstream format
+          // when the client explicitly set stream_options.include_usage === true.
+          // Claude stays false (its closeout is message_delta/message_stop).
+          includeUsage: downstreamFormat === 'openai'
+            && (requestEnvelope.metadata as { streamOptionsIncludeUsage?: boolean | null } | undefined)?.streamOptionsIncludeUsage === true,
           onParsedPayload: (payload) => {
             if (payload && typeof payload === 'object') {
               upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(payload);

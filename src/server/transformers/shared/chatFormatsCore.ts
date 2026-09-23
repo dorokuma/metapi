@@ -30,6 +30,13 @@ export type StreamTransformContext = {
   responsesTextByIndex: Record<number, string>;
   responsesReasoningByIndex: Record<number, string>;
   thinkTagParser: ThinkTagParserState;
+  // When the downstream client asked for usage (stream_options.include_usage),
+  // serializeStreamDone emits a terminal usage chunk before [DONE] for the
+  // openai format. Defaults to false so behavior is unchanged unless opted in.
+  includeUsage?: boolean;
+  // Last-seen terminal usage payload (finite-numbered). Captured by the
+  // openai/chat bridge from choices:[]+usage frames and the final fallback.
+  terminalUsage?: Record<string, unknown>;
 };
 
 export type ClaudeDownstreamContext = {
@@ -310,6 +317,7 @@ export function createStreamTransformContext(modelName: string): StreamTransform
     responsesTextByIndex: {},
     responsesReasoningByIndex: {},
     thinkTagParser: createThinkTagParserState(),
+    includeUsage: false,
   };
 }
 
@@ -2355,6 +2363,32 @@ export function serializeNormalizedStreamEvent(
   return events;
 }
 
+function hasFiniteStreamUsageNumber(usage: Record<string, unknown> | undefined): usage is Record<string, unknown> {
+  if (!usage) return false;
+  for (const value of Object.values(usage)) {
+    if (typeof value === 'number' && Number.isFinite(value)) return true;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const nested of Object.values(value as Record<string, unknown>)) {
+        if (typeof nested === 'number' && Number.isFinite(nested)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function buildOpenAiTerminalUsageChunk(context: StreamTransformContext): string | null {
+  if (context.includeUsage !== true) return null;
+  if (!hasFiniteStreamUsageNumber(context.terminalUsage)) return null;
+  return serializeSse('', {
+    id: context.id,
+    object: 'chat.completion.chunk',
+    created: context.created,
+    model: context.model,
+    choices: [],
+    usage: context.terminalUsage,
+  });
+}
+
 export function serializeStreamDone(
   downstreamFormat: DownstreamFormat,
   context: StreamTransformContext,
@@ -2364,7 +2398,10 @@ export function serializeStreamDone(
   context.doneSent = true;
 
   if (downstreamFormat === 'openai') {
-    return [serializeSse('', '[DONE]')];
+    const terminalUsageChunk = buildOpenAiTerminalUsageChunk(context);
+    return terminalUsageChunk
+      ? [terminalUsageChunk, serializeSse('', '[DONE]')]
+      : [serializeSse('', '[DONE]')];
   }
 
   return buildClaudeDoneEvents(context, claudeContext, 'stop');

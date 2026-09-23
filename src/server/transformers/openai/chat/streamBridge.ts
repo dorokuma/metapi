@@ -20,6 +20,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function hasFiniteUsageRecordValue(merged: Record<string, unknown>): boolean {
+  for (const value of Object.values(merged)) {
+    if (typeof value === 'number' && Number.isFinite(value)) return true;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const nested of Object.values(value as Record<string, unknown>)) {
+        if (typeof nested === 'number' && Number.isFinite(nested)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Merge the usage payload with per-token details exactly like the mid-stream
+// serialization path (see serializeEvent). Only returns a record when at least
+// one finite usage number is present (top-level tokens or details), so an empty
+// usage:{} never produces a terminal chunk. Last frame wins (no summation).
+export function buildTerminalUsageRecord(
+  usagePayload: unknown,
+  usageDetails: OpenAiChatNormalizedStreamEvent['usageDetails'],
+): Record<string, unknown> | undefined {
+  const promptDetails = usageDetails?.prompt_tokens_details;
+  const completionDetails = usageDetails?.completion_tokens_details;
+  if (!isRecord(usagePayload) && !promptDetails && !completionDetails) return undefined;
+  const merged: Record<string, unknown> = {
+    ...(isRecord(usagePayload) ? usagePayload : {}),
+    ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}),
+    ...(completionDetails ? { completion_tokens_details: completionDetails } : {}),
+  };
+  if (!hasFiniteUsageRecordValue(merged)) return undefined;
+  return merged;
+}
+
 function getMultiChoiceToolState(
   context: StreamTransformContext,
 ): Record<string, { id?: string; name?: string; arguments?: string }> {
@@ -70,7 +102,7 @@ export const openAiChatStream = {
         }
         : choiceEvent
     ));
-    return {
+    const result: OpenAiChatNormalizedStreamEvent = {
       ...normalized,
       ...(primaryChoice
         ? {
@@ -82,6 +114,15 @@ export const openAiChatStream = {
       ...(normalizedChoiceEvents.length > 0 ? { choiceEvents: normalizedChoiceEvents } : {}),
       ...extractChatResponseExtras(payload),
     };
+    // Capture the latest terminal usage on the context (last frame wins, no
+    // summation). A usage-only frame (choices: [] + usage) records terminalUsage
+    // but serializeEvent still returns [] for it; the usage chunk is emitted once
+    // at serializeDone when includeUsage is enabled.
+    const terminalUsage = buildTerminalUsageRecord(result.usagePayload, result.usageDetails);
+    if (terminalUsage) {
+      context.terminalUsage = terminalUsage;
+    }
+    return result;
   },
   serializeEvent(
     event: OpenAiChatNormalizedStreamEvent,

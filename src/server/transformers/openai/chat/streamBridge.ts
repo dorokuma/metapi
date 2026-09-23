@@ -1,6 +1,7 @@
 import {
   createClaudeDownstreamContext,
   createStreamTransformContext,
+  hasFiniteUsageNumber,
   normalizeUpstreamStreamEvent,
   pullSseEventsWithDone,
   serializeNormalizedStreamEvent,
@@ -20,18 +21,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function hasFiniteUsageRecordValue(merged: Record<string, unknown>): boolean {
-  for (const value of Object.values(merged)) {
-    if (typeof value === 'number' && Number.isFinite(value)) return true;
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      for (const nested of Object.values(value as Record<string, unknown>)) {
-        if (typeof nested === 'number' && Number.isFinite(nested)) return true;
-      }
-    }
-  }
-  return false;
-}
-
 // Merge the usage payload with per-token details exactly like the mid-stream
 // serialization path (see serializeEvent). Only returns a record when at least
 // one finite usage number is present (top-level tokens or details), so an empty
@@ -48,7 +37,7 @@ export function buildTerminalUsageRecord(
     ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}),
     ...(completionDetails ? { completion_tokens_details: completionDetails } : {}),
   };
-  if (!hasFiniteUsageRecordValue(merged)) return undefined;
+  if (!hasFiniteUsageNumber(merged)) return undefined;
   return merged;
 }
 

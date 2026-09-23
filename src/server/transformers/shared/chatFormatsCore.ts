@@ -2363,7 +2363,10 @@ export function serializeNormalizedStreamEvent(
   return events;
 }
 
-function hasFiniteStreamUsageNumber(usage: Record<string, unknown> | undefined): usage is Record<string, unknown> {
+// Shared predicate: a usage record counts only when at least one finite
+// number sits at the top level or one level of nesting (token detail objects).
+// Used by the openai chat stream bridge and the terminal usage serializer.
+export function hasFiniteUsageNumber(usage: Record<string, unknown> | undefined): usage is Record<string, unknown> {
   if (!usage) return false;
   for (const value of Object.values(usage)) {
     if (typeof value === 'number' && Number.isFinite(value)) return true;
@@ -2378,7 +2381,7 @@ function hasFiniteStreamUsageNumber(usage: Record<string, unknown> | undefined):
 
 function buildOpenAiTerminalUsageChunk(context: StreamTransformContext): string | null {
   if (context.includeUsage !== true) return null;
-  if (!hasFiniteStreamUsageNumber(context.terminalUsage)) return null;
+  if (!hasFiniteUsageNumber(context.terminalUsage)) return null;
   return serializeSse('', {
     id: context.id,
     object: 'chat.completion.chunk',

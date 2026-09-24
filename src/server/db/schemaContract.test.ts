@@ -24,6 +24,33 @@ describe('schema contract generation', () => {
       notNull: true,
       primaryKey: false,
     });
+    expect(contract.tables.settings.columns.value).toMatchObject({
+      logicalType: 'text',
+      notNull: false,
+      primaryKey: false,
+    });
+    expect(contract.tables.notification_templates).toBeDefined();
+    expect(contract.tables.notification_templates.columns.event_type).toMatchObject({
+      logicalType: 'text',
+      notNull: true,
+      primaryKey: true,
+    });
+    expect(contract.tables.notification_templates.columns.channel).toMatchObject({
+      logicalType: 'text',
+      notNull: true,
+      primaryKey: true,
+    });
+    expect(contract.tables.notification_templates.columns.body).toMatchObject({
+      logicalType: 'text',
+      notNull: true,
+      defaultValue: "''",
+      primaryKey: false,
+    });
+    expect(contract.tables.notification_templates.columns.parse_mode).toMatchObject({
+      logicalType: 'text',
+      notNull: true,
+      defaultValue: "''",
+    });
     expect(contract.tables.proxy_video_tasks).toBeDefined();
     expect(contract.tables.route_channels.columns.source_model).toBeDefined();
     expect(contract.tables.route_channels.columns.last_selected_at).toBeDefined();
@@ -54,6 +81,11 @@ describe('schema contract generation', () => {
         columns: ['site_id', 'model_name'],
       }),
     );
+    // 复合主键表的两个成员列都会被标记为 primaryKey
+    const notificationTemplatePkColumns = Object.entries(contract.tables.notification_templates.columns)
+      .filter(([, column]) => column.primaryKey)
+      .map(([columnName]) => columnName);
+    expect(notificationTemplatePkColumns).toEqual(['event_type', 'channel']);
     expect(contract.uniques).toContainEqual(
       expect.objectContaining({
         name: 'model_availability_account_model_unique',

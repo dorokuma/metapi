@@ -137,7 +137,8 @@ describe('siteAnnouncementService', () => {
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
     expect(sendNotificationMock.mock.calls[0]?.[0]).toContain('Sub Site');
     expect(sendNotificationMock.mock.calls[0]?.[1]).toContain('Window starts at 10:00');
-    expect(sendNotificationMock.mock.calls[0]?.[2]).toBe('info');
+    expect(sendNotificationMock.mock.calls[0]?.[2]).toBe('site_notice');
+    expect(sendNotificationMock.mock.calls[0]?.[3]).toBe('info');
   });
 
   it('updates existing announcements without duplicating events or notifications', async () => {

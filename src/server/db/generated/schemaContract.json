@@ -720,6 +720,52 @@
         }
       }
     },
+    "notification_templates": {
+      "columns": {
+        "event_type": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "channel": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "title": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "''",
+          "primaryKey": false
+        },
+        "body": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "''",
+          "primaryKey": false
+        },
+        "parse_mode": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "''",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "oauth_route_unit_members": {
       "columns": {
         "id": {

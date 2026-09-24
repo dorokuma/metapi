@@ -164,6 +164,106 @@ describe('schema artifact generator', () => {
     );
   });
 
+  it('emits a single table-level primary key clause for composite primary keys', () => {
+    const contract: SchemaContract = {
+      tables: {
+        notification_templates: {
+          columns: {
+            event_type: makeColumn({ notNull: true, primaryKey: true }),
+            channel: makeColumn({ notNull: true, primaryKey: true }),
+            body: makeColumn({ notNull: true, defaultValue: "''" }),
+          },
+        },
+        settings: {
+          columns: {
+            key: makeColumn({ notNull: true, primaryKey: true }),
+            value: makeColumn(),
+          },
+        },
+      },
+      indexes: [],
+      uniques: [],
+      foreignKeys: [],
+    };
+
+    const artifacts = generateDialectArtifacts(contract);
+
+    expect(artifacts.mysqlBootstrap).toContain(
+      'CREATE TABLE IF NOT EXISTS `notification_templates` (`event_type` VARCHAR(191) NOT NULL, `channel` VARCHAR(191) NOT NULL, `body` TEXT NOT NULL DEFAULT \'\', PRIMARY KEY (`event_type`, `channel`))',
+    );
+    expect(artifacts.postgresBootstrap).toContain(
+      'CREATE TABLE IF NOT EXISTS "notification_templates" ("event_type" TEXT NOT NULL, "channel" TEXT NOT NULL, "body" TEXT NOT NULL DEFAULT \'\', PRIMARY KEY ("event_type", "channel"))',
+    );
+    // 复合主键不能逐列内联，否则会生成 "more than one primary key" 的非法 SQL
+    expect(artifacts.mysqlBootstrap).not.toContain('`event_type` VARCHAR(191) NOT NULL PRIMARY KEY');
+    // 单列主键保持内联不变
+    expect(artifacts.mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `settings` (`key` VARCHAR(191) NOT NULL PRIMARY KEY, `value` TEXT)');
+  });
+
+  it('keeps long-text marked notification template columns as TEXT in mysql', () => {
+    const artifacts = generateDialectArtifacts(readSchemaContract());
+
+    // 模板正文上限 4000 字：notification_templates.title/body/parse_mode 有显式长文本
+    // 标记，绝不能因为 DEFAULT '' 被映射成 VARCHAR(191) 而截断
+    expect(artifacts.mysqlBootstrap).toContain('`title` TEXT NOT NULL DEFAULT \'\'');
+    expect(artifacts.mysqlBootstrap).toContain('`body` TEXT NOT NULL DEFAULT \'\'');
+    expect(artifacts.mysqlBootstrap).toContain('`parse_mode` TEXT NOT NULL DEFAULT \'\'');
+    expect(artifacts.mysqlBootstrap).not.toContain('`body` VARCHAR(191)');
+    expect(artifacts.mysqlBootstrap).not.toContain('`title` VARCHAR(191)');
+    // postgres 侧 text 列本来就是 TEXT，不受标记影响
+    expect(artifacts.postgresBootstrap).toContain('"body" TEXT NOT NULL DEFAULT \'\'');
+    // 文本列若有长度上限依据（如 datetime 的 VARCHAR(191)）保持原样
+    expect(artifacts.mysqlBootstrap).toContain("`created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s'))");
+  });
+
+  it('maps non-primary-key text columns with defaults to varchar(191) without a long-text marker', () => {
+    const contract: SchemaContract = {
+      tables: {
+        sites: {
+          columns: {
+            // 既有表的枚举类文本列（无长文本标记）：带默认值仍是 VARCHAR(191)
+            status: makeColumn({ notNull: true, defaultValue: "'active'" }),
+            post_refresh_probe_model: makeColumn({ defaultValue: "''" }),
+            // 无默认值、非主键的文本列仍是 TEXT
+            url: makeColumn({ notNull: true }),
+          },
+        },
+        notification_templates: {
+          columns: {
+            // 同类列一旦带长文本标记就必须保持 TEXT
+            body: makeColumn({ notNull: true, defaultValue: "''" }),
+          },
+        },
+      },
+      indexes: [],
+      uniques: [],
+      foreignKeys: [],
+    };
+
+    const artifacts = generateDialectArtifacts(contract);
+
+    expect(artifacts.mysqlBootstrap).toContain('`status` VARCHAR(191) NOT NULL DEFAULT \'active\'');
+    expect(artifacts.mysqlBootstrap).toContain('`post_refresh_probe_model` VARCHAR(191) DEFAULT \'\'');
+    expect(artifacts.mysqlBootstrap).toContain('`url` TEXT NOT NULL');
+    expect(artifacts.mysqlBootstrap).toContain('`body` TEXT NOT NULL DEFAULT \'\'');
+  });
+
+  it('keeps existing tables mysql bootstrap column types byte-compatible (varchar(191) with defaults)', () => {
+    const artifacts = generateDialectArtifacts(readSchemaContract());
+
+    // 既有带默认值的 text 列必须保持 VARCHAR(191)，不得被长文本改动波及
+    expect(artifacts.mysqlBootstrap).toContain("`status` VARCHAR(191) NOT NULL DEFAULT 'active'");
+    expect(artifacts.mysqlBootstrap).toContain("`status` VARCHAR(191) DEFAULT 'active'");
+    expect(artifacts.mysqlBootstrap).toContain("`source` VARCHAR(191) DEFAULT 'manual'");
+    expect(artifacts.mysqlBootstrap).toContain("`value_status` VARCHAR(191) NOT NULL DEFAULT 'ready'");
+    expect(artifacts.mysqlBootstrap).toContain("`level` VARCHAR(191) NOT NULL DEFAULT 'info'");
+    expect(artifacts.mysqlBootstrap).toContain("`routing_strategy` VARCHAR(191) DEFAULT 'weighted'");
+    expect(artifacts.mysqlBootstrap).toContain("`route_mode` VARCHAR(191) DEFAULT 'pattern'");
+    expect(artifacts.mysqlBootstrap).toContain("`strategy` VARCHAR(191) NOT NULL DEFAULT 'round_robin'");
+    expect(artifacts.mysqlBootstrap).toContain("`time_zone` VARCHAR(191) NOT NULL DEFAULT 'Local'");
+    expect(artifacts.mysqlBootstrap).toContain("`post_refresh_probe_scope` VARCHAR(191) DEFAULT 'single'");
+  });
+
   it('rejects destructive diffs when generating additive upgrades', () => {
     const current = readSchemaContract();
     const previous = structuredClone(current);

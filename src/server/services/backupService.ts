@@ -5,6 +5,7 @@ import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
+import { resetLegacyNotificationTemplateMigrationFlag } from './notificationTemplates.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
 
 const BACKUP_VERSION = '2.1';
@@ -51,6 +52,7 @@ type ProxyLogRow = typeof schema.proxyLogs.$inferSelect;
 type CheckinLogRow = typeof schema.checkinLogs.$inferSelect;
 type DownstreamApiKeyRow = typeof schema.downstreamApiKeys.$inferSelect;
 type SiteAnnouncementRow = typeof schema.siteAnnouncements.$inferSelect;
+type NotificationTemplateRow = typeof schema.notificationTemplates.$inferSelect;
 type SettingRow = typeof schema.settings.$inferSelect;
 
 type BackupAccountRow = Omit<AccountRow, 'balanceUsed' | 'lastCheckinAt' | 'lastBalanceRefresh'>
@@ -117,6 +119,8 @@ interface AccountsBackupSection {
 
 interface PreferencesBackupSection {
   settings: Array<{ key: string; value: unknown }>;
+  /** 推送模板已从 settings JSON 迁到 notification_templates 表，备份里全量导出（含事件覆盖行）。 */
+  notificationTemplates?: NotificationTemplateRow[];
 }
 
 interface BackupFullV2 {
@@ -1376,14 +1380,26 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
 }
 
 async function exportPreferencesSection(): Promise<PreferencesBackupSection> {
-  const settings = (await db.select().from(schema.settings).all() as SettingRow[])
-    .filter((row) => !EXCLUDED_SETTING_KEYS.has(row.key))
-    .map((row) => ({
-      key: row.key,
-      value: parseSettingValue(row.value),
-    }));
+  const [settings, notificationTemplates] = await Promise.all([
+    db.select().from(schema.settings).all() as Promise<SettingRow[]>,
+    db.select().from(schema.notificationTemplates)
+      .orderBy(
+        asc(schema.notificationTemplates.eventType),
+        asc(schema.notificationTemplates.channel),
+      )
+      .all() as Promise<NotificationTemplateRow[]>,
+  ]);
 
-  return { settings };
+  return {
+    settings: settings
+      .filter((row) => !EXCLUDED_SETTING_KEYS.has(row.key))
+      .map((row) => ({
+        key: row.key,
+        value: parseSettingValue(row.value),
+      })),
+    // 模板行全量导出（含 __global__ 与各事件覆盖行），导入侧按「恢复备份中的行」处理
+    notificationTemplates,
+  };
 }
 
 export async function exportBackup(type: BackupExportType): Promise<BackupV2> {
@@ -1454,6 +1470,28 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
   };
 }
 
+/** 备份里的 notification_templates 行；结构不合法的行直接跳过。 */
+function coerceNotificationTemplateRow(raw: Record<string, unknown>): NotificationTemplateRow | null {
+  const eventType = typeof raw.eventType === 'string' ? raw.eventType : '';
+  const channel = typeof raw.channel === 'string' ? raw.channel : '';
+  if (!eventType || !channel) return null;
+  const createdAt = typeof raw.createdAt === 'string' && raw.createdAt
+    ? raw.createdAt
+    : new Date().toISOString();
+  const updatedAt = typeof raw.updatedAt === 'string' && raw.updatedAt
+    ? raw.updatedAt
+    : createdAt;
+  return {
+    eventType,
+    channel,
+    title: typeof raw.title === 'string' ? raw.title : '',
+    body: typeof raw.body === 'string' ? raw.body : '',
+    parseMode: typeof raw.parseMode === 'string' ? raw.parseMode : '',
+    createdAt,
+    updatedAt,
+  };
+}
+
 function coercePreferencesSection(input: unknown): PreferencesBackupSection | null {
   if (!isRecord(input)) return null;
   const settingsRaw = input.settings;
@@ -1468,7 +1506,13 @@ function coercePreferencesSection(input: unknown): PreferencesBackupSection | nu
     })
     .filter((row): row is { key: string; value: unknown } => !!row);
 
-  return { settings };
+  const notificationTemplates = Array.isArray(input.notificationTemplates)
+    ? input.notificationTemplates
+      .map((row) => (isRecord(row) ? coerceNotificationTemplateRow(row) : null))
+      .filter((row): row is NotificationTemplateRow => !!row)
+    : undefined;
+
+  return notificationTemplates ? { settings, notificationTemplates } : { settings };
 }
 
 function detectAccountsSection(data: RawBackupData): AccountsBackupSection | null {
@@ -1865,7 +1909,20 @@ async function importPreferencesSection(section: PreferencesBackupSection): Prom
       await upsertSetting(row.key, row.value, tx);
       applied.push({ key: row.key, value: row.value });
     }
+
+    // 推送模板：恢复备份里的行（与设置项同一个事务，要么全恢复要么都不恢复）。
+    // 旧版本备份没有这一段：不碰本地表，改由下面的 legacy 迁移补齐 __global__。
+    if (Array.isArray(section.notificationTemplates)) {
+      await tx.delete(schema.notificationTemplates).run();
+      if (section.notificationTemplates.length > 0) {
+        await tx.insert(schema.notificationTemplates).values(section.notificationTemplates).run();
+      }
+    }
   });
+
+  // 备份可能把旧版导出的 legacy JSON 又写回 settings：重新打开迁移检查，
+  // 之后的重迁移只会补齐缺失的 __global__ 行，不会删掉刚恢复的事件覆盖行。
+  resetLegacyNotificationTemplateMigrationFlag();
 
   return applied;
 }

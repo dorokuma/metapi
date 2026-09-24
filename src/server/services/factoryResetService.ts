@@ -3,6 +3,7 @@ import { db, schema, switchRuntimeDatabase } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings } from './checkinScheduler.js';
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
+import { resetLegacyNotificationTemplateMigrationFlag } from './notificationTemplates.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
 
@@ -38,8 +39,11 @@ async function clearAllBusinessData() {
     await tx.delete(schema.sites).run();
     await tx.delete(schema.downstreamApiKeys).run();
     await tx.delete(schema.events).run();
+    await tx.delete(schema.notificationTemplates).run();
     await tx.delete(schema.settings).run();
   });
+  // 模板行已被清空：重新打开 legacy 迁移检查，避免沿用上一轮的「已迁移」标记
+  resetLegacyNotificationTemplateMigrationFlag();
 }
 
 function captureInfrastructureState(): PreservedInfrastructureState {

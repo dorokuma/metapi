@@ -12,6 +12,7 @@ type AccountTokenRow = DbModule['schema']['accountTokens']['$inferSelect'];
 type ModelAvailabilityRow = DbModule['schema']['modelAvailability']['$inferSelect'];
 type ProxyLogRow = DbModule['schema']['proxyLogs']['$inferSelect'];
 type SettingRow = DbModule['schema']['settings']['$inferSelect'];
+type NotificationTemplateRow = DbModule['schema']['notificationTemplates']['$inferSelect'];
 
 describe('backupService', () => {
   let db: DbModule['db'];
@@ -49,6 +50,7 @@ describe('backupService', () => {
     await db.delete(schema.proxyFiles).run();
     await db.delete(schema.proxyVideoTasks).run();
     await db.delete(schema.events).run();
+    await db.delete(schema.notificationTemplates).run();
     await db.delete(schema.settings).run();
   });
 
@@ -373,6 +375,90 @@ describe('backupService', () => {
     expect(savedKeys).not.toContain('db_type');
     expect(savedKeys).not.toContain('db_url');
     expect(savedKeys).not.toContain('db_ssl');
+  });
+
+  it('exports and restores notification template rows in preferences backups', async () => {
+    await db.insert(schema.notificationTemplates).values([
+      { eventType: '__global__', channel: 'telegram', title: '[TG] {{title}}', body: 'GLOBAL {{message}}' },
+      { eventType: 'token', channel: 'telegram', body: 'TOKEN {{message}}' },
+    ]).run();
+
+    const exported = await backupService.exportBackup('preferences') as any;
+    const exportedRows = exported.preferences.notificationTemplates.map((row: any) => ({
+      eventType: row.eventType,
+      channel: row.channel,
+      title: row.title,
+      body: row.body,
+    }));
+    expect(exportedRows).toEqual([
+      { eventType: '__global__', channel: 'telegram', title: '[TG] {{title}}', body: 'GLOBAL {{message}}' },
+      { eventType: 'token', channel: 'telegram', title: '', body: 'TOKEN {{message}}' },
+    ]);
+
+    await db.delete(schema.notificationTemplates).run();
+
+    const result = await backupService.importBackup({
+      version: '2.1',
+      timestamp: Date.now(),
+      type: 'preferences',
+      preferences: {
+        settings: [],
+        notificationTemplates: [
+          { eventType: '__global__', channel: 'telegram', title: '[TG] {{title}}', body: 'GLOBAL {{message}}', parseMode: '', createdAt: '2026-09-24T00:00:00.000Z', updatedAt: '2026-09-24T00:00:00.000Z' },
+          { eventType: 'token', channel: 'telegram', title: '', body: 'TOKEN {{message}}', parseMode: '', createdAt: '2026-09-24T00:00:00.000Z', updatedAt: '2026-09-24T00:00:00.000Z' },
+        ],
+      },
+    });
+
+    expect(result.sections.preferences).toBe(true);
+    const restoredRows = await db.select().from(schema.notificationTemplates).all() as NotificationTemplateRow[];
+    expect(restoredRows.map((row) => `${row.eventType}:${row.channel}`).sort()).toEqual([
+      '__global__:telegram',
+      'token:telegram',
+    ]);
+    expect(restoredRows.find((row) => row.eventType === 'token')?.body).toBe('TOKEN {{message}}');
+  });
+
+  it('keeps restored event overrides when an imported legacy backup re-runs the templates migration', async () => {
+    await db.insert(schema.notificationTemplates).values([
+      { eventType: 'token', channel: 'telegram', body: 'TOKEN-TG' },
+      { eventType: '__global__', channel: 'bark', body: 'CURRENT-BARK' },
+    ]).run();
+
+    // 旧版本备份：只有 legacy JSON，没有 notification_templates 段落
+    const result = await backupService.importBackup({
+      version: '2.1',
+      timestamp: Date.now(),
+      type: 'preferences',
+      preferences: {
+        settings: [
+          {
+            key: 'notification_templates_v1',
+            value: { bark: { body: 'LEGACY-BARK' }, telegram: { body: 'LEGACY-TG' } },
+          },
+        ],
+      },
+    });
+
+    expect(result.sections.preferences).toBe(true);
+
+    // 导入入口重置了迁移标记：下一次模板加载会重跑迁移（只补缺失的 __global__ 行）
+    const { loadNotificationTemplates } = await import('./notificationTemplates.js');
+    await loadNotificationTemplates();
+
+    const rows = await db.select().from(schema.notificationTemplates).all() as NotificationTemplateRow[];
+    const byKey = new Map(rows.map((row) => [`${row.eventType}:${row.channel}`, row.body]));
+    // 已有行（含事件覆盖行）必须原样保留
+    expect(byKey.get('token:telegram')).toBe('TOKEN-TG');
+    expect(byKey.get('__global__:bark')).toBe('CURRENT-BARK');
+    // 缺失的 __global__ 渠道被补齐
+    expect(byKey.get('__global__:telegram')).toBe('LEGACY-TG');
+
+    const legacyRow = await db.select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(eq(schema.settings.key, 'notification_templates_v1'))
+      .get() as SettingRow | undefined;
+    expect(legacyRow).toBeUndefined();
   });
 
   it('preserves local logs and runtime stats when importing account backups', async () => {

@@ -1,1 +1,1 @@
-ALTER TABLE `sites` ADD COLUMN `preferred_endpoint` VARCHAR(191) DEFAULT '';
+CREATE TABLE IF NOT EXISTS `notification_templates` (`event_type` VARCHAR(191) NOT NULL, `channel` VARCHAR(191) NOT NULL, `title` TEXT NOT NULL DEFAULT '', `body` TEXT NOT NULL DEFAULT '', `parse_mode` TEXT NOT NULL DEFAULT '', `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), PRIMARY KEY (`event_type`, `channel`));

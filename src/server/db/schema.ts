@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, uniqueIndex, index, check } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex, index, check, primaryKey } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 export const sites = sqliteTable('sites', {
@@ -382,6 +382,22 @@ export const settings = sqliteTable('settings', {
   value: text('value'), // JSON
 });
 
+/**
+ * 推送模板（事件类型 × 渠道）。`__global__` 为兜底行，未单独定义模板的事件类型回退到它。
+ * 历史数据曾以 `settings.notification_templates_v1` 的 JSON 存放，已迁移到本表。
+ */
+export const notificationTemplates = sqliteTable('notification_templates', {
+  eventType: text('event_type').notNull(),
+  channel: text('channel').notNull(),
+  title: text('title').notNull().default(''),
+  body: text('body').notNull().default(''),
+  parseMode: text('parse_mode').notNull().default(''),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  eventChannelPk: primaryKey({ columns: [table.eventType, table.channel] }),
+}));
+
 export const adminSnapshots = sqliteTable('admin_snapshots', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   namespace: text('namespace').notNull(),
@@ -548,7 +564,7 @@ export const siteAnnouncements = sqliteTable('site_announcements', {
 
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
-  type: text('type').notNull(), // 'checkin' | 'balance' | 'token' | 'proxy' | 'status'
+  type: text('type').notNull(), // 'checkin' | 'balance' | 'token' | 'proxy' | 'status' | 'site_notice' | 'daily_summary'
   title: text('title').notNull(),
   message: text('message'),
   level: text('level').notNull().default('info'), // 'info' | 'warning' | 'error'

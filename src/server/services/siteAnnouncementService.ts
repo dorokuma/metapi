@@ -151,7 +151,7 @@ export async function syncSiteAnnouncements(options?: { siteId?: number | null }
         }).run();
         result.events += 1;
 
-        await sendNotification(title, message, announcement.level);
+        await sendNotification(title, message, 'site_notice', announcement.level);
         result.notifications += 1;
       }
     } catch (error) {

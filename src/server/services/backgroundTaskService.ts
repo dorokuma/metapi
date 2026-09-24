@@ -192,7 +192,7 @@ async function runTask(taskId: string, options: BackgroundTaskStartOptions, runn
     appendTaskEvent('info', eventTitle, eventMessage, task.id);
 
     if (options.notifyOnSuccess) {
-      await sendNotification(eventTitle, eventMessage, 'info');
+      await sendNotification(eventTitle, eventMessage, 'status', 'info');
     }
   } catch (error) {
     const errorText = summarizeError(error);
@@ -209,7 +209,7 @@ async function runTask(taskId: string, options: BackgroundTaskStartOptions, runn
     appendTaskEvent('error', eventTitle, eventMessage, task.id);
 
     if (options.notifyOnFailure ?? true) {
-      await sendNotification(eventTitle, eventMessage, 'error');
+      await sendNotification(eventTitle, eventMessage, 'status', 'error');
     }
   } finally {
     if (task.dedupeKey && dedupeTaskIds.get(task.dedupeKey) === task.id) {

@@ -48,11 +48,12 @@ import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
 import { setOauthProviderSiteAutoCreateEnabled } from '../../services/oauth/oauthSiteRegistry.js';
 import {
   NOTIFICATION_TEMPLATE_VARIABLES,
+  buildNotificationTemplateVariablesByEvent,
   loadNotificationTemplates,
   parseNotificationTemplatesInput,
   saveNotificationTemplates,
-  type NotificationTemplates,
 } from '../../services/notificationTemplates.js';
+import { DAILY_SUMMARY_TEMPLATE_VARIABLES } from '../../services/dailySummaryService.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -742,6 +743,9 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     oauthProviderSiteAutoCreateEnabled: config.oauthProviderSiteAutoCreateEnabled,
     notificationTemplateVariables: [...NOTIFICATION_TEMPLATE_VARIABLES],
+    notificationTemplateVariablesByEvent: buildNotificationTemplateVariablesByEvent({
+      daily_summary: DAILY_SUMMARY_TEMPLATE_VARIABLES,
+    }),
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
     proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
@@ -2018,6 +2022,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       const result = await sendNotification(
         '测试通知',
         '您好，这是一条来自系统设置的连通性测试通知，您的通知相关配置目前工作正常！',
+        '__global__',
         'info',
         {
           bypassThrottle: true,

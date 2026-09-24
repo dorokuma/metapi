@@ -5,6 +5,8 @@ import { tr } from '../i18n.js';
 
 type TemplateChannel = 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp';
 type TemplateParseMode = '' | 'Markdown' | 'HTML';
+/** '__global__' 为兜底模板：未单独定义的类型/渠道都回退到它。 */
+type TemplateEventKey = '__global__' | 'token' | 'proxy' | 'site_notice' | 'checkin' | 'status' | 'daily_summary';
 
 type NotificationTemplate = {
     title?: string;
@@ -12,7 +14,19 @@ type NotificationTemplate = {
     parseMode?: TemplateParseMode;
 };
 
-type NotificationTemplates = Partial<Record<TemplateChannel, NotificationTemplate>>;
+type NotificationTemplatesByEvent = Partial<Record<TemplateEventKey, Partial<Record<TemplateChannel, NotificationTemplate>>>>;
+
+const GLOBAL_EVENT_KEY: TemplateEventKey = '__global__';
+
+const TEMPLATE_EVENT_TYPES: Array<{ value: TemplateEventKey; label: string; hint: string }> = [
+    { value: '__global__', label: '全局（兜底）', hint: '未单独定义模板的事件类型都会使用这一组模板' },
+    { value: 'token', label: 'Token 失效', hint: '账号访问令牌失效' },
+    { value: 'proxy', label: '代理告警', hint: '代理全部失败等路由级告警' },
+    { value: 'site_notice', label: '站点公告', hint: '上游站点公告推送' },
+    { value: 'checkin', label: '签到', hint: '签到失败 / Cloudflare 挑战' },
+    { value: 'status', label: '系统状态', hint: '后台任务与更新中心提醒' },
+    { value: 'daily_summary', label: '每日总结', hint: '每日统计汇总，支持专属变量' },
+];
 
 const TEMPLATE_CHANNELS: Array<{ value: TemplateChannel; label: string }> = [
     { value: 'telegram', label: 'Telegram' },
@@ -34,6 +48,26 @@ const TEMPLATE_VARIABLES: Array<{ name: string; hint: string }> = [
     { name: 'app', hint: '应用名 metapi' },
 ];
 
+/** daily_summary 专属变量（snake_case，与服务端 buildDailySummaryTemplateVars 对齐）。 */
+const DAILY_SUMMARY_VARIABLES: Array<{ name: string; hint: string }> = [
+    { name: 'local_day', hint: '统计日期' },
+    { name: 'generated_at_local', hint: '生成时间（本地）' },
+    { name: 'total_accounts', hint: '账号总数' },
+    { name: 'active_accounts', hint: '活跃账号数' },
+    { name: 'low_balance_accounts', hint: '低余额(<$1)账号数' },
+    { name: 'checkin_total', hint: '签到总数' },
+    { name: 'checkin_success', hint: '签到成功数' },
+    { name: 'checkin_skipped', hint: '签到跳过数' },
+    { name: 'checkin_failed', hint: '签到失败数' },
+    { name: 'proxy_total', hint: '代理请求总数' },
+    { name: 'proxy_success', hint: '代理成功数' },
+    { name: 'proxy_failed', hint: '代理失败数' },
+    { name: 'proxy_total_tokens', hint: '当日 Tokens' },
+    { name: 'today_spend', hint: '当日支出（美元）' },
+    { name: 'today_reward', hint: '当日奖励（美元）' },
+    { name: 'today_net', hint: '当日净值（美元）' },
+];
+
 const PREVIEW_VARS: Record<string, string> = {
     title: '代理全部失败',
     message: '模型=grok-4.6, 原因=No available channels after retries',
@@ -46,22 +80,47 @@ const PREVIEW_VARS: Record<string, string> = {
     app: 'metapi',
 };
 
-function renderPreview(template: NotificationTemplate | undefined, channel: TemplateChannel): { title: string; body: string } {
+/** daily_summary 预览用的专属变量示例值。 */
+const PREVIEW_DAILY_SUMMARY_VARS: Record<string, string> = {
+    local_day: '2026-09-22',
+    generated_at_local: '2026-09-22 23:58:00',
+    total_accounts: '12',
+    active_accounts: '10',
+    low_balance_accounts: '3',
+    checkin_total: '10',
+    checkin_success: '8',
+    checkin_skipped: '1',
+    checkin_failed: '1',
+    proxy_total: '1024',
+    proxy_success: '980',
+    proxy_failed: '44',
+    proxy_total_tokens: '12,345,678',
+    today_spend: '3.141592',
+    today_reward: '5.200000',
+    today_net: '2.058408',
+};
+
+function renderPreview(
+    template: NotificationTemplate | undefined,
+    channel: TemplateChannel,
+    vars: Record<string, string>,
+): { title: string; body: string } {
     const render = (input: string) => input.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, name: string) => (
-        Object.prototype.hasOwnProperty.call(PREVIEW_VARS, name) ? PREVIEW_VARS[name] : match
+        Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : match
     ));
+    const level = vars.level || 'error';
     // 与 notifyService 的 subject 规则保持一致：无自定义标题时 SMTP 带官方前缀
     const fallbackTitle = channel === 'smtp'
-        ? `[metapi][${PREVIEW_VARS.level.toUpperCase()}] ${PREVIEW_VARS.title}`
-        : PREVIEW_VARS.title;
+        ? `[metapi][${level.toUpperCase()}] ${vars.title}`
+        : vars.title;
     if (!template || (!template.title && !template.body)) {
         return channel === 'smtp'
-            ? { title: fallbackTitle, body: `${PREVIEW_VARS.message}\n\nLevel: ${PREVIEW_VARS.level}\nLocal Time: ${PREVIEW_VARS.local_time}` }
-            : { title: fallbackTitle, body: `[metapi][${PREVIEW_VARS.level.toUpperCase()}] ${PREVIEW_VARS.title}\n\n${PREVIEW_VARS.message}\n\nLevel: ${PREVIEW_VARS.level}\nLocal Time: ${PREVIEW_VARS.local_time}` };
+            ? { title: fallbackTitle, body: `${vars.message}\n\nLevel: ${level}\nLocal Time: ${vars.local_time}` }
+            : { title: fallbackTitle, body: `[metapi][${level.toUpperCase()}] ${vars.title}\n\n${vars.message}\n\nLevel: ${level}\nLocal Time: ${vars.local_time}` };
     }
     return {
         title: template.title ? render(template.title) : fallbackTitle,
-        body: template.body ? render(template.body) : `${PREVIEW_VARS.message}\n\nLevel: ${PREVIEW_VARS.level}`,
+        body: template.body ? render(template.body) : `${vars.message}\n\nLevel: ${level}`,
     };
 }
 
@@ -87,11 +146,23 @@ type RuntimeSettings = {
     serverChanKeyMasked?: string;
     telegramBotTokenMasked?: string;
     notifyCooldownSec: number;
-    notificationTemplates: NotificationTemplates;
+    notificationTemplates: NotificationTemplatesByEvent;
 };
 
-function TemplatePreview({ channel, template }: { channel: TemplateChannel; template: NotificationTemplate | undefined }) {
-    const preview = useMemo(() => renderPreview(template, channel), [template, channel]);
+function isTemplateEmpty(template: NotificationTemplate | undefined): boolean {
+    return !template || (!template.title && !template.body && !template.parseMode);
+}
+
+function TemplatePreview({
+    channel,
+    template,
+    vars,
+}: {
+    channel: TemplateChannel;
+    template: NotificationTemplate | undefined;
+    vars: Record<string, string>;
+}) {
+    const preview = useMemo(() => renderPreview(template, channel, vars), [template, channel, vars]);
     return (
         <div
             data-testid="template-preview"
@@ -141,6 +212,7 @@ export default function NotificationSettings() {
         notificationTemplates: {},
     });
 
+    const [activeTemplateEvent, setActiveTemplateEvent] = useState<TemplateEventKey>(GLOBAL_EVENT_KEY);
     const [activeTemplateChannel, setActiveTemplateChannel] = useState<TemplateChannel>('telegram');
 
     const [serverChanKey, setServerChanKey] = useState('');
@@ -167,6 +239,11 @@ export default function NotificationSettings() {
         setLoading(true);
         try {
             const runtimeInfo = await api.getRuntimeSettings();
+            const rawTemplates = (runtimeInfo.notificationTemplates || {}) as NotificationTemplatesByEvent;
+            // 兼容旧版扁平结构（channel → template）：整体按 __global__ 读入。
+            const templates: NotificationTemplatesByEvent = TEMPLATE_EVENT_TYPES.some((item) => item.value in rawTemplates)
+                ? rawTemplates
+                : { [GLOBAL_EVENT_KEY]: rawTemplates as NotificationTemplatesByEvent[typeof GLOBAL_EVENT_KEY] };
             setRuntime({
                 webhookUrl: runtimeInfo.webhookUrl || '',
                 barkUrl: runtimeInfo.barkUrl || '',
@@ -191,7 +268,7 @@ export default function NotificationSettings() {
                 notifyCooldownSec: Number.isFinite(Number(runtimeInfo.notifyCooldownSec))
                     ? Math.max(0, Math.trunc(Number(runtimeInfo.notifyCooldownSec)))
                     : 300,
-                notificationTemplates: (runtimeInfo.notificationTemplates || {}) as NotificationTemplates,
+                notificationTemplates: templates,
             });
         } catch (err: any) {
             toast.error(err?.message || '加载通知设置失败');
@@ -238,6 +315,8 @@ export default function NotificationSettings() {
                 serverChanKeyMasked: res.serverChanKeyMasked || prev.serverChanKeyMasked,
                 telegramBotTokenMasked: res.telegramBotTokenMasked || prev.telegramBotTokenMasked,
                 smtpPassMasked: res.smtpPassMasked || prev.smtpPassMasked,
+                // 保存后收敛：空覆盖行等价于继承，服务端会丢弃，本地状态同步
+                notificationTemplates: dropEmptyOverrideRows(prev.notificationTemplates),
             }));
             setServerChanKey('');
             setTelegramBotToken('');
@@ -261,6 +340,115 @@ export default function NotificationSettings() {
             setTestingNotify(false);
         }
     };
+
+    const activeEventTemplates = runtime.notificationTemplates[activeTemplateEvent] || {};
+    const globalTemplates = runtime.notificationTemplates[GLOBAL_EVENT_KEY] || {};
+    const overrideTemplate = activeEventTemplates[activeTemplateChannel];
+    const globalTemplate = globalTemplates[activeTemplateChannel];
+    /**
+     * 「该事件存在覆盖行」的显式判据：payload 里有这个 (事件, 渠道) 单元格就算已单独定义。
+     * 不再凭模板内容判空——全局模板为空时「一键继承全局」只会得到一行空覆盖，
+     * 旧逻辑据此判定「未定制」并把后续输入静默写回全局，用户永远建不出独立覆盖。
+     */
+    const isCustomized = !!overrideTemplate;
+    const effectiveTemplate = isCustomized ? overrideTemplate : globalTemplate;
+    /** 事件类型是否已有任一有内容的覆盖（事件 Tab 提示点） */
+    const eventHasOwnTemplate = (event: TemplateEventKey): boolean => (
+        Object.values(runtime.notificationTemplates[event] || {}).some((template) => !isTemplateEmpty(template))
+    );
+    /** 渠道是否已有覆盖行（含空行：空行也是用户显式创建的覆盖） */
+    const channelHasOverride = (event: TemplateEventKey, channel: TemplateChannel): boolean => (
+        !!runtime.notificationTemplates[event]?.[channel]
+    );
+    /** 非全局事件下的空覆盖行等价于继承全局，服务端会丢弃；保存后本地状态同步收敛。 */
+    const dropEmptyOverrideRows = (templates: NotificationTemplatesByEvent): NotificationTemplatesByEvent => {
+        const next: NotificationTemplatesByEvent = {};
+        for (const [event, channels] of Object.entries(templates)) {
+            if (event === GLOBAL_EVENT_KEY) {
+                next[event] = channels;
+                continue;
+            }
+            const kept: Partial<Record<TemplateChannel, NotificationTemplate>> = {};
+            for (const [channel, template] of Object.entries(channels || {}) as Array<[TemplateChannel, NotificationTemplate]>) {
+                if (!isTemplateEmpty(template)) kept[channel] = template;
+            }
+            if (Object.keys(kept).length > 0) next[event as TemplateEventKey] = kept;
+        }
+        return next;
+    };
+
+    /**
+     * 写入当前事件类型的模板单元格。
+     * 未单独定义时先在该事件上创建一份独立覆盖（沿用当前全局内容，避免输入瞬间内容被清空），
+     * 绝不静默写回 __global__。
+     */
+    const writeTemplate = (channel: TemplateChannel, patch: Partial<NotificationTemplate>) => {
+        setRuntime((prev) => {
+            const event = activeTemplateEvent;
+            const eventTemplates = { ...(prev.notificationTemplates[event] || {}) };
+            const current: NotificationTemplate = eventTemplates[channel]
+                || { ...(prev.notificationTemplates[GLOBAL_EVENT_KEY]?.[channel] || {}) };
+            const next: NotificationTemplate = { ...current, ...patch };
+            for (const key of ['title', 'body'] as const) {
+                if (!next[key]) delete next[key];
+            }
+            if (!next.parseMode) delete next.parseMode;
+            // __global__ 上清空即删除该行；非全局事件保留（可能为空的）覆盖行作为显式标记
+            if (event === GLOBAL_EVENT_KEY && !next.title && !next.body && !next.parseMode) {
+                delete eventTemplates[channel];
+            } else {
+                eventTemplates[channel] = next;
+            }
+            const templates = { ...prev.notificationTemplates };
+            if (Object.keys(eventTemplates).length === 0) {
+                delete templates[event];
+            } else {
+                templates[event] = eventTemplates;
+            }
+            return { ...prev, notificationTemplates: templates };
+        });
+    };
+
+    const inheritGlobal = () => {
+        setRuntime((prev) => {
+            const source = prev.notificationTemplates[GLOBAL_EVENT_KEY]?.[activeTemplateChannel] || {};
+            const templates = { ...prev.notificationTemplates };
+            templates[activeTemplateEvent] = {
+                ...(templates[activeTemplateEvent] || {}),
+                [activeTemplateChannel]: { ...source },
+            };
+            return { ...prev, notificationTemplates: templates };
+        });
+    };
+
+    const clearOverride = () => {
+        setRuntime((prev) => {
+            const eventTemplates = { ...(prev.notificationTemplates[activeTemplateEvent] || {}) };
+            delete eventTemplates[activeTemplateChannel];
+            const templates = { ...prev.notificationTemplates };
+            if (Object.keys(eventTemplates).length === 0) {
+                delete templates[activeTemplateEvent];
+            } else {
+                templates[activeTemplateEvent] = eventTemplates;
+            }
+            return { ...prev, notificationTemplates: templates };
+        });
+    };
+
+    const variableOptions = useMemo(() => {
+        if (activeTemplateEvent === 'daily_summary') {
+            return [...TEMPLATE_VARIABLES, ...DAILY_SUMMARY_VARIABLES];
+        }
+        return TEMPLATE_VARIABLES;
+    }, [activeTemplateEvent]);
+
+    const previewVars = useMemo(() => (
+        activeTemplateEvent === 'daily_summary'
+            ? { ...PREVIEW_VARS, ...PREVIEW_DAILY_SUMMARY_VARS }
+            : PREVIEW_VARS
+    ), [activeTemplateEvent]);
+
+    const activeEventMeta = TEMPLATE_EVENT_TYPES.find((item) => item.value === activeTemplateEvent);
 
     if (loading) {
         return (
@@ -310,7 +498,7 @@ export default function NotificationSettings() {
                     </div>
                 </div>
 
-                {/* 卡片：推送模板 */}
+                {/* 卡片：推送模板（事件类型 × 渠道） */}
                 <div className="card animate-slide-up stagger-2" style={{ padding: 24 }} data-testid="notification-template-card">
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -319,7 +507,7 @@ export default function NotificationSettings() {
                             </div>
                             <div>
                                 <div style={{ fontWeight: 600, fontSize: 15 }}>推送模板</div>
-                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>自定义各渠道收到的消息格式，留空的渠道沿用默认样式；保存通知设置后生效</div>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>按事件类型分别定制各渠道收到的消息格式；未定制的渠道回退到全局模板；保存通知设置后生效</div>
                             </div>
                         </div>
                         <button
@@ -327,7 +515,7 @@ export default function NotificationSettings() {
                             className="btn btn-ghost"
                             style={{ border: '1px solid var(--color-border)', fontSize: 12 }}
                             onClick={() => {
-                                if (!window.confirm('确定清空所有渠道的自定义模板并恢复默认样式吗？')) return;
+                                if (!window.confirm('确定清空所有事件类型的自定义模板并恢复默认样式吗？')) return;
                                 setRuntime((prev) => ({ ...prev, notificationTemplates: {} }));
                             }}
                         >
@@ -335,11 +523,45 @@ export default function NotificationSettings() {
                         </button>
                     </div>
 
+                    {/* 事件类型选择 */}
+                    <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>事件类型</div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                        {TEMPLATE_EVENT_TYPES.map((eventType) => {
+                            const active = eventType.value === activeTemplateEvent;
+                            const customized = eventHasOwnTemplate(eventType.value);
+                            return (
+                                <button
+                                    key={eventType.value}
+                                    type="button"
+                                    data-testid={`template-event-tab-${eventType.value}`}
+                                    title={eventType.hint}
+                                    onClick={() => setActiveTemplateEvent(eventType.value)}
+                                    style={{
+                                        padding: '6px 14px',
+                                        borderRadius: 'var(--radius-sm)',
+                                        fontSize: 13,
+                                        cursor: 'pointer',
+                                        border: `1px solid ${active ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                                        background: active ? 'var(--color-primary-light)' : 'var(--color-bg)',
+                                        color: active ? 'var(--color-primary)' : 'var(--color-text-secondary)',
+                                        fontWeight: active ? 600 : 400,
+                                    }}
+                                >
+                                    {eventType.label}
+                                    {customized && <span style={{ marginLeft: 6, color: 'var(--color-primary)' }}>·</span>}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+                        {activeEventMeta?.hint}
+                    </div>
+
                     {/* 渠道 Tab */}
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
                         {TEMPLATE_CHANNELS.map((channel) => {
                             const active = channel.value === activeTemplateChannel;
-                            const customized = !!(runtime.notificationTemplates[channel.value]?.title || runtime.notificationTemplates[channel.value]?.body);
+                            const customized = channelHasOverride(activeTemplateEvent, channel.value);
                             return (
                                 <button
                                     key={channel.value}
@@ -364,33 +586,72 @@ export default function NotificationSettings() {
                         })}
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px 20px' }}>
-                        <div style={{ gridColumn: '1 / -1' }}>
+                    {/* 继承状态 */}
+                    {activeTemplateEvent !== GLOBAL_EVENT_KEY && (
+                        <div
+                            data-testid="template-inherit-state"
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                                padding: '10px 14px',
+                                marginBottom: 16,
+                                borderRadius: 'var(--radius-sm)',
+                                border: '1px dashed var(--color-border)',
+                                background: 'var(--color-bg)',
+                                fontSize: 12,
+                                color: 'var(--color-text-secondary)',
+                            }}
+                        >
+                            <span>
+                                {isCustomized
+                                    ? `当前「${activeEventMeta?.label} × ${TEMPLATE_CHANNELS.find((item) => item.value === activeTemplateChannel)?.label}」已单独定义模板。`
+                                    : '当前未单独定义，正在展示并编辑全局模板；点击右侧按钮可一键继承全局后再单独调整。'}
+                            </span>
+                            {isCustomized ? (
+                                <button
+                                    type="button"
+                                    data-testid="template-clear-override"
+                                    className="btn btn-ghost"
+                                    style={{ border: '1px solid var(--color-border)', fontSize: 12 }}
+                                    onClick={clearOverride}
+                                >
+                                    恢复继承全局
+                                </button>
+                            ) : (
+                                <button
+                                    type="button"
+                                    data-testid="template-inherit-global"
+                                    className="btn btn-ghost"
+                                    style={{ border: '1px solid var(--color-primary)', color: 'var(--color-primary)', fontSize: 12 }}
+                                    onClick={inheritGlobal}
+                                >
+                                    一键继承全局
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '16px 20px' }}>
+                        <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>标题模板</div>
                             <input
                                 data-testid="template-title-input"
-                                value={runtime.notificationTemplates[activeTemplateChannel]?.title || ''}
-                                onChange={(e) => setRuntime((prev) => {
-                                    const current = prev.notificationTemplates[activeTemplateChannel] || {};
-                                    return {
-                                        ...prev,
-                                        notificationTemplates: {
-                                            ...prev.notificationTemplates,
-                                            [activeTemplateChannel]: { ...current, title: e.target.value },
-                                        },
-                                    };
-                                })}
+                                value={effectiveTemplate?.title || ''}
+                                onChange={(e) => writeTemplate(activeTemplateChannel, { title: e.target.value })}
                                 placeholder="留空使用默认标题"
                                 style={inputStyle}
                             />
                         </div>
-                        <div style={{ gridColumn: '1 / -1' }}>
+                        <div>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                                 <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-text-secondary)' }}>正文模板</span>
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>点击变量插入到光标处</span>
                             </div>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-                                {TEMPLATE_VARIABLES.map((variable) => (
+                                {variableOptions.map((variable) => (
                                     <button
                                         key={variable.name}
                                         type="button"
@@ -403,7 +664,7 @@ export default function NotificationSettings() {
                                         onClick={() => {
                                             const token = `{{${variable.name}}}`;
                                             const textarea = templateBodyRef.current;
-                                            const currentBody = runtime.notificationTemplates[activeTemplateChannel]?.body || '';
+                                            const currentBody = effectiveTemplate?.body || '';
                                             let nextBody = `${currentBody}${token}`;
                                             let caret = currentBody.length;
                                             if (isBodyFocused && textarea) {
@@ -416,16 +677,7 @@ export default function NotificationSettings() {
                                                 nextBody = `${currentBody.slice(0, start)}${token}${currentBody.slice(end)}`;
                                                 caret = start + token.length;
                                             }
-                                            setRuntime((prev) => {
-                                                const current = prev.notificationTemplates[activeTemplateChannel] || {};
-                                                return {
-                                                    ...prev,
-                                                    notificationTemplates: {
-                                                        ...prev.notificationTemplates,
-                                                        [activeTemplateChannel]: { ...current, body: nextBody },
-                                                    },
-                                                };
-                                            });
+                                            writeTemplate(activeTemplateChannel, { body: nextBody });
                                             if (typeof requestAnimationFrame === 'function') {
                                                 requestAnimationFrame(() => {
                                                     if (!textarea) return;
@@ -452,17 +704,8 @@ export default function NotificationSettings() {
                             <textarea
                                 ref={templateBodyRef}
                                 data-testid="template-body-input"
-                                value={runtime.notificationTemplates[activeTemplateChannel]?.body || ''}
-                                onChange={(e) => setRuntime((prev) => {
-                                    const current = prev.notificationTemplates[activeTemplateChannel] || {};
-                                    return {
-                                        ...prev,
-                                        notificationTemplates: {
-                                            ...prev.notificationTemplates,
-                                            [activeTemplateChannel]: { ...current, body: e.target.value },
-                                        },
-                                    };
-                                })}
+                                value={effectiveTemplate?.body || ''}
+                                onChange={(e) => writeTemplate(activeTemplateChannel, { body: e.target.value })}
                                 onFocus={() => setIsBodyFocused(true)}
                                 onBlur={() => setIsBodyFocused(false)}
                                 placeholder="留空使用默认正文，例如：\n*{{title}}*\n{{message}}\n累计 {{count}} 次"
@@ -472,7 +715,7 @@ export default function NotificationSettings() {
                         </div>
 
                         {activeTemplateChannel === 'telegram' && (
-                            <div style={{ gridColumn: '1 / -1' }}>
+                            <div>
                                 <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>解析模式</div>
                                 <div style={{ display: 'flex', gap: 8 }}>
                                     {([
@@ -484,24 +727,15 @@ export default function NotificationSettings() {
                                             key={mode.value || 'plain'}
                                             type="button"
                                             data-testid={`template-parse-mode-${mode.value || 'plain'}`}
-                                            onClick={() => setRuntime((prev) => {
-                                                const current = prev.notificationTemplates.telegram || {};
-                                                return {
-                                                    ...prev,
-                                                    notificationTemplates: {
-                                                        ...prev.notificationTemplates,
-                                                        telegram: { ...current, parseMode: mode.value },
-                                                    },
-                                                };
-                                            })}
+                                            onClick={() => writeTemplate('telegram', { parseMode: mode.value })}
                                             style={{
                                                 padding: '5px 14px',
                                                 fontSize: 12,
                                                 borderRadius: 'var(--radius-sm)',
                                                 cursor: 'pointer',
-                                                border: `1px solid ${(runtime.notificationTemplates.telegram?.parseMode || '') === mode.value ? 'var(--color-primary)' : 'var(--color-border)'}`,
-                                                background: (runtime.notificationTemplates.telegram?.parseMode || '') === mode.value ? 'var(--color-primary-light)' : 'var(--color-bg)',
-                                                color: (runtime.notificationTemplates.telegram?.parseMode || '') === mode.value ? 'var(--color-primary)' : 'var(--color-text-secondary)',
+                                                border: `1px solid ${(effectiveTemplate?.parseMode || '') === mode.value ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                                                background: (effectiveTemplate?.parseMode || '') === mode.value ? 'var(--color-primary-light)' : 'var(--color-bg)',
+                                                color: (effectiveTemplate?.parseMode || '') === mode.value ? 'var(--color-primary)' : 'var(--color-text-secondary)',
                                             }}
                                         >
                                             {mode.label}
@@ -515,11 +749,14 @@ export default function NotificationSettings() {
                         )}
 
                         {/* 实时预览 */}
-                        <div style={{ gridColumn: '1 / -1' }}>
-                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>实时预览（示例数据）</div>
+                        <div>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>
+                                实时预览（示例数据）{activeTemplateEvent !== GLOBAL_EVENT_KEY && !isCustomized ? ' · 当前展示全局模板效果' : ''}
+                            </div>
                             <TemplatePreview
                                 channel={activeTemplateChannel}
-                                template={runtime.notificationTemplates[activeTemplateChannel]}
+                                template={effectiveTemplate}
+                                vars={previewVars}
                             />
                         </div>
                     </div>
@@ -530,7 +767,7 @@ export default function NotificationSettings() {
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--color-primary-light)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 005.656-5.656l-1.1 1.1" /></svg>
                             </div>
                             <div>
                                 <div style={{ fontWeight: 600, fontSize: 15 }}>Webhook & Bark</div>
@@ -623,7 +860,7 @@ export default function NotificationSettings() {
                     </div>
                 </div>
 
-                {/* 卡片：Telegram */} 
+                {/* 卡片：Telegram */}
                 <div className="card animate-slide-up stagger-4" style={{ padding: 24, border: runtime.telegramEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -658,8 +895,8 @@ export default function NotificationSettings() {
                         </div>
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px 20px', opacity: runtime.telegramEnabled ? 1 : 0.6, transition: 'opacity 0.2s' }}>
-                        <div style={{ gridColumn: '1 / -1' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '16px 20px', opacity: runtime.telegramEnabled ? 1 : 0.6, transition: 'opacity 0.2s' }}>
+                        <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>Telegram API Base URL</div>
                             <input
                                 value={runtime.telegramApiBaseUrl}
@@ -733,8 +970,7 @@ export default function NotificationSettings() {
                         </label>
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px 20px', opacity: runtime.smtpEnabled ? 1 : 0.6, transition: 'opacity 0.2s' }}>
-                        {/* Host */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '16px 20px', opacity: runtime.smtpEnabled ? 1 : 0.6, transition: 'opacity 0.2s' }}>
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>SMTP 服务器</div>
                             <input
@@ -745,7 +981,6 @@ export default function NotificationSettings() {
                                 disabled={!runtime.smtpEnabled}
                             />
                         </div>
-                        {/* Port & Secure */}
                         <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end' }}>
                             <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>端口</div>
@@ -768,7 +1003,6 @@ export default function NotificationSettings() {
                                 启用 TLS/SSL
                             </label>
                         </div>
-                        {/* User */}
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>账号用户</div>
                             <input
@@ -779,7 +1013,6 @@ export default function NotificationSettings() {
                                 disabled={!runtime.smtpEnabled}
                             />
                         </div>
-                        {/* Pass */}
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>
                                 账号密码
@@ -794,7 +1027,6 @@ export default function NotificationSettings() {
                                 disabled={!runtime.smtpEnabled}
                             />
                         </div>
-                        {/* From */}
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>发件人地址</div>
                             <input
@@ -805,7 +1037,6 @@ export default function NotificationSettings() {
                                 disabled={!runtime.smtpEnabled}
                             />
                         </div>
-                        {/* To */}
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>接收地址</div>
                             <input
@@ -816,7 +1047,6 @@ export default function NotificationSettings() {
                                 disabled={!runtime.smtpEnabled}
                             />
                         </div>
-
                     </div>
                 </div>
 

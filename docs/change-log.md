@@ -262,6 +262,33 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、测试与持续变更日志；无 PDF 或截图。
 - **状态**：已完成。
 
+## 2026-09-24
+
+### 15. 通知模板按事件类型定制（notification_templates 表化）
+
+- **类型**：功能实现
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：推送模板从「渠道维度」升级为「事件类型 × 渠道」矩阵，新增 `daily_summary` 事件类型与专属变量，并保证老用户升级后模板行为不变。
+- **实现范围**：
+  - 新增 `notification_templates` 表，主键 `(event_type, channel)`，字段 `title` / `body` / `parse_mode`；`__global__` 为兜底行。
+  - `settings.notification_templates_v1` 旧 JSON 由启动期幂等迁移拆成 `(__global__, channel)` 行并删除旧键。
+  - `sendNotification()` 增加必填 `eventType`，回退顺序为精确匹配 → `__global__` → 渠道原有硬编码默认渲染；7 个调用点全部显式传值。
+  - `daily_summary` 支持 16 个 snake_case 专属变量（`today_spend`、`today_reward`、`today_net`、`checkin_success` 等）。
+  - `GET` / `PUT /api/settings/runtime` 的 `notificationTemplates` 改为两层结构，新增 `notificationTemplateVariablesByEvent`。
+  - 通知设置页改为「事件类型 × 渠道」矩阵，未单独定义时展示并编辑全局模板，支持一键继承全局与恢复继承，保留变量说明与实时预览。
+  - `events.type` 白名单与前端筛选/标签扩展 `daily_summary`。
+  - schema 产物生成器支持复合主键（表级 `PRIMARY KEY (a, b)`），修复逐列内联会生成非法 DDL 的问题。
+- **主要文件**：
+  - `src/server/db/schema.ts`、`src/server/db/schemaArtifactGenerator.ts`、`drizzle/0029_notification_templates.sql`、`drizzle/meta/_journal.json`、`src/server/db/generated/*`
+  - `src/server/services/notificationTemplates.ts`、`src/server/services/notifyService.ts`、`src/server/services/dailySummaryService.ts`、`src/server/services/checkinScheduler.ts`、`src/server/index.ts`
+  - `src/server/routes/api/settings.ts`、`src/web/api.ts`、`src/web/pages/NotificationSettings.tsx`、`src/web/components/NotificationPanel.tsx`、`src/web/pages/ProgramLogs.tsx`
+  - `.agents/notes/20260924-notification-templates-by-event.md`、`CHANGELOG.md`
+- **验证**：
+  - `npm run build`、`npm test`（469 文件 / 2791 测试通过）、`npm run typecheck`、`npm run repo:drift-check`（0 违规）。
+  - `npm run test:schema:unit`、`npm run test:schema:parity`、`npm run test:schema:upgrade` 全部通过（MySQL / Postgres live 用例按既有机制 skip）。
+  - 老数据迁移路径有测试覆盖：先写入 legacy setting 再加载，断言 `__global__` 行内容、legacy 键被删除且二次加载幂等。
+- **状态**：已完成。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

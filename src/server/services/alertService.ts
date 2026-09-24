@@ -45,6 +45,7 @@ export async function reportTokenExpired(params: {
   await sendNotification(
     'Token 已失效',
     `${accountLabel} @ ${siteLabel} 的 Token 无效或已过期${detail}`,
+    'token',
     'error',
   );
 }
@@ -72,6 +73,7 @@ export async function reportProxyAllFailed(params: { model: string; reason: stri
   const result = await sendNotification(
     '代理全部失败',
     decision.message,
+    'proxy',
     'error',
     {
       bypassThrottle: true,

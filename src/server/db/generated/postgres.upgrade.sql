@@ -1,1 +1,1 @@
-ALTER TABLE "sites" ADD COLUMN "preferred_endpoint" TEXT DEFAULT '';
+CREATE TABLE IF NOT EXISTS "notification_templates" ("event_type" TEXT NOT NULL, "channel" TEXT NOT NULL, "title" TEXT NOT NULL DEFAULT '', "body" TEXT NOT NULL DEFAULT '', "parse_mode" TEXT NOT NULL DEFAULT '', "created_at" TEXT DEFAULT to_char(timezone('UTC', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'), "updated_at" TEXT DEFAULT to_char(timezone('UTC', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'), PRIMARY KEY ("event_type", "channel"));

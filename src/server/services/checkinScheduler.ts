@@ -6,7 +6,7 @@ import { refreshAllBalances } from './balanceService.js';
 import { checkinAll } from './checkinService.js';
 import * as routeRefreshWorkflow from './routeRefreshWorkflow.js';
 import { sendNotification } from './notifyService.js';
-import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
+import { buildDailySummaryNotification, buildDailySummaryTemplateVars, collectDailySummaryMetrics } from './dailySummaryService.js';
 import { cleanupConfiguredLogs } from './logCleanupService.js';
 import { normalizeLogCleanupRetentionDays } from '../shared/logCleanupRetentionDays.js';
 
@@ -177,10 +177,11 @@ function createDailySummaryTask(cronExpr: string) {
     try {
       const metrics = await collectDailySummaryMetrics();
       const { title, message } = buildDailySummaryNotification(metrics);
-      await sendNotification(title, message, 'info', {
+      await sendNotification(title, message, 'daily_summary', 'info', {
         bypassThrottle: true,
         requireChannel: true,
         throwOnFailure: true,
+        extraVars: buildDailySummaryTemplateVars(metrics),
       });
       console.log(`[Scheduler] Daily summary sent: ${title}`);
     } catch (err) {

@@ -9,10 +9,14 @@ import {
   type NotificationThrottleState,
 } from './notificationThrottle.js';
 import {
-  loadNotificationTemplates,
+  isNotificationEventKey,
+  loadNotificationTemplatesForEvent,
+  pickEventChannelTemplate,
   renderNotificationTemplate,
   renderEscapedNotificationTemplate,
+  type NotificationEventKey,
   type NotificationTemplateVars,
+  type NotificationTemplateChannel,
   type RenderedNotificationTemplate,
 } from './notificationTemplates.js';
 import { formatLocalDateTime, getResolvedTimeZone } from './localTimeService.js';
@@ -40,6 +44,8 @@ export type SendNotificationOptions = {
   throwOnFailure?: boolean;
   /** 风暴聚合上下文：供 {{count}} / {{models}} 变量渲染。 */
   storm?: { count?: number; models?: string[] };
+  /** 事件类型专属变量（snake_case），如 daily_summary 的当日花费。 */
+  extraVars?: Record<string, string>;
 };
 
 export type NotificationDispatchResult = {
@@ -182,15 +188,27 @@ function buildFeishuTextUtf8(
   return `${truncated}${suffix}`;
 }
 
+/**
+ * 发送通知。
+ *
+ * `eventType` 为必填参数且没有静默默认值（排在 `level` 之前：必填位前置，
+ * 调用点不能靠默认值把事件类型漏掉），调用方必须显式声明这条通知属于哪类事件，
+ * 模板解析才能走「精确匹配 → __global__ 兜底 → 渠道默认渲染」的顺序。
+ * 非法事件类型显式抛错，避免悄悄落到全局模板上。
+ */
 export async function sendNotification(
   title: string,
   message: string,
+  eventType: NotificationEventKey,
   level: 'info' | 'warning' | 'error' = 'info',
   options: SendNotificationOptions = {},
 ): Promise<NotificationDispatchResult> {
+  if (!isNotificationEventKey(eventType)) {
+    throw new Error(`sendNotification: invalid eventType "${String(eventType)}".`);
+  }
   const now = new Date();
   const timeFootnote = buildTimeFootnote(now);
-  const { bypassThrottle = false, requireChannel = false, throwOnFailure = false, storm } = options;
+  const { bypassThrottle = false, requireChannel = false, throwOnFailure = false, storm, extraVars } = options;
   const cooldownMs = Math.max(0, Math.trunc(config.notifyCooldownSec)) * 1000;
   let resolvedMessage = message;
   if (!bypassThrottle && cooldownMs > 0) {
@@ -212,8 +230,8 @@ export async function sendNotification(
     }
   }
 
-  // 自定义模板：留空渠道沿用默认渲染，行为零变化
-  const templates = await loadNotificationTemplates();
+  // 自定义模板：按 eventType 取精确匹配，缺省时回退 __global__，再缺省沿用默认渲染
+  const resolvedTemplates = await loadNotificationTemplatesForEvent(eventType);
   const templateVars: NotificationTemplateVars = {
     title,
     message: resolvedMessage,
@@ -221,13 +239,14 @@ export async function sendNotification(
     localTime: formatLocalDateTime(now),
     timeZone: getResolvedTimeZone(),
   };
+  if (extraVars) templateVars.extra = extraVars;
   if (typeof storm?.count === 'number') templateVars.count = storm.count;
   if (Array.isArray(storm?.models)) templateVars.models = storm.models;
   const renderChannel = (
-    channel: 'webhook' | 'bark' | 'serverchan' | 'telegram' | 'smtp',
+    channel: NotificationTemplateChannel,
     fallback: { title: string; body: string },
   ): RenderedNotificationTemplate => {
-    const chTemplate = templates[channel];
+    const chTemplate = pickEventChannelTemplate(resolvedTemplates, channel);
     const parseMode = chTemplate?.parseMode ?? '';
     if (parseMode === 'HTML') {
       // HTML 渠道：仅转义 & < >
@@ -243,6 +262,7 @@ export async function sendNotification(
   const tasks: Array<{ channel: NotificationChannel; run: () => Promise<unknown> }> = [];
 
   if (config.webhookEnabled && config.webhookUrl) {
+    const webhookTemplate = pickEventChannelTemplate(resolvedTemplates, 'webhook');
     const webhookRendered = renderChannel('webhook', { title, body: resolvedMessage });
     const isWeComWebhook = isWeComBotWebhook(config.webhookUrl);
     const isFeishuWebhook = isFeishuBotWebhook(config.webhookUrl);
@@ -270,7 +290,7 @@ export async function sendNotification(
     };
     const weComFeishuContent = webhookRendered.usedTemplate
       ? makeWeComFeishuBody([
-        templates.webhook?.title ? webhookRendered.title : '',
+        webhookTemplate?.title ? webhookRendered.title : '',
         webhookRendered.body,
       ].filter(Boolean).join('\n'))
       : null;
@@ -396,13 +416,14 @@ export async function sendNotification(
   }
 
   if (config.telegramEnabled && config.telegramBotToken && config.telegramChatId) {
+    const telegramTemplate = pickEventChannelTemplate(resolvedTemplates, 'telegram');
     const telegramRendered = renderChannel('telegram', {
       title,
       body: buildTelegramText(title, resolvedMessage, level, timeFootnote),
     });
     const telegramText = telegramRendered.usedTemplate
       ? [
-        templates.telegram?.title ? telegramRendered.title : '',
+        telegramTemplate?.title ? telegramRendered.title : '',
         telegramRendered.body,
       ].filter(Boolean).join('\n')
       : buildTelegramText(title, resolvedMessage, level, timeFootnote);
@@ -479,6 +500,7 @@ export async function sendNotification(
     config.smtpFrom &&
     config.smtpTo
   ) {
+    const smtpTemplate = pickEventChannelTemplate(resolvedTemplates, 'smtp');
     const smtpRendered = renderChannel('smtp', { title, body: resolvedMessage });
     const transporter = getSmtpTransporter();
     tasks.push(
@@ -487,7 +509,7 @@ export async function sendNotification(
         run: () => transporter.sendMail({
           from: config.smtpFrom,
           to: config.smtpTo,
-          subject: templates.smtp?.title
+          subject: smtpTemplate?.title
             ? smtpRendered.title
             : `[metapi][${level.toUpperCase()}] ${title}`,
           text: `${smtpRendered.body}\n\nLevel: ${level}\n${timeFootnote}`,

@@ -346,6 +346,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       await sendNotification(
         'Cloudflare challenge',
         `${account.username || 'ID:' + accountId} @ ${site.name}: ${result.message}`,
+        'checkin',
         'warning',
       );
     }
@@ -354,6 +355,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       await sendNotification(
         'checkin failed',
         `${account.username || 'ID:' + accountId} @ ${site.name}: ${result.message}`,
+        'checkin',
         'error',
       );
     }

@@ -204,6 +204,13 @@
       "when": 1790000595553,
       "tag": "0028_site_preferred_endpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1790100000000,
+      "tag": "0029_notification_templates",
+      "breakpoints": true
     }
   ]
 }

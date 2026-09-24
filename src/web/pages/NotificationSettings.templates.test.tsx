@@ -83,7 +83,9 @@ describe('NotificationSettings templates', () => {
       smtpEnabled: false,
       notifyCooldownSec: 300,
       notificationTemplates: {
-        telegram: { title: '[TG] {{title}}', body: '*{{level}}* {{message}}\n累计 {{count}} 次', parseMode: 'Markdown' },
+        __global__: {
+          telegram: { title: '[TG] {{title}}', body: '*{{level}}* {{message}}\n累计 {{count}} 次', parseMode: 'Markdown' },
+        },
       },
     });
   });
@@ -184,7 +186,232 @@ describe('NotificationSettings templates', () => {
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledTimes(1);
       const calls = apiMock.updateRuntimeSettings.mock.calls as unknown as Array<[Record<string, any>]>;
       const payload = calls[0][0];
-      expect(payload.notificationTemplates.telegram.body).toBe('新正文 {{message}}');
+      expect(payload.notificationTemplates.__global__.telegram.body).toBe('新正文 {{message}}');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('edits the global template when an event type has no override of its own', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {
+        __global__: { telegram: { body: 'GLOBAL {{title}}' } },
+        token: { bark: { body: 'TOKEN-BARK' } },
+      },
+    });
+    const root = await renderPage();
+    try {
+      // token × telegram 未单独定义 → 展示全局模板
+      const eventTab = findButtonByTestId(root, 'template-event-tab-token');
+      await act(async () => {
+        eventTab.props.onClick();
+      });
+      const inheritButton = findButtonByTestId(root, 'template-inherit-global');
+      expect(inheritButton).toBeTruthy();
+      expect(findInputByTestId(root, 'template-body-input').props.value).toBe('GLOBAL {{title}}');
+
+      // 一键继承全局：生成独立覆盖
+      await act(async () => {
+        inheritButton.props.onClick();
+      });
+      expect(findButtonByTestId(root, 'template-inherit-global')).toBeUndefined();
+      expect(findButtonByTestId(root, 'template-clear-override')).toBeTruthy();
+      expect(findInputByTestId(root, 'template-body-input').props.value).toBe('GLOBAL {{title}}');
+
+      // 覆盖后的编辑只写当前事件类型
+      const body = findInputByTestId(root, 'template-body-input');
+      await act(async () => {
+        body.props.onChange({ target: { value: 'TOKEN-OWN {{title}}' } });
+      });
+      const save = root.root.findAll((node) => (
+        node.type === 'button' && collectText(node).includes('保存通知设置')
+      ))[0];
+      await act(async () => {
+        await save.props.onClick();
+      });
+      const calls = apiMock.updateRuntimeSettings.mock.calls as unknown as Array<[Record<string, any>]>;
+      const payload = calls[0][0];
+      expect(payload.notificationTemplates.token.telegram.body).toBe('TOKEN-OWN {{title}}');
+      expect(payload.notificationTemplates.__global__.telegram.body).toBe('GLOBAL {{title}}');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('creates an override on the event when typing into an uncustomized event', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {
+        __global__: { telegram: { body: 'GLOBAL {{title}}' } },
+        token: { bark: { body: 'TOKEN-BARK' } },
+      },
+    });
+    const root = await renderPage();
+    try {
+      // token × telegram 未单独定义，直接输入必须落到 token 行，而不是静默写回 __global__
+      await act(async () => {
+        findButtonByTestId(root, 'template-event-tab-token').props.onClick();
+      });
+      const body = findInputByTestId(root, 'template-body-input');
+      await act(async () => {
+        body.props.onChange({ target: { value: 'TOKEN-OWN {{title}}' } });
+      });
+      // 一旦输入即视为已单独定义
+      expect(findButtonByTestId(root, 'template-clear-override')).toBeTruthy();
+      const save = root.root.findAll((node) => (
+        node.type === 'button' && collectText(node).includes('保存通知设置')
+      ))[0];
+      await act(async () => {
+        await save.props.onClick();
+      });
+      const calls = apiMock.updateRuntimeSettings.mock.calls as unknown as Array<[Record<string, any>]>;
+      const payload = calls[0][0];
+      expect(payload.notificationTemplates.token.telegram.body).toBe('TOKEN-OWN {{title}}');
+      expect(payload.notificationTemplates.__global__.telegram.body).toBe('GLOBAL {{title}}');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('creates an override even when the global template is empty', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {},
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findButtonByTestId(root, 'template-event-tab-checkin').props.onClick();
+      });
+      // 全局为空：先一键继承（得到空覆盖行），再输入
+      const inheritButton = findButtonByTestId(root, 'template-inherit-global');
+      expect(inheritButton).toBeTruthy();
+      await act(async () => {
+        inheritButton.props.onClick();
+      });
+      // 空覆盖行也必须被识别为「已单独定义」，否则后续输入会写回全局
+      expect(findButtonByTestId(root, 'template-inherit-global')).toBeUndefined();
+      expect(findButtonByTestId(root, 'template-clear-override')).toBeTruthy();
+
+      const body = findInputByTestId(root, 'template-body-input');
+      await act(async () => {
+        body.props.onChange({ target: { value: 'CHECKIN {{message}}' } });
+      });
+      const save = root.root.findAll((node) => (
+        node.type === 'button' && collectText(node).includes('保存通知设置')
+      ))[0];
+      await act(async () => {
+        await save.props.onClick();
+      });
+      const calls = apiMock.updateRuntimeSettings.mock.calls as unknown as Array<[Record<string, any>]>;
+      const payload = calls[0][0];
+      expect(payload.notificationTemplates.checkin.telegram.body).toBe('CHECKIN {{message}}');
+      // 全局模板没有被隐式创建出来
+      expect(payload.notificationTemplates.__global__?.telegram).toBeUndefined();
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('attributes an inserted variable chip to the active event instead of __global__', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {
+        __global__: { telegram: { body: 'GLOBAL {{title}}' } },
+      },
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findButtonByTestId(root, 'template-event-tab-token').props.onClick();
+      });
+      const levelChip = root.root.findAll((node) => (
+        node.type === 'button' && node.props.title === '级别 info/warning/error'
+      ))[0];
+      await act(async () => {
+        levelChip.props.onClick();
+      });
+      // chip 插入到当前事件的正文里（继承来的全局内容之后追加）
+      expect(findInputByTestId(root, 'template-body-input').props.value).toBe('GLOBAL {{title}}{{level}}');
+      const save = root.root.findAll((node) => (
+        node.type === 'button' && collectText(node).includes('保存通知设置')
+      ))[0];
+      await act(async () => {
+        await save.props.onClick();
+      });
+      const calls = apiMock.updateRuntimeSettings.mock.calls as unknown as Array<[Record<string, any>]>;
+      const payload = calls[0][0];
+      expect(payload.notificationTemplates.token.telegram.body).toBe('GLOBAL {{title}}{{level}}');
+      expect(payload.notificationTemplates.__global__.telegram.body).toBe('GLOBAL {{title}}');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('clearing an override restores inheritance of the global template', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {
+        __global__: { telegram: { body: 'GLOBAL {{title}}' } },
+        token: { telegram: { body: 'TOKEN-OWN {{title}}' } },
+      },
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findButtonByTestId(root, 'template-event-tab-token').props.onClick();
+      });
+      expect(findInputByTestId(root, 'template-body-input').props.value).toBe('TOKEN-OWN {{title}}');
+
+      await act(async () => {
+        findButtonByTestId(root, 'template-clear-override').props.onClick();
+      });
+      // 恢复继承后重新展示全局模板，且保存结果里不再有 token.telegram
+      expect(findInputByTestId(root, 'template-body-input').props.value).toBe('GLOBAL {{title}}');
+      const save = root.root.findAll((node) => (
+        node.type === 'button' && collectText(node).includes('保存通知设置')
+      ))[0];
+      await act(async () => {
+        await save.props.onClick();
+      });
+      const calls = apiMock.updateRuntimeSettings.mock.calls as unknown as Array<[Record<string, any>]>;
+      const payload = calls[0][0];
+      expect(payload.notificationTemplates.token?.telegram).toBeUndefined();
+      expect(payload.notificationTemplates.__global__.telegram.body).toBe('GLOBAL {{title}}');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('offers the daily_summary specific variables when that event type is active', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {},
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findButtonByTestId(root, 'template-event-tab-daily_summary').props.onClick();
+      });
+      const spendChip = root.root.findAll((node) => (
+        node.type === 'button' && node.props.title === '当日支出（美元）'
+      ))[0];
+      expect(spendChip).toBeTruthy();
+      await act(async () => {
+        spendChip.props.onClick();
+      });
+      const body = findInputByTestId(root, 'template-body-input');
+      expect(body.props.value).toBe('{{today_spend}}');
+      // 专属变量在预览里用示例值渲染
+      const preview = root.root.findAll((node) => node.props['data-testid'] === 'template-preview')[0];
+      expect(collectText(preview)).toContain('3.141592');
     } finally {
       root?.unmount();
     }

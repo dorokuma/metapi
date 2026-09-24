@@ -7,6 +7,7 @@ import type {
   SchemaContractColumn,
   SchemaContractForeignKey,
   SchemaContractIndex,
+  SchemaContractTable,
   SchemaContractUnique,
 } from './schemaContract.js';
 
@@ -56,7 +57,26 @@ function resolveMysqlIndexPrefix(
   return column ? escapeMysqlTextPrefix(column.logicalType) : '';
 }
 
-function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaContractColumn): string {
+/**
+ * MySQL 方言下 text 逻辑列的 VARCHAR(191) 规则：主键列、或历史 DDL 即带默认值
+ * 的列（如 sites.status、events.level 等既有带默认值的 text 列）确有 VARCHAR(191)
+ * 定义，保持 VARCHAR(191) 与存量库一致；其余 text 列输出 TEXT。
+ * 例外：显式长文本标记列（见 MYSQL_LONG_TEXT_COLUMNS）即使带默认值也保持 TEXT。
+ */
+const MYSQL_LONG_TEXT_COLUMNS: Readonly<Record<string, ReadonlySet<string>>> = {
+  notification_templates: new Set(['title', 'body', 'parse_mode']),
+};
+
+function isLongTextColumn(tableName: string, columnName: string): boolean {
+  return MYSQL_LONG_TEXT_COLUMNS[tableName]?.has(columnName) ?? false;
+}
+
+function mapColumnType(
+  dialect: SqlDialect,
+  tableName: string,
+  columnName: string,
+  column: SchemaContractColumn,
+): string {
   if (dialect === 'sqlite') {
     switch (column.logicalType) {
       case 'boolean':
@@ -85,6 +105,12 @@ function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaCo
       case 'json':
         return 'JSON';
       case 'text':
+        // 显式长文本标记列（模板 title/body/parse_mode 等）无长度上限，保持 TEXT，
+        // 避免 4000 字上限的模板正文被降级成 VARCHAR(191) 后静默截断；其余列沿用
+        // 「主键或确有 VARCHAR(191) 上限依据（带默认值）」规则，与存量库定义一致。
+        if (isLongTextColumn(tableName, columnName)) {
+          return 'TEXT';
+        }
         return column.primaryKey || column.defaultValue != null ? 'VARCHAR(191)' : 'TEXT';
       default:
         return 'TEXT';
@@ -132,14 +158,33 @@ function formatDefaultValue(dialect: SqlDialect, column: SchemaContractColumn): 
 
 function buildColumnDefinition(
   dialect: SqlDialect,
+  tableName: string,
   columnName: string,
   column: SchemaContractColumn,
+  emitPrimaryKey = true,
 ): string {
-  const sqlType = mapColumnType(dialect, columnName, column);
+  const sqlType = mapColumnType(dialect, tableName, columnName, column);
   const notNull = column.notNull ? ' NOT NULL' : '';
   const defaultValue = formatDefaultValue(dialect, column);
-  const primaryKey = column.primaryKey ? ' PRIMARY KEY' : '';
+  const primaryKey = emitPrimaryKey && column.primaryKey ? ' PRIMARY KEY' : '';
   return `${quoteIdentifier(dialect, columnName)} ${sqlType}${notNull}${defaultValue}${primaryKey}`;
+}
+
+/**
+ * Composite primary keys cannot be declared inline per column: `PRAGMA table_info`
+ * reports every member with `pk > 0`, so emitting an inline `PRIMARY KEY` for each
+ * one would produce invalid SQL (`table ... has more than one primary key`).
+ * Single-column primary keys stay inline to keep existing artifacts byte-stable.
+ */
+function resolvePrimaryKeyColumns(table: SchemaContractTable): string[] {
+  return Object.entries(table.columns)
+    .filter(([, column]) => column.primaryKey)
+    .map(([columnName]) => columnName);
+}
+
+function buildPrimaryKeyClause(dialect: SqlDialect, primaryKeyColumns: string[]): string {
+  const columns = primaryKeyColumns.map((columnName) => quoteIdentifier(dialect, columnName)).join(', ');
+  return `PRIMARY KEY (${columns})`;
 }
 
 function buildForeignKeyClause(dialect: SqlDialect, foreignKey: SchemaContractForeignKey): string {
@@ -193,10 +238,17 @@ function buildCreateTableStatement(
   const table = contract.tables[tableName];
   const columnEntries = Object.entries(table.columns);
   const foreignKeys = contract.foreignKeys.filter((foreignKey) => foreignKey.table === tableName);
+  const primaryKeyColumns = resolvePrimaryKeyColumns(table);
+  const hasCompositePrimaryKey = primaryKeyColumns.length > 1;
   const parts = [
-    ...columnEntries.map(([columnName, column]) => buildColumnDefinition(dialect, columnName, column)),
+    ...columnEntries.map(([columnName, column]) => (
+      buildColumnDefinition(dialect, tableName, columnName, column, !hasCompositePrimaryKey)
+    )),
     ...foreignKeys.map((foreignKey) => buildForeignKeyClause(dialect, foreignKey)),
   ];
+  if (hasCompositePrimaryKey) {
+    parts.push(buildPrimaryKeyClause(dialect, primaryKeyColumns));
+  }
   return `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(dialect, tableName)} (${parts.join(', ')})`;
 }
 
@@ -345,7 +397,7 @@ function buildAddColumnStatement(
   columnName: string,
   column: SchemaContractColumn,
 ): string {
-  return `ALTER TABLE ${quoteIdentifier(dialect, tableName)} ADD COLUMN ${buildColumnDefinition(dialect, columnName, column)}`;
+  return `ALTER TABLE ${quoteIdentifier(dialect, tableName)} ADD COLUMN ${buildColumnDefinition(dialect, tableName, columnName, column)}`;
 }
 
 export function generateUpgradeSql(

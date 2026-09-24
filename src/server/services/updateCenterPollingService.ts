@@ -57,7 +57,7 @@ async function runSyncOnce() {
           lastNotifiedCandidateKey: candidate.candidateKey,
           lastNotifiedAt: checkedAt,
         });
-        await sendNotification(reminderEvent.title, reminderEvent.message, 'info', {
+        await sendNotification(reminderEvent.title, reminderEvent.message, 'status', 'info', {
           bypassThrottle: true,
         });
       }

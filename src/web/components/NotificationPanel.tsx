@@ -19,6 +19,7 @@ const typeLabels: Record<string, string> = {
   proxy: '代理',
   status: '状态',
   site_notice: '站点公告',
+  daily_summary: '每日总结',
 };
 
 export default function NotificationPanel({
@@ -98,7 +99,7 @@ export default function NotificationPanel({
 
       {/* Filters */}
       <div style={{ display: 'flex', gap: 4, padding: '8px 12px', borderBottom: '1px solid var(--color-border-light)', flexWrap: 'wrap' }}>
-        {['', 'checkin', 'balance', 'token', 'proxy', 'status', 'site_notice'].map((filterType) => (
+        {['', 'checkin', 'balance', 'token', 'proxy', 'status', 'site_notice', 'daily_summary'].map((filterType) => (
           <button key={filterType} onClick={() => setFilter(filterType)}
             style={{
               fontSize: 11, padding: '3px 8px', borderRadius: 12,

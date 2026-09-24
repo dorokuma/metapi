@@ -130,3 +130,48 @@ export function buildDailySummaryNotification(metrics: DailySummaryMetrics): { t
   ].join('\n');
   return { title, message };
 }
+
+/**
+ * daily_summary 事件类型可用的专属模板变量（snake_case，与通用变量命名一致）。
+ * 通用变量（title/message/level/local_time/...）由 notificationTemplates 统一提供。
+ */
+export const DAILY_SUMMARY_TEMPLATE_VARIABLES = [
+  'local_day',
+  'generated_at_local',
+  'total_accounts',
+  'active_accounts',
+  'low_balance_accounts',
+  'checkin_total',
+  'checkin_success',
+  'checkin_skipped',
+  'checkin_failed',
+  'proxy_total',
+  'proxy_success',
+  'proxy_failed',
+  'proxy_total_tokens',
+  'today_spend',
+  'today_reward',
+  'today_net',
+] as const;
+
+export function buildDailySummaryTemplateVars(metrics: DailySummaryMetrics): Record<string, string> {
+  const net = round6(metrics.todayReward - metrics.todaySpend);
+  return {
+    local_day: metrics.localDay,
+    generated_at_local: metrics.generatedAtLocal,
+    total_accounts: String(metrics.totalAccounts),
+    active_accounts: String(metrics.activeAccounts),
+    low_balance_accounts: String(metrics.lowBalanceAccounts),
+    checkin_total: String(metrics.checkinTotal),
+    checkin_success: String(Math.max(0, metrics.checkinSuccess)),
+    checkin_skipped: String(metrics.checkinSkipped),
+    checkin_failed: String(metrics.checkinFailed),
+    proxy_total: String(metrics.proxyTotal),
+    proxy_success: String(metrics.proxySuccess),
+    proxy_failed: String(metrics.proxyFailed),
+    proxy_total_tokens: String(metrics.proxyTotalTokens),
+    today_spend: metrics.todaySpend.toFixed(6),
+    today_reward: metrics.todayReward.toFixed(6),
+    today_net: net.toFixed(6),
+  };
+}

@@ -54,6 +54,9 @@ describe('notifyService', () => {
 
     const { config } = await import('../config.js');
     config.notifyCooldownSec = 300;
+    const { db, schema } = await import('../db/index.js');
+    await db.delete(schema.notificationTemplates).run();
+    await db.delete(schema.settings).run();
     config.webhookEnabled = false;
     config.webhookUrl = '';
     config.barkEnabled = false;
@@ -80,8 +83,8 @@ describe('notifyService', () => {
     sendMailMock.mockResolvedValue({ accepted: ['receiver@example.com'] });
     const { sendNotification } = await import('./notifyService.js');
 
-    await (sendNotification as any)('测试通知', 'same-message', 'info', { bypassThrottle: true });
-    await (sendNotification as any)('测试通知', 'same-message', 'info', { bypassThrottle: true });
+    await sendNotification('测试通知', 'same-message', 'status', 'info', { bypassThrottle: true });
+    await sendNotification('测试通知', 'same-message', 'status', 'info', { bypassThrottle: true });
 
     expect(sendMailMock).toHaveBeenCalledTimes(2);
   });
@@ -92,7 +95,7 @@ describe('notifyService', () => {
 
     const { sendNotification } = await import('./notifyService.js');
     await expect(
-      (sendNotification as any)('测试通知', 'message', 'info', {
+      sendNotification('测试通知', 'message', 'status', 'info', {
         requireChannel: true,
         throwOnFailure: true,
       }),
@@ -104,7 +107,7 @@ describe('notifyService', () => {
     const { sendNotification } = await import('./notifyService.js');
 
     await expect(
-      (sendNotification as any)('测试通知', 'message', 'info', {
+      sendNotification('测试通知', 'message', 'status', 'info', {
         bypassThrottle: true,
         throwOnFailure: true,
       }),
@@ -132,7 +135,7 @@ describe('notifyService', () => {
     const { sendNotification } = await import('./notifyService.js');
 
     await expect(
-      (sendNotification as any)('测试通知', 'message', 'info', {
+      sendNotification('测试通知', 'message', 'status', 'info', {
         bypassThrottle: true,
         throwOnFailure: true,
       }),
@@ -152,7 +155,7 @@ describe('notifyService', () => {
     });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'message', 'info', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'message', 'status', 'info', { bypassThrottle: true, throwOnFailure: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const call = fetchMock.mock.calls[0] as [string, { body?: string }];
@@ -179,7 +182,7 @@ describe('notifyService', () => {
 
     const { sendNotification } = await import('./notifyService.js');
     await expect(
-      sendNotification('测试通知', 'message', 'info', {
+      sendNotification('测试通知', 'message', 'status', 'info', {
         bypassThrottle: true,
         throwOnFailure: true,
       }),
@@ -190,7 +193,7 @@ describe('notifyService', () => {
     sendMailMock.mockResolvedValue({ accepted: ['receiver@example.com'] });
     const { sendNotification } = await import('./notifyService.js');
 
-    await sendNotification('测试通知', 'message', 'info', { bypassThrottle: true });
+    await sendNotification('测试通知', 'message', 'status', 'info', { bypassThrottle: true });
 
     expect(sendMailMock).toHaveBeenCalledTimes(1);
     const payload = sendMailMock.mock.calls[0]?.[0] as { text?: string };
@@ -212,7 +215,7 @@ describe('notifyService', () => {
     });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'message', 'warning', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'message', 'status', 'warning', { bypassThrottle: true, throwOnFailure: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -246,7 +249,7 @@ describe('notifyService', () => {
     });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'message', 'warning', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'message', 'status', 'warning', { bypassThrottle: true, throwOnFailure: true });
 
     const rawBody = fetchMock.mock.calls[0]?.[1] as { body?: string };
     const payload = JSON.parse(rawBody?.body || '{}') as { message_thread_id?: number };
@@ -267,7 +270,7 @@ describe('notifyService', () => {
     });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'message', 'warning', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'message', 'status', 'warning', { bypassThrottle: true, throwOnFailure: true });
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://tg-proxy.example.com/custom/bot123456:telegram-token/sendMessage',
@@ -289,7 +292,7 @@ describe('notifyService', () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200 });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'proxy-test', 'info', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'proxy-test', 'status', 'info', { bypassThrottle: true, throwOnFailure: true });
 
     expect(withExplicitProxyRequestInitMock).toHaveBeenCalledWith(
       'http://127.0.0.1:7890',
@@ -313,7 +316,7 @@ describe('notifyService', () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200 });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'no-proxy-test', 'info', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'no-proxy-test', 'status', 'info', { bypassThrottle: true, throwOnFailure: true });
 
     expect(withExplicitProxyRequestInitMock).toHaveBeenCalledWith(
       null,
@@ -336,7 +339,7 @@ describe('notifyService', () => {
     });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'feishu message', 'info', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'feishu message', 'status', 'info', { bypassThrottle: true, throwOnFailure: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const call = fetchMock.mock.calls[0] as [string, { body?: string }];
@@ -362,7 +365,7 @@ describe('notifyService', () => {
 
     const { sendNotification } = await import('./notifyService.js');
     await expect(
-      sendNotification('测试通知', 'message', 'info', {
+      sendNotification('测试通知', 'message', 'status', 'info', {
         bypassThrottle: true,
         throwOnFailure: true,
       }),
@@ -382,7 +385,7 @@ describe('notifyService', () => {
     });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('测试通知', 'lark message', 'warning', { bypassThrottle: true, throwOnFailure: true });
+    await sendNotification('测试通知', 'lark message', 'status', 'warning', { bypassThrottle: true, throwOnFailure: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const call = fetchMock.mock.calls[0] as [string, { body?: string }];
@@ -397,7 +400,7 @@ describe('notifyService', () => {
   it('truncates WeCom custom webhook body by UTF-8 bytes with suffix counted in budget', async () => {
     const { saveNotificationTemplates } = await import('./notificationTemplates.js');
     await saveNotificationTemplates({
-      webhook: { title: 'W:{{title}}', body: '{{message}}' },
+      __global__: { webhook: { title: 'W:{{title}}', body: '{{message}}' } },
     });
 
     const { config } = await import('../config.js');
@@ -408,7 +411,7 @@ describe('notifyService', () => {
 
     const { sendNotification } = await import('./notifyService.js');
     const longMessage = '中'.repeat(2000); // 6000 UTF-8 bytes
-    await sendNotification('告警', longMessage, 'error');
+    await sendNotification('告警', longMessage, 'status', 'error');
 
     const [, init] = fetchMock.mock.calls[0] as [string, any];
     const payload = JSON.parse(init.body);
@@ -419,5 +422,51 @@ describe('notifyService', () => {
     // 修复后：后缀计入预算，总字节数不超过上限
     expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(WECHAT_MAX_BODY_BYTES);
     expect(content).toContain('…');
+  });
+
+  it('routes the notification to the template of the given event type', async () => {
+    const { saveNotificationTemplates } = await import('./notificationTemplates.js');
+    await saveNotificationTemplates({
+      __global__: { telegram: { body: 'GLOBAL {{title}}' } },
+      token: { telegram: { body: 'TOKEN {{title}}' } },
+      status: { telegram: { body: 'STATUS {{title}}' } },
+    });
+
+    const { config } = await import('../config.js');
+    (config as any).telegramEnabled = true;
+    (config as any).telegramBotToken = '123456:telegram-token';
+    (config as any).telegramChatId = '-1001234567890';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('Token 已失效', 'x', 'token', 'error', { bypassThrottle: true });
+    await sendNotification('后台任务完成', 'y', 'status', 'info', { bypassThrottle: true });
+    await sendNotification('其他事件', 'z', 'checkin', 'warning', { bypassThrottle: true });
+
+    const readText = (index: number) => (
+      JSON.parse(((fetchMock.mock.calls[index] as [string, any])[1]).body).text as string
+    );
+    expect(readText(0)).toContain('TOKEN Token 已失效');
+    expect(readText(1)).toContain('STATUS 后台任务完成');
+    // 未单独定义 checkin：回退 __global__
+    expect(readText(2)).toContain('GLOBAL 其他事件');
+  });
+
+  it('falls back to the hardcoded default payload when no template matches', async () => {
+    const { config } = await import('../config.js');
+    (config as any).telegramEnabled = true;
+    (config as any).telegramBotToken = '123456:telegram-token';
+    (config as any).telegramChatId = '-1001234567890';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true }) });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('标题', '正文', 'daily_summary', 'info', { bypassThrottle: true });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, any];
+    const payload = JSON.parse(init.body);
+    expect(payload.parse_mode).toBeUndefined();
+    expect(payload.text).toContain('[metapi][INFO] 标题');
   });
 });

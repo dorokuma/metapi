@@ -31,6 +31,7 @@ import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
 import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
+import { ensureLegacyNotificationTemplatesMigrated } from './services/notificationTemplates.js';
 import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
 import { ensureOauthIdentityBackfill } from './services/oauth/oauthIdentityBackfill.js';
 import { ensureOauthProviderSitesExist } from './services/oauth/oauthSiteRegistry.js';
@@ -132,6 +133,21 @@ function hasExplicitLogCleanupSettings(settingsMap: Map<string, string>): boolea
   return LOG_CLEANUP_SETTING_KEYS.some((key) => settingsMap.has(key));
 }
 
+/**
+ * 把旧版 `settings.notification_templates_v1` JSON 拆成 notification_templates 表里的
+ * `__global__` 行，保证老用户升级后推送模板行为不变。幂等，重复执行无副作用。
+ */
+async function ensureNotificationTemplatesMigratedAtStartup(): Promise<void> {
+  try {
+    const migrated = await ensureLegacyNotificationTemplatesMigrated();
+    if (migrated > 0) {
+      console.log(`Migrated ${migrated} legacy notification template(s) into notification_templates.`);
+    }
+  } catch (error) {
+    console.warn(`Failed to migrate legacy notification templates: ${(error as Error)?.message || 'unknown error'}`);
+  }
+}
+
 // Ensure the current runtime database is bootstrapped before reading settings.
 await ensureRuntimeDatabaseReady({
   dialect: runtimeDbDialect,
@@ -186,6 +202,7 @@ try {
     config.logCleanupRetentionDays = normalizeLogCleanupRetentionDays(config.proxyLogRetentionDays);
   }
   await ensureProxyLogBillingDetailsColumn();
+  await ensureNotificationTemplatesMigratedAtStartup();
   await repairStoredCreatedAtValues();
   await migrateSiteApiKeysToAccounts();
   await ensureDefaultSitesSeeded();

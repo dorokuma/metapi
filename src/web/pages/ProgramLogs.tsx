@@ -30,6 +30,7 @@ const TYPE_OPTIONS = [
   { value: 'proxy', label: '代理' },
   { value: 'status', label: '状态' },
   { value: 'site_notice', label: '站点公告' },
+  { value: 'daily_summary', label: '每日总结' },
 ];
 
 function levelLabel(level: string) {

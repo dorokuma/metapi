@@ -19,7 +19,7 @@ type NotificationTemplatesByEvent = Partial<Record<TemplateEventKey, Partial<Rec
 const GLOBAL_EVENT_KEY: TemplateEventKey = '__global__';
 
 const TEMPLATE_EVENT_TYPES: Array<{ value: TemplateEventKey; label: string; hint: string }> = [
-    { value: '__global__', label: '全局（兜底）', hint: '未单独定义模板的事件类型都会使用这一组模板' },
+    { value: '__global__', label: '全局', hint: '未单独定义模板的事件类型都会使用这一组模板' },
     { value: 'token', label: 'Token 失效', hint: '账号访问令牌失效' },
     { value: 'proxy', label: '代理告警', hint: '代理全部失败等路由级告警' },
     { value: 'site_notice', label: '站点公告', hint: '上游站点公告推送' },

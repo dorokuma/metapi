@@ -3,6 +3,12 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本约定。
 更早的历史变更见 [docs/change-log.md](docs/change-log.md)。
 
+## [Unreleased]
+
+### 变更
+
+- 通知设置页：全局模板标签由「全局（兜底）」精简为「全局」。
+
 ## [1.4.0] - 2026-09-24
 
 ### 新增

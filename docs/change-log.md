@@ -289,6 +289,29 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
   - 老数据迁移路径有测试覆盖：先写入 legacy setting 再加载，断言 `__global__` 行内容、legacy 键被删除且二次加载幂等。
 - **状态**：已完成。
 
+### 16. 流式响应 include_usage 终态 usage chunk 补发
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求（线上现象：走 openai chat surface 的流式请求拿不到 usage，guardian footer 的 `▸ TPS` 显示 `n/a`），未提供 GitHub Issue 链接
+- **目标**：修复 `stream_options.include_usage` 只被解析、没有进入流式会话，导致上游只在收尾帧（`choices: []` 单帧）给出 usage 时该帧被整帧丢弃的问题。
+- **实现范围**：
+  - `StreamTransformContext` 增加 usage 字段与 includeUsage 布尔标记，`chatSurface` 仅在 openai chat 且 `include_usage=true` 时下传（计费路径独立，不受影响）。
+  - `serializeStreamDone` 的 openai 分支在 `[DONE]` 之前补发一条 `choices: []` 的终态 usage chunk；保留既有中间帧 usage 行为，避免下游解析器回归。
+  - `streamBridge` 记住最后一条确凿 usage（覆盖，不累加）；`proxyStream` 在 JSON fallback 记录 usage，并在 `markFailed` 内同步把 `includeUsage` 置为 `false`，锁住「失败流不得补 usage」不变量。
+  - 补测试：`streamBridge.test.ts` 增加终态 chunk 与负向用例，新增 `proxyStream.test.ts`（含「空内容失败 + 已捕获 usage → 不得补 usage」）。
+- **主要文件**：
+  - `src/server/transformers/shared/chatFormatsCore.ts`
+  - `src/server/transformers/openai/chat/streamBridge.ts`
+  - `src/server/transformers/openai/chat/proxyStream.ts`
+  - `src/server/proxy-core/surfaces/chatSurface.ts`
+  - `.agents/notes/20260923-openai-chat-stream-usage-chunk.md`
+- **验证**：
+  - 提交 `a21e8d5` 双审与应修补丁已过。
+  - 镜像 A/B 取证：候选镜像 `dist/` 中 `includeUsage` 命中补丁产物 10 处，旧镜像 0 处（阴性对照）。
+  - 线上行为 canary（A/B/C）：旧镜像 + `include_usage=true` 终态 chunk 0 条（复现问题）；候选镜像 + `include_usage=true` 1 条且位于 `[DONE]` 之前；候选镜像不带 `include_usage` 0 条。非流式 usage、`/v1/models` 与同步脚本 dry-run 无回归。
+- **交付物**：代码、测试、`.agents/notes` 决策记录、`CHANGELOG.md` 与本条持续变更日志。
+- **状态**：已完成，随 `v1.4.0` 发布。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

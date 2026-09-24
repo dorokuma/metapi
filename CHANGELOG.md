@@ -3,7 +3,7 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本约定。
 更早的历史变更见 [docs/change-log.md](docs/change-log.md)。
 
-## [Unreleased]
+## [1.4.0] - 2026-09-24
 
 ### 新增
 
@@ -30,6 +30,7 @@
   - `parseNotificationTemplatesInput` 上提历史扁平格式兼容（顶层为渠道键时归一化成 `__global__` 层），`PUT /api/settings/runtime` 收到扁平 payload 返回 200；`saveNotificationTemplates` 与解析共用同一处扁平兼容实现。
   - `sendNotification` 的必填 `eventType` 前置到 `level` 之前，全部调用点同步更新；移除 `loadNotificationTemplatesForEvent` 对非法 `eventType` 静默降级为 `__global__` 的行为，改为显式报错。
   - 模板回退改为字段级：事件行只定义 `body` 时，`title` / `parseMode` 从 `__global__` 行继承，两级都缺省时才走渠道硬编码默认渲染。
+- 流式响应补发终态 usage chunk（`a21e8d5`）：`stream_options.include_usage` 在 openai chat 流式会话中此前只被解析、没有下传到流上下文，上游只在收尾帧（`choices: []` 单帧）给出 usage 时该帧会被整体丢弃；现在该标记随流会话传递，并在 `[DONE]` 之前补发一条 `choices: []` 的终态 usage chunk，失败流与空内容流不会补帧。
 
 ### 迁移说明
 

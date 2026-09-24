@@ -127,6 +127,36 @@ describe('NotificationSettings templates', () => {
     }
   });
 
+  it('does not mark the global template context as customized while keeping the marker for event overrides', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      telegramEnabled: true,
+      notifyCooldownSec: 300,
+      notificationTemplates: {
+        __global__: { telegram: { body: 'GLOBAL {{title}}' } },
+        token: { telegram: { body: 'TOKEN-OWN {{title}}' } },
+      },
+    });
+    const root = await renderPage();
+    try {
+      // 全局是基底，内容本身就等于默认值：全局 tab 与全局上下文下的渠道 tab 都不应出现「·」噪点
+      const globalTab = findButtonByTestId(root, 'template-event-tab-__global__');
+      expect(globalTab).toBeTruthy();
+      expect(collectText(globalTab)).not.toContain('·');
+      const telegramTab = findButtonByTestId(root, 'template-tab-telegram');
+      expect(telegramTab).toBeTruthy();
+      expect(collectText(telegramTab)).not.toContain('·');
+
+      // 非全局事件有非空覆盖：事件 tab 与渠道 tab 的「·」标记语义不变
+      expect(collectText(findButtonByTestId(root, 'template-event-tab-token'))).toContain('·');
+      await act(async () => {
+        findButtonByTestId(root, 'template-event-tab-token').props.onClick();
+      });
+      expect(collectText(findButtonByTestId(root, 'template-tab-telegram'))).toContain('·');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('inserts a variable chip into the body and reflects it in the preview', async () => {
     apiMock.getRuntimeSettings.mockResolvedValue({
       telegramEnabled: true,

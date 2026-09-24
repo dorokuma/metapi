@@ -352,13 +352,15 @@ export default function NotificationSettings() {
      */
     const isCustomized = !!overrideTemplate;
     const effectiveTemplate = isCustomized ? overrideTemplate : globalTemplate;
-    /** 事件类型是否已有任一有内容的覆盖（事件 Tab 提示点） */
+    /** 事件类型是否已有任一有内容的覆盖（事件 Tab 提示点）；全局是基底，无「覆盖」语义，恒不提示 */
     const eventHasOwnTemplate = (event: TemplateEventKey): boolean => (
-        Object.values(runtime.notificationTemplates[event] || {}).some((template) => !isTemplateEmpty(template))
+        event !== GLOBAL_EVENT_KEY
+        && Object.values(runtime.notificationTemplates[event] || {}).some((template) => !isTemplateEmpty(template))
     );
-    /** 渠道是否已有覆盖行（含空行：空行也是用户显式创建的覆盖） */
+    /** 渠道是否已有覆盖行（含空行：空行也是用户显式创建的覆盖）；全局是基底，无「覆盖」语义，恒不提示 */
     const channelHasOverride = (event: TemplateEventKey, channel: TemplateChannel): boolean => (
-        !!runtime.notificationTemplates[event]?.[channel]
+        event !== GLOBAL_EVENT_KEY
+        && !!runtime.notificationTemplates[event]?.[channel]
     );
     /** 非全局事件下的空覆盖行等价于继承全局，服务端会丢弃；保存后本地状态同步收敛。 */
     const dropEmptyOverrideRows = (templates: NotificationTemplatesByEvent): NotificationTemplatesByEvent => {

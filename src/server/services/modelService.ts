@@ -197,12 +197,12 @@ function buildModelFailureMessage(code: ModelRefreshErrorCode, fallback?: string
   if (looksLikeHtmlJsonParseError(raw) || looksLikeShieldChallenge(raw)) {
     const normalizedPlatform = String(platform || '').trim().toLowerCase();
     if (normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter') {
-      return '模型获取失败：站点返回了防护页面，请在目标站点创建 API Key 后再同步模型';
+      return '模型获取失败：站点返回了防护页面，请在目标站点创建 API 密钥后再同步模型';
     }
     return '模型获取失败：站点返回了网页而不是 JSON 响应';
   }
   if (code === 'timeout') return '模型获取失败（请求超时）';
-  if (code === 'unauthorized') return '模型获取失败，API Key 已无效';
+  if (code === 'unauthorized') return '模型获取失败，API 密钥已无效';
   if (code === 'empty_models') return '模型获取失败：未获取到可用模型';
   return fallback || '模型获取失败';
 }

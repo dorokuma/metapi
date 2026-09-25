@@ -114,10 +114,10 @@ describe('SearchModal results', () => {
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('账号令牌');
       expect(rendered).toContain('search-token');
-      expect(rendered).toContain('API Key 连接');
+      expect(rendered).toContain('API 密钥连接');
 
       const buttons = root.root.findAll((node) => node.type === 'button');
-      const accountButton = buttons.find((node) => collectText(node).includes('API Key 连接'));
+      const accountButton = buttons.find((node) => collectText(node).includes('API 密钥连接'));
       expect(accountButton).toBeTruthy();
 
       await act(async () => {

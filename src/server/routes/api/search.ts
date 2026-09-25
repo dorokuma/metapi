@@ -27,6 +27,8 @@ function matchesApiKeyDisplayLabel(query: string): boolean {
     'api key',
     'api-key',
     'api key 连接',
+    'api 密钥连接',
+    'api 密钥',
     'apikey 连接',
     'api key connection',
     'apikey connection',

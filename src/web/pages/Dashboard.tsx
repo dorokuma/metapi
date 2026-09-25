@@ -826,7 +826,7 @@ export default function Dashboard({
               </svg>
             </div>
             <div className="dashboard-stat-content">
-              <div className="stat-label">24h Tokens</div>
+              <div className="stat-label">24h 词元</div>
               <div className="stat-value animate-count-up">
                 {formatCompactTokenMetric(totalTokens)}
               </div>
@@ -961,7 +961,7 @@ export default function Dashboard({
                 {formatCompactTokenMetric(tokensPerMinute)}
               </div>
               <div className="dashboard-stat-note">
-                最近 {performanceWindowSeconds} 秒 Tokens
+                最近 {performanceWindowSeconds} 秒词元
               </div>
             </div>
           </div>

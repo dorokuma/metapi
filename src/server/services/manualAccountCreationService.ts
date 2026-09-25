@@ -146,9 +146,9 @@ function buildQueuedAccountInitializationMessage(
     return '账号已添加，后台正在同步令牌、余额和模型信息。';
   }
   if (skipModelFetch === true) {
-    return '已添加为 API Key 账号（可用于代理转发）。';
+    return '已添加为 API 密钥账号（可用于代理转发）。';
   }
-  return '已添加为 API Key 账号，后台正在同步模型和路由信息。';
+  return '已添加为 API 密钥账号，后台正在同步模型和路由信息。';
 }
 
 export async function createManualAccount({
@@ -183,7 +183,7 @@ export async function createManualAccount({
         ? models.filter((item) => typeof item === 'string' && item.trim().length > 0)
         : [];
       if (verifiedModels.length === 0) {
-        const error = new Error('API Key 验证失败：未获取到可用模型');
+        const error = new Error('API 密钥验证失败：未获取到可用模型');
         (error as Error & { requiresVerification?: boolean }).requiresVerification = true;
         throw error;
       }
@@ -200,13 +200,13 @@ export async function createManualAccount({
     );
     tokenType = verifyResult.tokenType;
     if (tokenType === 'unknown') {
-      const error = new Error('Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号');
+      const error = new Error('令牌验证失败，请先点击“验证令牌”，验证成功后再绑定账号');
       (error as Error & { requiresVerification?: boolean }).requiresVerification = true;
       throw error;
     }
 
     if (credentialMode === 'session' && tokenType !== 'session') {
-      throw new Error('当前凭证是 API Key，请切换到 API Key 模式，或改用 Session Token');
+      throw new Error('当前凭证是 API 密钥，请切换到 API 密钥模式，或改用 Session 令牌');
     }
 
     if (tokenType === 'session') {

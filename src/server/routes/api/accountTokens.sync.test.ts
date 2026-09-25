@@ -469,7 +469,7 @@ describe('account tokens sync routes with site status', () => {
     expect(syncResponse.statusCode).toBe(400);
     expect(syncResponse.json()).toMatchObject({
       success: false,
-      message: 'API Key 连接不支持同步账号令牌',
+      message: 'API 密钥连接不支持同步账号令牌',
     });
 
     const createResponse = await app.inject({
@@ -483,7 +483,7 @@ describe('account tokens sync routes with site status', () => {
     expect(createResponse.statusCode).toBe(400);
     expect(createResponse.json()).toMatchObject({
       success: false,
-      message: 'API Key 连接不支持创建账号令牌',
+      message: 'API 密钥连接不支持创建账号令牌',
     });
 
     const groupsResponse = await app.inject({
@@ -493,7 +493,7 @@ describe('account tokens sync routes with site status', () => {
     expect(groupsResponse.statusCode).toBe(400);
     expect(groupsResponse.json()).toMatchObject({
       success: false,
-      message: 'API Key 连接不支持拉取账号令牌分组',
+      message: 'API 密钥连接不支持拉取账号令牌分组',
     });
   });
 

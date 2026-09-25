@@ -9,7 +9,7 @@ import { buildUpdateReminder } from './helpers/updateCenterPresentation.js';
 const VERSION = '1.3.0';
 
 const FEATURES = [
-  { icon: '🌐', title: '统一代理网关', desc: '一个 Key、一个入口，兼容 OpenAI / Claude 下游格式' },
+  { icon: '🌐', title: '统一代理网关', desc: '一个密钥、一个入口，兼容 OpenAI / Claude 下游格式' },
   { icon: '🧠', title: '智能路由引擎', desc: '按成本、延迟、成功率自动选择最优通道，故障自动转移' },
   { icon: '📡', title: '多站点聚合', desc: '集中管理 New API / One API / OneHub / DoneHub / Veloera 等' },
   { icon: '🔍', title: '自动模型发现', desc: '上游新增模型自动出现在模型列表，零配置路由生成' },
@@ -99,7 +99,7 @@ export default function About() {
           </div>
         </div>
         <div style={{ fontSize: 14, color: 'var(--color-text-secondary)', lineHeight: 1.8 }}>
-          {tr('中转站的中转站 — 将你在各处注册的 New API / One API / OneHub 等 AI 中转站聚合为一个统一网关。一个 API Key、一个入口，自动发现模型、智能路由、成本最优。')}
+          {tr('中转站的中转站 — 将你在各处注册的 New API / One API / OneHub 等 AI 中转站聚合为一个统一网关。一个 API 密钥、一个入口，自动发现模型、智能路由、成本最优。')}
         </div>
       </div>
 

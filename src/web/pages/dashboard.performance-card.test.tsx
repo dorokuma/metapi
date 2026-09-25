@@ -104,7 +104,7 @@ describe('Dashboard performance stat card', () => {
       expect(collectText(statGrid)).toContain('17');
       expect(collectText(statGrid)).toContain('TPM');
       expect(collectText(statGrid)).toContain('8K');
-      expect(collectText(statGrid)).toContain('24h Tokens');
+      expect(collectText(statGrid)).toContain('24h 词元');
       expect(collectText(statGrid)).toContain('606.6M');
     } finally {
       root?.unmount();

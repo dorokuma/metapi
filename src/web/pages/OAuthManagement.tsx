@@ -1661,7 +1661,7 @@ export default function OAuthManagement() {
           </div>
         </div>
         <div className="oauth-summary-note">
-          OAuth 账号以后只在这里维护。连接管理页默认只保留普通 Session / API Key / Token 连接。
+          OAuth 账号以后只在这里维护。连接管理页默认只保留普通 Session / API 密钥 / 令牌 连接。
         </div>
       </div>
     </div>
@@ -2210,7 +2210,7 @@ export default function OAuthManagement() {
               <div className="oauth-form-note">
                 {drawerIntent.mode === 'proxy'
                   ? '这里修改的是账号级 OAuth 代理。点击“保存代理”会立即落库并刷新列表；只有“保存并重新授权”才会重新走授权流程。若两项都不勾选，则回退到站点代理配置。'
-                  : '这里的设置会作用于下一次“连接”或“重新授权”。填写代理地址后，本次 OAuth 换 token 和后续生成的账号都会直接带上这份账号级代理配置；若不勾选，则回退到站点代理配置。'}
+                  : '这里的设置会作用于下一次“连接”或“重新授权”。填写代理地址后，本次 OAuth 换令牌和后续生成的账号都会直接带上这份账号级代理配置；若不勾选，则回退到站点代理配置。'}
               </div>
 
               <div className="oauth-toggle-group">
@@ -2328,7 +2328,7 @@ export default function OAuthManagement() {
                       {renderCodeBlock(activeSession.instructions.sshTunnelCommand)}
                       {activeSession.instructions.sshTunnelKeyCommand ? (
                         <>
-                          <div className="oauth-guide-block-label">SSH Key 隧道</div>
+                          <div className="oauth-guide-block-label">SSH 密钥隧道</div>
                           {renderCodeBlock(activeSession.instructions.sshTunnelKeyCommand)}
                         </>
                       ) : null}

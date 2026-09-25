@@ -30,11 +30,11 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     if (newToken.length < 6) {
-      return reply.code(400).send({ success: false, message: '新 Token 至少 6 个字符' });
+      return reply.code(400).send({ success: false, message: '新令牌至少 6 个字符' });
     }
 
     if (oldToken !== config.authToken) {
-      return reply.code(403).send({ success: false, message: '旧 Token 验证失败' });
+      return reply.code(403).send({ success: false, message: '旧令牌验证失败' });
     }
 
     // Save to settings table
@@ -53,14 +53,14 @@ export async function authRoutes(app: FastifyInstance) {
       await db.insert(schema.events).values({
         type: 'token',
         title: '管理员登录令牌已更新',
-        message: '管理员登录 Token 已被修改，请使用新 Token 登录。',
+        message: '管理员登录令牌已被修改，请使用新令牌登录。',
         level: 'warning',
         relatedType: 'settings',
         createdAt,
       }).run();
     } catch {}
 
-    return { success: true, message: 'Token 已更新' };
+    return { success: true, message: '令牌已更新' };
     },
   );
 

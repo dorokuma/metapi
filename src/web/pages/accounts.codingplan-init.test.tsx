@@ -72,7 +72,7 @@ describe('Accounts CodingPlan initialization', () => {
       await flushMicrotasks();
 
       const rendered = JSON.stringify(root.toJSON());
-      expect(rendered).toContain('添加 API Key 连接');
+      expect(rendered).toContain('添加 API 密钥连接');
       expect(rendered).toContain('阿里云 CodingPlan / OpenAI');
       expect(rendered).toContain('qwen3-coder-plus');
 
@@ -85,7 +85,7 @@ describe('Accounts CodingPlan initialization', () => {
 
       const tokenInput = root.root.find((node) => (
         node.type === 'textarea'
-        && node.props.placeholder === '粘贴 API Key'
+        && node.props.placeholder === '粘贴 API 密钥'
       ));
       const addButton = root.root.find((node) => (
         node.type === 'button'
@@ -148,7 +148,7 @@ describe('Accounts CodingPlan initialization', () => {
 
       const tokenInput = root.root.find((node) => (
         node.type === 'textarea'
-        && node.props.placeholder === '粘贴 API Key'
+        && node.props.placeholder === '粘贴 API 密钥'
       ));
       const addButton = root.root.find((node) => (
         node.type === 'button'

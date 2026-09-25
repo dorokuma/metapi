@@ -41,7 +41,7 @@ describe('Accounts segmented connections view', () => {
     vi.clearAllMocks();
   });
 
-  it('shows only apikey connections in the apikey segment and labels unnamed ones as API Key 连接', async () => {
+  it('shows only apikey connections in the apikey segment and labels unnamed ones as API 密钥连接', async () => {
     apiMock.getAccounts.mockResolvedValue([
       {
         id: 1,
@@ -86,10 +86,10 @@ describe('Accounts segmented connections view', () => {
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('连接管理');
       expect(rendered).toContain('账号管理');
-      expect(rendered).toContain('API Key管理');
+      expect(rendered).toContain('API 密钥管理');
       expect(rendered).toContain('账号令牌管理');
       expect(rendered).toContain('用于签到、余额、状态维护');
-      expect(rendered).toContain('只有 Base URL + Key 时使用，只负责代理调用');
+      expect(rendered).toContain('只有 Base URL + 密钥时使用，只负责代理调用');
       expect(rendered).toContain('从账号同步或手动维护，供路由实际调用');
       expect(rendered).toContain('Key Site');
       expect(rendered).not.toContain('仅代理');
@@ -98,7 +98,7 @@ describe('Accounts segmented connections view', () => {
       const segmentButtons = root.root.findAll((node) => {
         if (node.type !== 'button') return false;
         const text = collectText(node);
-        return text === '账号管理' || text === 'API Key管理' || text === '账号令牌管理';
+        return text === '账号管理' || text === 'API 密钥管理' || text === '账号令牌管理';
       });
       expect(segmentButtons).toHaveLength(3);
       expect(segmentButtons[0]?.props['data-tooltip-side']).toBe('bottom');

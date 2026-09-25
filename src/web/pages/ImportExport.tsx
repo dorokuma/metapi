@@ -256,7 +256,7 @@ function buildImportSuccessMessage(result: any): string {
       [
         `站点 ${summary.importedSites ?? 0}`,
         `账号 ${summary.importedAccounts ?? 0}`,
-        `API Key 连接 ${summary.importedApiKeyConnections ?? summary.importedProfiles ?? 0}`,
+        `API 密钥连接 ${summary.importedApiKeyConnections ?? summary.importedProfiles ?? 0}`,
         `跳过 ${summary.skippedAccounts ?? 0}`,
       ].join(' / '),
     );
@@ -689,7 +689,7 @@ export default function ImportExport() {
                       || summary.downstreamApiKeysCount
                       || summary.settingsCount) ? (
                       <div>
-                        统计：站点 {summary.sitesCount} / 账号 {summary.accountsCount} / 令牌 {summary.tokensCount} / 路由 {summary.routesCount} / 通道 {summary.channelsCount} / 站点禁用模型 {summary.siteDisabledModelsCount} / 手工模型 {summary.manualModelsCount} / 下游 Key {summary.downstreamApiKeysCount} / 设置 {summary.settingsCount}
+                        统计：站点 {summary.sitesCount} / 账号 {summary.accountsCount} / 令牌 {summary.tokensCount} / 路由 {summary.routesCount} / 通道 {summary.channelsCount} / 站点禁用模型 {summary.siteDisabledModelsCount} / 手工模型 {summary.manualModelsCount} / 下游密钥 {summary.downstreamApiKeysCount} / 设置 {summary.settingsCount}
                       </div>
                     ) : null}
                     {summary.hasLegacyData ? <div>检测到兼容结构：将按兼容模式导入。</div> : null}
@@ -870,7 +870,7 @@ export default function ImportExport() {
       <div className="card animate-slide-up stagger-4" style={{ marginTop: 14, padding: 16 }}>
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>注意事项</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.75 }}>
-          <div>1. 导入连接分区会覆盖备份中的站点、账号、令牌、路由、禁用模型、手工模型和下游 Key 配置。</div>
+          <div>1. 导入连接分区会覆盖备份中的站点、账号、令牌、路由、禁用模型、手工模型和下游密钥配置。</div>
           <div>2. 覆盖备份中的连接/路由/策略配置，但会保留本机日志、公告、缓存和统计。</div>
           <div>3. 为避免锁死管理界面，管理员登录令牌（`auth_token`）不会从备份导入。</div>
           <div>4. 建议先导出一份"全部备份"再执行导入操作。</div>

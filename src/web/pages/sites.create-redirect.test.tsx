@@ -132,7 +132,7 @@ async function createSiteAndClickModalChoice(
     const targetButton = choice === 'session'
       ? findClickableButtonByText(root, createdSite.platform === 'codex' ? '添加 OAuth 连接' : '添加账号（用户名密码登录）')
       : choice === 'apikey'
-        ? findClickableButtonByText(root, '添加 API Key')
+        ? findClickableButtonByText(root, '添加 API 密钥')
         : findClickableButtonByText(root, '稍后配置');
 
     await act(async () => {
@@ -228,7 +228,7 @@ async function createSiteAndClickModalChoice(
       });
       await flushMicrotasks();
 
-      const addKeyButton = findClickableButtonByText(root, '添加 Key');
+      const addKeyButton = findClickableButtonByText(root, '添加密钥');
       await act(async () => {
         addKeyButton.props.onClick();
       });
@@ -604,7 +604,7 @@ async function createSiteAndClickModalChoice(
     const rendered = JSON.stringify(root.toJSON());
     expect(rendered).toContain('站点创建成功');
     expect(rendered).toContain('添加账号（用户名密码登录）');
-    expect(rendered).toContain('添加 API Key');
+    expect(rendered).toContain('添加 API 密钥');
     expect(rendered).toContain('稍后配置');
 
     root.unmount();

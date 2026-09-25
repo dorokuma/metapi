@@ -260,7 +260,7 @@ const SITE_PLATFORM_OPTIONS = [
   { value: 'one-hub', label: 'one-hub', description: '聚合面板，偏向多账号统一管理' },
   { value: 'done-hub', label: 'done-hub', description: '聚合面板，适合统一转发与管理' },
   { value: 'sub2api', label: 'sub2api', description: '订阅式中转面板，可同步套餐与余额信息' },
-  { value: 'orcarouter', label: 'orcarouter', description: 'OrcaRouter 官方 OpenAI 兼容网关，sk-orca- API Key 直连' },
+  { value: 'orcarouter', label: 'orcarouter', description: 'OrcaRouter 官方 OpenAI 兼容网关，sk-orca- API 密钥直连' },
   { value: 'openai', label: 'openai', description: '通用 OpenAI 兼容接口，手填 Base URL 即可' },
   { value: 'codex', label: 'codex', description: 'Codex OAuth / Session 优先入口' },
   { value: 'claude', label: 'claude', description: '通用 Claude / Anthropic 兼容接口' },
@@ -453,7 +453,7 @@ export default function Sites() {
       label: preset.label,
       description: [
         preset.defaultUrl ? '自动填充官方地址' : '',
-        preset.recommendedSkipModelFetch ? 'API Key 优先初始化' : '',
+        preset.recommendedSkipModelFetch ? 'API 密钥优先初始化' : '',
       ].filter(Boolean).join(' · '),
     }));
     return [
@@ -678,7 +678,7 @@ export default function Sites() {
               if (!d.reason || d.status === 'supported' || d.status === 'skipped') return '';
               const r = d.reason;
               if (/timeout/i.test(r)) return '超时';
-              if (/missing credential|no.*token/i.test(r)) return '无 Token';
+              if (/missing credential|no.*token/i.test(r)) return '无令牌';
               if (/no compatible.*endpoint|no.*endpoint candidate/i.test(r)) return '无可用端点';
               if (/no such model|unknown model/i.test(r)) return '模型不存在';
               if (/not found/i.test(r)) return '未找到';
@@ -921,7 +921,7 @@ export default function Sites() {
   };
 
   /**
-   * 从站点页进入账号/API Key 连接创建流程。
+   * 从站点页进入账号/API 密钥连接创建流程。
    */
   const openSiteConnectionFlow = (input: {
     siteId: number;
@@ -1044,7 +1044,7 @@ export default function Sites() {
   };
 
   /**
-   * 从站点列表直接进入 API Key 批量添加入口。
+   * 从站点列表直接进入 API 密钥批量添加入口。
    */
   const handleOpenSiteApiKey = (site: SiteRow) => {
     openSiteConnectionFlow({
@@ -1282,7 +1282,7 @@ export default function Sites() {
       )}
 
       <div className="info-tip" style={{ marginBottom: 12 }}>
-        站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
+        站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API 密钥的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
       </div>
 
       <DeleteConfirmModal
@@ -1483,7 +1483,7 @@ export default function Sites() {
               </button>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
-              这里只用于 `/v1/*`、模型发现和 API Key 验证。不填时默认跟随主站点 URL；多条地址会按列表顺序参与轮询，禁用的地址不会参与调度。
+              这里只用于 `/v1/*`、模型发现和 API 密钥验证。不填时默认跟随主站点 URL；多条地址会按列表顺序参与轮询，禁用的地址不会参与调度。
             </div>
             {form.apiEndpoints.map((endpoint, index) => (
               <div
@@ -1635,7 +1635,7 @@ export default function Sites() {
               </span>
             </label>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
-              按 key/value 逐条填写。整行留空会自动忽略；同名请求头不允许重复。
+              按键/值逐条填写。整行留空会自动忽略；同名请求头不允许重复。
             </div>
             {isEditing && (
               <div style={{ marginTop: 16, padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
@@ -2071,7 +2071,7 @@ export default function Sites() {
                           onClick={() => handleOpenSiteApiKey(site)}
                           className="btn btn-link btn-link-primary"
                         >
-                          添加 Key
+                          添加密钥
                         </button>
                         <button
                           onClick={() => openEdit(site)}
@@ -2403,7 +2403,7 @@ export default function Sites() {
                           onClick={() => handleOpenSiteApiKey(site)}
                           className="btn btn-link btn-link-primary"
                         >
-                          添加 Key
+                          添加密钥
                         </button>
                         <button
                           onClick={() => openEdit(site)}

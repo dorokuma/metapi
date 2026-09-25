@@ -100,7 +100,7 @@ describe('Accounts verify feedback', () => {
         && typeof node.props.onClick === 'function'
         && typeof node.props.className === 'string'
         && node.props.className.includes('btn btn-ghost')
-        && collectText(node).includes('Token')
+        && collectText(node).includes('验证令牌')
       ));
 
       await act(async () => {
@@ -112,7 +112,7 @@ describe('Accounts verify feedback', () => {
       expect(rendered).toContain(normalizeVerifyFailureMessage('Failed to fetch'));
       expect(rendered).toContain(buildVerifyFailureHint({ success: false, message: 'Failed to fetch' })!);
       expect(rendered).toContain(buildAddAccountPrereqHint({ success: false, message: 'Failed to fetch' }));
-      expect(rendered).not.toContain('请检查 Token 是否正确');
+      expect(rendered).not.toContain('请检查令牌是否正确');
     } finally {
       root?.unmount();
     }

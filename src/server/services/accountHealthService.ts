@@ -127,7 +127,7 @@ export function buildRuntimeHealthForAccount(input: {
       reason: usesOauthCredential
         ? '连接凭证已过期，请更新凭证'
         : credentialMode === 'apikey'
-          ? '连接已过期，请更新 API Key'
+          ? '连接已过期，请更新 API 密钥'
           : (credentialMode === 'session'
             ? '访问令牌已过期'
             : '连接凭证已过期，请更新凭证'),

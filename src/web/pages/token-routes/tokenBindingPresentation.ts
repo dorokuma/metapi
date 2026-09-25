@@ -67,12 +67,12 @@ function buildDirectBindingPresentation(
 
   return {
     isFollowingAccountDefault: false,
-    bindingModeLabel: 'API令牌',
+    bindingModeLabel: 'API 密钥',
     badgeTone: 'warning',
     effectiveTokenName: accountName,
-    helperText: `当前直接使用连接「${accountName}」保存的 API Key，不依赖账号令牌。`,
-    followOptionLabel: `固定使用：${accountName}(跟随 API Key 设置)`,
-    followOptionDescription: `直接使用连接「${accountName}」保存的 API Key`,
+    helperText: `当前直接使用连接「${accountName}」保存的 API 密钥，不依赖账号令牌。`,
+    followOptionLabel: `固定使用：${accountName}(跟随 API 密钥设置)`,
+    followOptionDescription: `直接使用连接「${accountName}」保存的 API 密钥`,
   };
 }
 
@@ -148,7 +148,7 @@ export function describeTokenBinding(
     followOptionDescription: connectionMode === 'oauth'
       ? `直接使用连接「${accountName}」的 OAuth 授权`
       : (connectionMode === 'apikey'
-          ? `直接使用连接「${accountName}」保存的 API Key`
+          ? `直接使用连接「${accountName}」保存的 API 密钥`
           : (defaultToken
               ? `当前生效：${defaultToken.name}；以后账号默认变化时会自动切换`
               : '以后账号默认变化时会自动切换')),

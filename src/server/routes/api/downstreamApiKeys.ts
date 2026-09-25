@@ -231,7 +231,7 @@ async function validatePolicyReferences(input: {
         return `excludedCredentialRefs 中的 default_api_key 引用与站点不匹配: ${ref.accountId}`;
       }
       if (!(matched.apiToken || '').trim()) {
-        return `excludedCredentialRefs 中的 default_api_key 账号缺少默认 API Key: ${ref.accountId}`;
+        return `excludedCredentialRefs 中的 default_api_key 账号缺少默认 API 密钥: ${ref.accountId}`;
       }
     }
   }
@@ -378,7 +378,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
 
     const item = await getDownstreamApiKeyById(id);
     if (!item) {
-      return reply.code(404).send({ success: false, message: 'API key 不存在' });
+      return reply.code(404).send({ success: false, message: 'API 密钥不存在' });
     }
 
     const columnReady = await hasProxyLogDownstreamApiKeyIdColumn();
@@ -433,7 +433,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     const range = normalizeDownstreamKeyRange(request.query?.range);
     const item = await getDownstreamApiKeyById(id);
     if (!item) {
-      return reply.code(404).send({ success: false, message: 'API key 不存在' });
+      return reply.code(404).send({ success: false, message: 'API 密钥不存在' });
     }
 
     const columnReady = await hasProxyLogDownstreamApiKeyIdColumn();
@@ -489,10 +489,10 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: 'name 不能为空' });
     }
     if (!normalized.key) {
-      return reply.code(400).send({ success: false, message: 'key 不能为空' });
+      return reply.code(400).send({ success: false, message: '密钥不能为空' });
     }
     if (!validateKeyShape(normalized.key)) {
-      return reply.code(400).send({ success: false, message: 'key 必须以 sk- 开头且长度至少 6' });
+      return reply.code(400).send({ success: false, message: '密钥必须以 sk- 开头且长度至少 6' });
     }
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
@@ -540,7 +540,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       };
     } catch (error: unknown) {
       if (looksLikeUniqueViolation(error)) {
-        return reply.code(409).send({ success: false, message: 'API key 已存在' });
+        return reply.code(409).send({ success: false, message: 'API 密钥已存在' });
       }
       return reply.code(500).send({ success: false, message: (error as Error)?.message || '创建失败' });
     }
@@ -562,7 +562,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       .get();
 
     if (!existing) {
-      return reply.code(404).send({ success: false, message: 'API key 不存在' });
+      return reply.code(404).send({ success: false, message: 'API 密钥不存在' });
     }
 
     const existingView = toDownstreamApiKeyPolicyView(existing);
@@ -594,10 +594,10 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: 'name 不能为空' });
     }
     if (!normalized.key) {
-      return reply.code(400).send({ success: false, message: 'key 不能为空' });
+      return reply.code(400).send({ success: false, message: '密钥不能为空' });
     }
     if (!validateKeyShape(normalized.key)) {
-      return reply.code(400).send({ success: false, message: 'key 必须以 sk- 开头且长度至少 6' });
+      return reply.code(400).send({ success: false, message: '密钥必须以 sk- 开头且长度至少 6' });
     }
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
@@ -636,7 +636,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       };
     } catch (error: unknown) {
       if (looksLikeUniqueViolation(error)) {
-        return reply.code(409).send({ success: false, message: 'API key 已存在' });
+        return reply.code(409).send({ success: false, message: 'API 密钥已存在' });
       }
       return reply.code(500).send({ success: false, message: (error as Error)?.message || '更新失败' });
     }
@@ -650,7 +650,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
 
     const existing = await getDownstreamApiKeyById(id);
     if (!existing) {
-      return reply.code(404).send({ success: false, message: 'API key 不存在' });
+      return reply.code(404).send({ success: false, message: 'API 密钥不存在' });
     }
 
     await db.update(schema.downstreamApiKeys).set({
@@ -673,7 +673,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
 
     const existing = await getDownstreamApiKeyById(id);
     if (!existing) {
-      return reply.code(404).send({ success: false, message: 'API key 不存在' });
+      return reply.code(404).send({ success: false, message: 'API 密钥不存在' });
     }
 
     await db.delete(schema.downstreamApiKeys)
@@ -726,7 +726,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       try {
         const existing = await getDownstreamApiKeyById(id);
         if (!existing) {
-          failedItems.push({ id, message: 'API key 不存在' });
+          failedItems.push({ id, message: 'API 密钥不存在' });
           continue;
         }
 

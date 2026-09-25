@@ -922,7 +922,7 @@ export default function Settings() {
       const res = await api.updateRuntimeSettings({ proxyToken: `${PROXY_TOKEN_PREFIX}${suffix}` });
       setRuntime((prev) => ({ ...prev, proxyTokenMasked: res.proxyTokenMasked || prev.proxyTokenMasked }));
       setProxyTokenSuffix('');
-      toast.success('Proxy token updated');
+      toast.success('下游访问令牌已更新');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -1162,7 +1162,7 @@ export default function Settings() {
           ? { oauthProviderSiteAutoCreateEnabled: runtime.oauthProviderSiteAutoCreateEnabled }
           : {}),
       });
-      toast.success('Routing weights saved');
+      toast.success('路由权重已保存');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -1299,7 +1299,7 @@ export default function Settings() {
           ? res.currentAdminIp
           : prev.currentAdminIp,
       }));
-      toast.success('Security settings saved');
+      toast.success('安全设置已保存');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -1364,7 +1364,7 @@ export default function Settings() {
 
   const handleTestExternalDatabaseConnection = async () => {
     if (!effectiveMigrationConnectionString) {
-      toast.info('Please fill target database connection first');
+      toast.info('请先填写目标数据库连接');
       return;
     }
 
@@ -1381,9 +1381,9 @@ export default function Settings() {
         connectionString: effectiveMigrationConnectionString,
         ssl: migrationSsl,
       });
-      toast.success(`Connection success: ${res.connection || migrationDialect}`);
+      toast.success(`连接成功：${res.connection || migrationDialect}`);
     } catch (err: any) {
-      toast.error(err?.message || 'Target database connection failed');
+      toast.error(err?.message || '目标数据库连接失败');
     } finally {
       setTestingMigrationConnection(false);
     }
@@ -1391,7 +1391,7 @@ export default function Settings() {
 
   const handleMigrateToExternalDatabase = async () => {
     if (!effectiveMigrationConnectionString) {
-      toast.info('Please fill target database connection first');
+      toast.info('请先填写目标数据库连接');
       return;
     }
 
@@ -1402,8 +1402,8 @@ export default function Settings() {
     }
 
     const warning = migrationOverwrite
-      ? 'Confirm migration and overwrite existing data in target database?'
-      : 'Confirm migration to target database? If target has data, migration may fail.';
+      ? '确认迁移并覆盖目标库中的现有数据？'
+      : '确认迁移到目标库？若目标库已有数据，迁移可能失败。';
     if (!window.confirm(warning)) return;
 
     setMigratingDatabase(true);
@@ -1415,9 +1415,9 @@ export default function Settings() {
         ssl: migrationSsl,
       });
       setMigrationSummary(res);
-      toast.success(res?.message || 'Database migration completed');
+      toast.success(res?.message || '数据库迁移已完成');
     } catch (err: any) {
-      toast.error(err?.message || 'Database migration failed');
+      toast.error(err?.message || '数据库迁移失败');
     } finally {
       setMigratingDatabase(false);
     }
@@ -1425,7 +1425,7 @@ export default function Settings() {
 
   const handleSaveRuntimeDatabaseConfig = async () => {
     if (!effectiveMigrationConnectionString) {
-      toast.info('Please fill target database connection first');
+      toast.info('请先填写目标数据库连接');
       return;
     }
 
@@ -1457,9 +1457,9 @@ export default function Settings() {
           : null,
         restartRequired: !!res?.restartRequired,
       });
-      toast.success(res?.message || 'Runtime database config saved');
+      toast.success(res?.message || '运行时数据库配置已保存');
     } catch (err: any) {
-      toast.error(err?.message || 'Runtime database config save failed');
+      toast.error(err?.message || '运行时数据库配置保存失败');
     } finally {
       setSavingRuntimeDatabase(false);
     }
@@ -1682,7 +1682,7 @@ export default function Settings() {
               checked={runtime.proxyEmptyContentFailEnabled}
               onChange={(e) => setRuntime((prev) => ({ ...prev, proxyEmptyContentFailEnabled: e.target.checked }))}
             />
-            空内容（completion=0，即使 prompt 有 token 也算）判定失败
+            空内容（completion=0，即使 prompt 有词元也算）判定失败
           </label>
           <div>
             <button onClick={saveProxyFailureRules} disabled={savingProxyFailureRules} className="btn btn-primary">
@@ -2267,7 +2267,7 @@ export default function Settings() {
               </div>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, lineHeight: 1.6 }}>
-              支持秒、分钟、小时、天。只封顶普通失败与轮询分级冷却；429 限额类冷却仍优先遵循上游 reset 提示，避免过早重试。
+              支持秒、分钟、小时、天。只封顶普通失败与轮询分级冷却；429 限额类冷却仍优先遵循上游重置提示，避免过早重试。
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -2353,7 +2353,7 @@ export default function Settings() {
 
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-              首字超时（无首包 / 首 token）
+              首字超时（无首包 / 首个词元）
             </div>
             <input
               type="number"
@@ -2373,7 +2373,7 @@ export default function Settings() {
               style={inputStyle}
             />
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7, marginTop: 6 }}>
-              `0` 表示关闭。只有在指定时间内完全没有任何首包 / 首 token 返回时才切换，已经开始输出的请求不会被这项超时打断。
+              `0` 表示关闭。只有在指定时间内完全没有任何首包 / 首个词元返回时才切换，已经开始输出的请求不会被这项超时打断。
             </div>
           </div>
 
@@ -2478,7 +2478,7 @@ export default function Settings() {
                 style={inputStyle}
               />
               <div style={settingsModernFieldHintStyle}>
-                按请求 id 稳定采样，同一请求结果不随刷新变化。
+                按请求 ID 稳定采样，同一请求结果不随刷新变化。
               </div>
             </div>
             <div style={settingsModernFieldCardStyle}>
@@ -2780,7 +2780,7 @@ export default function Settings() {
             <input
               value={migrationConnectionString}
               onChange={(e) => setMigrationConnectionString(e.target.value)}
-              placeholder="./data/target.db or file:///abs/path.db"
+              placeholder="./data/target.db 或 file:///abs/path.db"
               style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
             />
           ) : connectionMode === 'advanced' ? (
@@ -2798,19 +2798,19 @@ export default function Settings() {
                 <input
                   value={shorthandConnection.host}
                   onChange={(e) => setShorthandConnection((prev) => ({ ...prev, host: e.target.value }))}
-                  placeholder="Host (required)"
+                  placeholder="主机（必填）"
                   style={inputStyle}
                 />
                 <input
                   value={shorthandConnection.user}
                   onChange={(e) => setShorthandConnection((prev) => ({ ...prev, user: e.target.value }))}
-                  placeholder="User (required)"
+                  placeholder="用户（必填）"
                   style={inputStyle}
                 />
                 <input
                   value={shorthandConnection.password}
                   onChange={(e) => setShorthandConnection((prev) => ({ ...prev, password: e.target.value }))}
-                  placeholder="Password (required)"
+                  placeholder="密码（必填）"
                   type="password"
                   style={inputStyle}
                 />
@@ -2938,7 +2938,7 @@ export default function Settings() {
             重新初始化系统会清空当前 metapi 使用中的全部数据库内容；若当前运行在外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据，然后切回默认 SQLite。
           </div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 14 }}>
-            完成后管理员 Token 会重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{FACTORY_RESET_ADMIN_TOKEN}</code>，当前会话会立即退出并刷新页面。
+            完成后管理员令牌会重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{FACTORY_RESET_ADMIN_TOKEN}</code>，当前会话会立即退出并刷新页面。
           </div>
           <button onClick={() => setFactoryResetOpen(true)} className="btn btn-danger">
             重新初始化系统

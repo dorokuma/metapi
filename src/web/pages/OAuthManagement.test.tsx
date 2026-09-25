@@ -1815,7 +1815,7 @@ describe('OAuthManagement page', () => {
         const text = collectText(root!.root);
         expect(text).toContain('官方上游连接');
         expect(text).toContain('CLI');
-        expect(text).toContain('API Key');
+        expect(text).toContain('API 密钥');
       });
 
       await clickButton(root!, '新建 OAuth 连接');

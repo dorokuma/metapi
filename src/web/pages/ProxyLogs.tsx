@@ -327,7 +327,7 @@ function formatCompactNumber(value: number, digits = 6) {
 }
 
 function formatPerMillionPrice(value: number) {
-  return `$${formatCompactNumber(value)} / 1M tokens`;
+  return `$${formatCompactNumber(value)} / 1M 词元`;
 }
 
 function formatBillingDetailSummary(log: ProxyLogRenderItem) {
@@ -351,7 +351,7 @@ function formatProxyLogTokenValue(value: number | null | undefined): string {
 
 function renderDownstreamKeySummary(log: ProxyLogRenderItem) {
   const parts = [
-    log.downstreamKeyName ? `下游 Key: ${log.downstreamKeyName}` : null,
+    log.downstreamKeyName ? `下游密钥: ${log.downstreamKeyName}` : null,
     log.downstreamKeyGroupName ? `主分组: ${log.downstreamKeyGroupName}` : null,
     Array.isArray(log.downstreamKeyTags) && log.downstreamKeyTags.length > 0
       ? `标签: ${log.downstreamKeyTags.join(" / ")}`
@@ -382,23 +382,23 @@ function buildBillingProcessLines(log: ProxyLogRenderItem) {
   }
 
   const parts = [
-    `提示 ${detail.usage.billablePromptTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.inputPerMillion)}`,
+    `提示 ${detail.usage.billablePromptTokens.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.inputPerMillion)}`,
   ];
 
   if (detail.usage.cacheReadTokens > 0) {
     parts.push(
-      `缓存 ${detail.usage.cacheReadTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.cacheReadPerMillion)}`,
+      `缓存 ${detail.usage.cacheReadTokens.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.cacheReadPerMillion)}`,
     );
   }
 
   if (detail.usage.cacheCreationTokens > 0) {
     parts.push(
-      `缓存创建 ${detail.usage.cacheCreationTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.cacheCreationPerMillion)}`,
+      `缓存创建 ${detail.usage.cacheCreationTokens.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.cacheCreationPerMillion)}`,
     );
   }
 
   parts.push(
-    `补全 ${detail.usage.completionTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.outputPerMillion)} = $${detail.breakdown.totalCost.toFixed(6)}`,
+    `补全 ${detail.usage.completionTokens.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.outputPerMillion)} = $${detail.breakdown.totalCost.toFixed(6)}`,
   );
   lines.push(parts.join(" + "));
 
@@ -587,6 +587,10 @@ function formatUpstreamCostNumber(value: number | null | undefined): string {
   return `$${value.toFixed(6)}`;
 }
 
+function hasUpstreamCostNumber(value: number | null | undefined): boolean {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function formatUpstreamCostText(value: string | null | undefined): string {
   if (typeof value !== "string") return "--";
   const trimmed = value.trim();
@@ -647,15 +651,32 @@ function renderUpstreamObservationBody(
       : null,
   ].filter(Boolean);
   const cacheParts = [
-    `hit ${observation.cacheHitTokens ?? "--"}`,
-    `miss ${observation.cacheMissTokens ?? "--"}`,
+    `命中 ${observation.cacheHitTokens ?? "--"}`,
+    `未命中 ${observation.cacheMissTokens ?? "--"}`,
     observation.systemFingerprint
-      ? `fingerprint ${observation.systemFingerprint}`
+      ? `指纹 ${observation.systemFingerprint}`
       : null,
   ].filter(Boolean);
   const attemptNote = observation.attemptsTruncated
-    ? "（attempts 已截断存储）"
+    ? "（尝试记录已截断存储）"
     : "";
+  // 成本展示：usage.gateway_cost 缺失时回退用 gateway.cost；gateway.cost 不再单独展示。
+  const usageCostDisplay = formatUpstreamCostNumber(observation.usageCost);
+  const usageGatewayCostRaw = formatUpstreamCostNumber(
+    observation.usageGatewayCost,
+  );
+  const gatewayCostRaw = formatUpstreamCostText(observation.gatewayCostText);
+  const gatewayCostDisplay = hasUpstreamCostNumber(
+    observation.usageGatewayCost,
+  )
+    ? usageGatewayCostRaw
+    : gatewayCostRaw;
+  const usageMarketCostDisplay = formatUpstreamCostNumber(
+    observation.usageMarketCost,
+  );
+  const gatewayInferenceCostDisplay = formatUpstreamCostText(
+    observation.gatewayInferenceCostText,
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -668,7 +689,7 @@ function renderUpstreamObservationBody(
           <strong style={{ color: "var(--color-text-primary)" }}>
             {observation.finalProvider || "--"}
           </strong>
-          {observation.resolvedProvider ? `（resolved ${observation.resolvedProvider}）` : ""}
+          {observation.resolvedProvider ? `（解析为 ${observation.resolvedProvider}）` : ""}
         </span>,
         keyPrefix,
       )}
@@ -694,7 +715,7 @@ function renderUpstreamObservationBody(
           {observation.clientSessionId ? (
             <>
               {affinityParts.length > 0 ? "；" : ""}
-              clientSession {observation.clientSessionId}
+              客户端会话 {observation.clientSessionId}
               {observation.clientSessionIdSource
                 ? `（${observation.clientSessionIdSource}）`
                 : ""}
@@ -704,7 +725,7 @@ function renderUpstreamObservationBody(
         keyPrefix,
       )}
       {renderUpstreamObservationRow(
-        "Fallback",
+        "回退",
         fallbackCount > 0 ? (
           <details>
             <summary style={{ cursor: "pointer" }}>
@@ -721,20 +742,40 @@ function renderUpstreamObservationBody(
       {renderUpstreamObservationRow(
         "上游成本",
         <span>
-          {`usage.cost ${formatUpstreamCostNumber(observation.usageCost)} / gateway_cost ${formatUpstreamCostNumber(observation.usageGatewayCost)} / market_cost ${formatUpstreamCostNumber(observation.usageMarketCost)}`}
+          <span
+            style={{
+              display: "inline-flex",
+              flexWrap: "wrap",
+              gap: "2px 10px",
+            }}
+          >
+            <span title={`usage.cost: ${usageCostDisplay}`}>
+              {`实际成本 ${usageCostDisplay}`}
+            </span>
+            <span
+              title={`usage.gateway_cost: ${usageGatewayCostRaw} / gateway.cost: ${gatewayCostRaw}`}
+            >
+              {`网关成本 ${gatewayCostDisplay}`}
+            </span>
+            <span title={`usage.market_cost: ${usageMarketCostDisplay}`}>
+              {`市场成本 ${usageMarketCostDisplay}`}
+            </span>
+          </span>
           <br />
-          {`gateway.cost ${formatUpstreamCostText(observation.gatewayCostText)} / gateway.inferenceCost ${formatUpstreamCostText(observation.gatewayInferenceCostText)}`}
+          <span title={`gateway.inferenceCost: ${gatewayInferenceCostDisplay}`}>
+            {`网关推理成本 ${gatewayInferenceCostDisplay}`}
+          </span>
         </span>,
         keyPrefix,
       )}
       {renderUpstreamObservationRow(
-        "Generation",
+        "生成记录",
         observation.gatewayGenerationId || "--",
         keyPrefix,
       )}
       {renderUpstreamObservationRow(
-        "Attempts",
-        `${observation.modelAttemptCount ?? "--"} 个模型 / ${observation.totalProviderAttemptCount ?? "--"} 次 provider 尝试${attemptNote}`,
+        "尝试",
+        `${observation.modelAttemptCount ?? "--"} 个模型 / ${observation.totalProviderAttemptCount ?? "--"} 次提供方尝试${attemptNote}`,
         keyPrefix,
       )}
     </div>
@@ -788,7 +829,7 @@ function formatProxyDebugCaptureSummary(settings: ProxyDebugSettingsState) {
 function formatProxyDebugTargetSummary(settings: ProxyDebugSettingsState) {
   const parts = [
     settings.proxyDebugTargetSessionId
-      ? `Session ${settings.proxyDebugTargetSessionId}`
+      ? `会话 ${settings.proxyDebugTargetSessionId}`
       : null,
     settings.proxyDebugTargetClientKind
       ? `客户端 ${settings.proxyDebugTargetClientKind}`
@@ -851,7 +892,7 @@ function parseStoredDebugPreview(value: unknown): {
         truncated: true,
         note:
           originalBytes > 0 && storedBytes > 0
-            ? `内容已截断展示，原始 ${originalBytes} bytes，当前保留 ${storedBytes} bytes。复制按钮会复制当前数据库里保存的内容。`
+            ? `内容已截断展示，原始 ${originalBytes} 字节，当前保留 ${storedBytes} 字节。复制按钮会复制当前数据库里保存的内容。`
             : "内容已截断展示。复制按钮会复制当前数据库里保存的内容。",
       };
     }
@@ -1799,7 +1840,7 @@ export default function ProxyLogs() {
               </div>
             </div>
             <div style={detailInfoItemStyle}>
-              <div style={detailInfoLabelStyle}>Session</div>
+              <div style={detailInfoLabelStyle}>会话</div>
               <div style={detailInfoValueStyle}>
                 {traceDetail.sessionId || "-"}
               </div>
@@ -1821,10 +1862,10 @@ export default function ProxyLogs() {
 
         <div style={{ display: "grid", gap: 10 }}>
           {renderStoredDebugDetails(
-            "候选 endpoint",
+            "候选端点",
             traceDetail.endpointCandidatesJson,
             {
-              copyLabel: "候选 endpoint",
+              copyLabel: "候选端点",
             },
           )}
           {renderStoredDebugDetails(
@@ -1851,12 +1892,12 @@ export default function ProxyLogs() {
         </div>
 
         <DetailDisclosureCard
-          title={`Attempt 记录 (${selectedDebugTraceDetail.data.attempts.length})`}
+          title={`尝试记录 (${selectedDebugTraceDetail.data.attempts.length})`}
         >
           <div style={{ padding: 12, display: "grid", gap: 8 }}>
             {selectedDebugTraceDetail.data.attempts.length === 0 ? (
               <div style={{ color: "var(--color-text-muted)", fontSize: 13 }}>
-                暂无 attempt 记录
+                暂无尝试记录
               </div>
             ) : (
               selectedDebugTraceDetail.data.attempts.map(renderAttemptDetail)
@@ -1971,7 +2012,7 @@ export default function ProxyLogs() {
             setSearchInput(e.target.value);
             setPage(1);
           }}
-          placeholder="搜索模型、下游 Key、主分组、标签..."
+          placeholder="搜索模型、下游密钥、主分组、标签..."
         />
       </div>
       <button
@@ -2023,7 +2064,7 @@ export default function ProxyLogs() {
     <div style={{ display: "grid", gap: 12 }}>
       <div className="info-tip" style={{ marginBottom: 0 }}>
         只记录开启后的新请求。需要更精确定位时，再按
-        Session、客户端或模型定向过滤。
+        会话、客户端或模型定向过滤。
       </div>
 
       <div style={formSectionStyle}>
@@ -2101,7 +2142,7 @@ export default function ProxyLogs() {
                 marginLeft: 24,
               }}
             >
-              默认不抓 body，只有显式开启后才记录。
+              默认不抓取请求体/响应体，只有显式开启后才记录。
             </div>
           </div>
           <div style={{ display: "grid", gap: 4 }}>
@@ -2126,7 +2167,7 @@ export default function ProxyLogs() {
                 marginLeft: 24,
               }}
             >
-              适合定位 SSE / streaming 过程中的兼容问题。
+              适合定位 SSE / 流式 过程中的兼容问题。
             </div>
           </div>
         </div>
@@ -2137,7 +2178,7 @@ export default function ProxyLogs() {
           <div style={formSectionLabelStyle}>定向过滤</div>
           <label style={{ display: "grid", gap: 6 }}>
             <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-              目标 Session ID
+              目标会话 ID
             </span>
             <input
               type="text"
@@ -2260,7 +2301,7 @@ export default function ProxyLogs() {
             消耗总额 ${summary.totalCost.toFixed(4)}
           </span>
           <span className="kpi-chip kpi-chip-warning">
-            {summary.totalTokensAll.toLocaleString()} tokens
+            {summary.totalTokensAll.toLocaleString()} 词元
           </span>
           <button
             onClick={() => setAutoRefresh((v) => !v)}
@@ -2594,7 +2635,7 @@ export default function ProxyLogs() {
                 <thead>
                   <tr>
                     <th>时间</th>
-                    <th>Session</th>
+                    <th>会话</th>
                     <th>模型</th>
                     <th>下游路径</th>
                     <th>上游路径</th>
@@ -2918,11 +2959,11 @@ export default function ProxyLogs() {
                     margin: "14px 0 8px",
                   }}
                 >
-                  当前渠道清单（每个站点/模型/规范模型取窗口内最新一条，不跨行并集）
+                  当前回退清单（每个站点/模型/规范模型取窗口内最新一条，不跨行并集）
                 </div>
                 {upstreamFallbackGroups.length === 0 ? (
                   <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                    暂无渠道清单（观测未携带 fallbacks 数据）。
+                    暂无回退清单（观测未携带回退数据）。
                   </div>
                 ) : isMobile ? (
                   <div className="mobile-card-list">
@@ -2940,14 +2981,14 @@ export default function ProxyLogs() {
                           value={group.finalProvider || "--"}
                         />
                         <MobileField
-                          label="渠道数"
+                          label="回退数"
                           value={
                             group.fallbackCount ??
                             (group.fallbacks ? group.fallbacks.length : 0)
                           }
                         />
                         <MobileField
-                          label="渠道"
+                          label="回退"
                           stacked
                           value={
                             group.fallbacks && group.fallbacks.length > 0
@@ -3768,7 +3809,7 @@ export default function ProxyLogs() {
                                           flexShrink: 0,
                                         }}
                                       >
-                                        缓存 Tokens
+                                        缓存词元
                                       </span>
                                       <span>
                                         {detailLog.billingDetails.usage.cacheReadTokens.toLocaleString()}
@@ -3787,7 +3828,7 @@ export default function ProxyLogs() {
                                           flexShrink: 0,
                                         }}
                                       >
-                                        缓存创建 Tokens
+                                        缓存创建词元
                                       </span>
                                       <span>
                                         {detailLog.billingDetails.usage.cacheCreationTokens.toLocaleString()}
@@ -3836,17 +3877,17 @@ export default function ProxyLogs() {
                                       {formatProxyLogTokenValue(
                                         detailLog.promptTokens,
                                       )}{" "}
-                                      tokens
+                                      词元
                                       {" + "}输出{" "}
                                       {formatProxyLogTokenValue(
                                         detailLog.completionTokens,
                                       )}{" "}
-                                      tokens
+                                      词元
                                       {" = "}总计{" "}
                                       {formatProxyLogTokenValue(
                                         detailLog.totalTokens,
                                       )}{" "}
-                                      tokens
+                                      词元
                                       {typeof detailLog.estimatedCost ===
                                         "number" && (
                                         <>

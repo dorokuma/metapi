@@ -341,7 +341,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
         ...base,
         status: 'synced',
         reason: 'upstream_masked_tokens',
-        message: `上游返回 ${synced.maskedPending} 条脱敏令牌，已保存为待补全记录，请手动补全明文 token。`,
+        message: `上游返回 ${synced.maskedPending} 条脱敏令牌，已保存为待补全记录，请手动补全明文令牌。`,
         synced: true,
         ...synced,
       };
@@ -493,7 +493,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     }
 
     if (isApiKeyConnection(row.accounts)) {
-      return reply.code(400).send({ success: false, message: 'API Key 连接不支持创建账号令牌' });
+      return reply.code(400).send({ success: false, message: 'API 密钥连接不支持创建账号令牌' });
     }
 
     const tokenValue = (body.token || '').trim();
@@ -654,7 +654,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     }
 
     if (isApiKeyConnection(row.accounts)) {
-      return { success: false, message: 'API Key 连接不支持管理账号令牌' };
+      return { success: false, message: 'API 密钥连接不支持管理账号令牌' };
     }
 
     const existing = row.account_tokens;
@@ -722,7 +722,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
           continue;
         }
         if (isApiKeyConnection(owner)) {
-          failedItems.push({ id, message: 'API Key 连接不支持管理账号令牌' });
+          failedItems.push({ id, message: 'API 密钥连接不支持管理账号令牌' });
           continue;
         }
 
@@ -734,7 +734,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
           }
         } else {
           if (isMaskedPendingAccountToken(existing)) {
-            failedItems.push({ id, message: '待补全令牌不能修改启用状态，请先补全明文 token' });
+            failedItems.push({ id, message: '待补全令牌不能修改启用状态，请先补全明文令牌' });
             continue;
           }
           await db.update(schema.accountTokens)
@@ -783,7 +783,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, message: '账号不存在' });
     }
     if (isApiKeyConnection(owner)) {
-      return reply.code(400).send({ success: false, message: 'API Key 连接不支持管理账号令牌' });
+      return reply.code(400).send({ success: false, message: 'API 密钥连接不支持管理账号令牌' });
     }
 
     const body = parsedBody.data;
@@ -858,10 +858,10 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, message: '账号不存在' });
     }
     if (isApiKeyConnection(owner)) {
-      return reply.code(400).send({ success: false, message: 'API Key 连接不支持管理账号令牌' });
+      return reply.code(400).send({ success: false, message: 'API 密钥连接不支持管理账号令牌' });
     }
     if (isMaskedPendingAccountToken(tokenRow)) {
-      return reply.code(400).send({ success: false, message: '待补全令牌不能设为默认，请先补全明文 token' });
+      return reply.code(400).send({ success: false, message: '待补全令牌不能设为默认，请先补全明文令牌' });
     }
     const success = await setDefaultToken(tokenId);
     if (!success) {
@@ -887,7 +887,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     }
 
     if (isApiKeyConnection(row.accounts)) {
-      return reply.code(400).send({ success: false, message: 'API Key 连接不支持管理账号令牌' });
+      return reply.code(400).send({ success: false, message: 'API 密钥连接不支持管理账号令牌' });
     }
 
     if (isMaskedPendingAccountToken(row.account_tokens) || isMaskedTokenValue(row.account_tokens.token)) {
@@ -923,7 +923,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     }
 
     if (isApiKeyConnection(row.accounts)) {
-      return reply.code(400).send({ success: false, message: 'API Key 连接不支持拉取账号令牌分组' });
+      return reply.code(400).send({ success: false, message: 'API 密钥连接不支持拉取账号令牌分组' });
     }
 
     const account = row.accounts;
@@ -961,7 +961,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     if (!result.success) {
       const statusCode = result.message === '令牌不存在'
         ? 404
-        : (result.message === 'API Key 连接不支持管理账号令牌' ? 400 : 502);
+        : (result.message === 'API 密钥连接不支持管理账号令牌' ? 400 : 502);
       return reply.code(statusCode).send({ success: false, message: result.message });
     }
     return { success: true };
@@ -985,7 +985,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     const result = await executeAccountTokenSync(row);
     appendTokenSyncEvent(result);
     if (result.status === 'skipped' && result.reason === 'apikey_connection') {
-      return reply.code(400).send({ success: false, message: 'API Key 连接不支持同步账号令牌' });
+      return reply.code(400).send({ success: false, message: 'API 密钥连接不支持同步账号令牌' });
     }
     if (result.status === 'failed' && result.reason === 'unsupported_platform') {
       return reply.code(400).send({ success: false, message: result.message });

@@ -48,7 +48,7 @@ export default function FactoryResetModal({
           <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.9 }}>
             <div>• 当前若使用外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据。</div>
             <div>• 系统随后会强制切回默认 SQLite。</div>
-            <div>• 管理员 Token 将重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{adminToken}</code>。</div>
+            <div>• 管理员令牌将重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{adminToken}</code>。</div>
             <div>• 完成后会立即退出登录并刷新页面，回到当前首装初始状态。</div>
           </div>
         </div>

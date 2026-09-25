@@ -162,11 +162,11 @@ describe('notification templates', () => {
 
     const { sendNotification } = await import('./notifyService.js');
     await sendNotification('代理全部失败', '模型=x', 'proxy', 'error');
-    await sendNotification('Token 已失效', '账号 a', 'token', 'error');
+    await sendNotification('令牌已失效', '账号 a', 'token', 'error');
     await sendNotification('签到失败', '账号 b', 'checkin', 'error');
 
     expect(JSON.parse((fetchMock.mock.calls[0] as [string, any])[1].body).text).toContain('PROXY 代理全部失败');
-    expect(JSON.parse((fetchMock.mock.calls[1] as [string, any])[1].body).text).toContain('TOKEN Token 已失效');
+    expect(JSON.parse((fetchMock.mock.calls[1] as [string, any])[1].body).text).toContain('TOKEN 令牌已失效');
     // 未单独定义的事件类型回退到 __global__，仍无模板时走默认渲染
     const third = JSON.parse((fetchMock.mock.calls[2] as [string, any])[1].body).text;
     expect(third).toContain('[metapi][ERROR] 签到失败');
@@ -188,14 +188,14 @@ describe('notification templates', () => {
 
     const { sendNotification } = await import('./notifyService.js');
     // token 只定义了 bark：telegram 精确匹配缺失 → 回退 __global__
-    await sendNotification('Token 已失效', '账号 a', 'token', 'error');
-    expect(JSON.parse((fetchMock.mock.calls[0] as [string, any])[1].body).text).toContain('GLOBAL Token 已失效');
+    await sendNotification('令牌已失效', '账号 a', 'token', 'error');
+    expect(JSON.parse((fetchMock.mock.calls[0] as [string, any])[1].body).text).toContain('GLOBAL 令牌已失效');
 
     // 完全没有任何模板的渠道 → 硬编码默认渲染
     fetchMock.mockClear();
     await saveNotificationTemplates({ token: { bark: { body: 'TOKEN-BARK {{title}}' } } });
-    await sendNotification('Token 已失效', '账号 a', 'token', 'error');
-    expect(JSON.parse((fetchMock.mock.calls[0] as [string, any])[1].body).text).toContain('[metapi][ERROR] Token 已失效');
+    await sendNotification('令牌已失效', '账号 a', 'token', 'error');
+    expect(JSON.parse((fetchMock.mock.calls[0] as [string, any])[1].body).text).toContain('[metapi][ERROR] 令牌已失效');
   });
 
   it('renders count and models as empty strings for non-storm alerts', async () => {
@@ -212,10 +212,10 @@ describe('notification templates', () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('Token 已失效', '账号 a 失效', 'proxy', 'error');
+    await sendNotification('令牌已失效', '账号 a 失效', 'proxy', 'error');
 
     const [, init] = fetchMock.mock.calls[0] as [string, any];
-    expect(JSON.parse(init.body).text).toBe('Token 已失效｜累计  次｜');
+    expect(JSON.parse(init.body).text).toBe('令牌已失效｜累计  次｜');
   });
 
   it('renders daily_summary specific template variables passed by the caller', async () => {

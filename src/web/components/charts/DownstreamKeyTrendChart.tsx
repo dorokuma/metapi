@@ -5,7 +5,7 @@ import { formatDateTimeMinuteLocal } from '../../pages/helpers/checkinLogTime.js
 type Metric = 'tokens' | 'requests' | 'cost';
 
 const METRIC_OPTIONS: Array<{ key: Metric; label: string }> = [
-  { key: 'tokens', label: 'Tokens' },
+  { key: 'tokens', label: '词元' },
   { key: 'requests', label: '请求数' },
   { key: 'cost', label: '成本' },
 ];
@@ -82,7 +82,7 @@ export default function DownstreamKeyTrendChart({
         </div>
         <div className="empty-state" style={{ padding: 32 }}>
           <div className="empty-state-title">暂无趋势数据</div>
-          <div className="empty-state-desc">该 Key 在所选时间范围内没有可用的 tokens 记录</div>
+          <div className="empty-state-desc">该密钥在所选时间范围内没有可用的词元记录</div>
         </div>
       </div>
     );

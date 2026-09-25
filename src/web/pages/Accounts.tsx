@@ -56,8 +56,8 @@ const ACCOUNT_SEGMENTS: Array<{
   },
   {
     value: "apikey",
-    label: "API Key管理",
-    tooltip: "只有 Base URL + Key 时使用，只负责代理调用",
+    label: "API 密钥管理",
+    tooltip: "只有 Base URL + 密钥时使用，只负责代理调用",
     tooltipSide: "bottom",
     tooltipAlign: "center",
   },
@@ -282,7 +282,7 @@ export default function Accounts() {
       typeof account?.username === "string" ? account.username.trim() : "";
     if (username) return username;
     return resolveAccountCredentialMode(account) === "apikey"
-      ? "API Key 连接"
+      ? "API 密钥连接"
       : "未命名";
   };
 
@@ -390,8 +390,8 @@ export default function Accounts() {
       if (result.success) {
         closeAddPanel();
         const msg = result.apiTokenFound
-          ? `账号 "${loginForm.username}" 已添加，API Key 已自动获取`
-          : `账号 "${loginForm.username}" 已添加（未找到 API Key，请手动设置）`;
+          ? `账号 "${loginForm.username}" 已添加，API 密钥已自动获取`
+          : `账号 "${loginForm.username}" 已添加（未找到 API 密钥，请手动设置）`;
         toast.success(msg);
         load(true);
       } else {
@@ -408,7 +408,7 @@ export default function Accounts() {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
     if (isBatchApiKeyInput) {
       toast.info(
-        `检测到 ${parsedApiKeys.length} 个 API Key，批量模式会在添加时逐条校验`,
+        `检测到 ${parsedApiKeys.length} 个 API 密钥，批量模式会在添加时逐条校验`,
       );
       return;
     }
@@ -428,7 +428,7 @@ export default function Accounts() {
       if (result.success) {
         if (result.tokenType === "apikey") {
           toast.success(
-            `API Key 验证成功（可用模型 ${result.modelCount || 0} 个）`,
+            `API 密钥验证成功（可用模型 ${result.modelCount || 0} 个）`,
           );
         } else {
           toast.success(
@@ -437,7 +437,7 @@ export default function Accounts() {
         }
       } else {
         toast.error(
-          normalizeVerifyFailureMessage(result.message || "Token 无效"),
+          normalizeVerifyFailureMessage(result.message || "令牌无效"),
         );
       }
     } catch (e: any) {
@@ -455,7 +455,7 @@ export default function Accounts() {
       !verifyResult?.success &&
       !tokenForm.skipModelFetch
     ) {
-      toast.error("请先验证 Token 成功后再添加账号");
+      toast.error("请先验证令牌成功后再添加账号");
       return;
     }
     const credentialMode = activeSegment === "apikey" ? "apikey" : "session";
@@ -524,11 +524,11 @@ export default function Accounts() {
       if (result.queued) {
         toast.info(result.message || "账号已添加，后台正在同步初始化信息。");
       } else if (result.tokenType === "apikey") {
-        toast.success("已添加为 API Key 账号（可用于代理转发）");
+        toast.success("已添加为 API 密钥账号（可用于代理转发）");
       } else {
         const parts: string[] = [];
         if (result.usernameDetected) parts.push("用户名已自动识别");
-        if (result.apiTokenFound) parts.push("API Key 已自动获取");
+        if (result.apiTokenFound) parts.push("API 密钥已自动获取");
         const extra = parts.length ? `（${parts.join("，")}）` : "";
         toast.success(`账号已添加${extra}`);
       }
@@ -578,7 +578,7 @@ export default function Accounts() {
   const formatModelFailure = (refresh: any, messageFallback?: string) => {
     const code = refresh?.errorCode;
     if (code === "timeout") return "模型获取失败（请求超时）";
-    if (code === "unauthorized") return "模型获取失败，API Key 已无效";
+    if (code === "unauthorized") return "模型获取失败，API 密钥已无效";
     if (code === "empty_models") return "模型获取失败：未获取到可用模型";
     return messageFallback || refresh?.errorMessage || "模型获取失败";
   };
@@ -1135,12 +1135,12 @@ export default function Accounts() {
       });
       setRebindVerifyResult(result);
       if (result.success && result.tokenType === "session") {
-        toast.success("Session Token 验证成功，可以重新绑定");
+        toast.success("Session 令牌验证成功，可以重新绑定");
       } else if (result.success && result.tokenType !== "session") {
-        toast.error("当前是 API Key，不是 Session Token");
+        toast.error("当前是 API 密钥，不是 Session 令牌");
       } else {
         toast.error(
-          normalizeVerifyFailureMessage(result.message || "Token 无效"),
+          normalizeVerifyFailureMessage(result.message || "令牌无效"),
         );
       }
     } catch (e: any) {
@@ -1159,7 +1159,7 @@ export default function Accounts() {
         rebindVerifyResult?.tokenType === "session"
       )
     ) {
-      toast.error("请先验证新的 Session Token 成功");
+      toast.error("请先验证新的 Session 令牌成功");
       return;
     }
     const isSub2ApiRebindTarget =
@@ -1551,7 +1551,7 @@ export default function Accounts() {
             onClose={closeAddPanel}
             title={
               activeSegment === "apikey"
-                ? "添加 API Key 连接"
+                ? "添加 API 密钥连接"
                 : addMode === "login"
                   ? "账号密码登录"
                   : "添加 Session 连接"
@@ -1602,7 +1602,7 @@ export default function Accounts() {
                         addMode === "token" ? "var(--shadow-sm)" : "none",
                     }}
                   >
-                    Session Token / Cookie
+                    Session 令牌 / Cookie
                   </button>
                   <button
                     onClick={() => {
@@ -1649,7 +1649,7 @@ export default function Accounts() {
                         </div>
                         <div>
                           <strong>推荐</strong> 使用系统访问令牌（Access
-                          Token）；浏览器 Cookie 仅用于兼容场景。
+                          令牌）；浏览器 Cookie 仅用于兼容场景。
                         </div>
                         <div style={{ marginTop: 2 }}>
                           以 NewAPI 为例：控制台 → 个人设置 → 安全设置 →
@@ -1717,7 +1717,7 @@ export default function Accounts() {
                       style={inputStyle}
                     />
                     <textarea
-                      placeholder="粘贴 Session Access Token 或浏览器 Cookie"
+                      placeholder="粘贴 Session 访问令牌或浏览器 Cookie"
                       value={tokenForm.accessToken}
                       onChange={(e) => {
                         setTokenForm((f) => ({
@@ -1825,7 +1825,7 @@ export default function Accounts() {
                             }}
                           >
                             配置 refresh_token 后，metapi 会在 JWT 临近过期或
-                            401 时自动续期并回写新 token。
+                            401 时自动续期并回写新令牌。
                           </div>
                         </div>
                       </>
@@ -1856,7 +1856,7 @@ export default function Accounts() {
                                 d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
                               />
                             </svg>
-                            Session 凭证有效（Access Token / Cookie）
+                            Session 凭证有效（访问令牌 / Cookie）
                           </div>
                           <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                             <div>
@@ -1877,7 +1877,7 @@ export default function Accounts() {
                               </div>
                             )}
                             <div>
-                              API Key:{" "}
+                              API 密钥:{" "}
                               <span
                                 style={{
                                   fontWeight: 500,
@@ -1899,7 +1899,7 @@ export default function Accounts() {
                       verifyResult.tokenType === "apikey" && (
                         <div className="alert alert-warning animate-scale-in">
                           <div className="alert-title">
-                            当前分段仅接受 Session 凭证，请切到「API Key
+                            当前分段仅接受 Session 凭证，请切到「API 密钥
                             连接」分段创建。
                           </div>
                         </div>
@@ -1920,7 +1920,7 @@ export default function Accounts() {
                           <div className="alert-title">
                             {normalizeVerifyFailureMessage(
                               verifyResult.message,
-                            ) || "Token 无效或已过期"}
+                            ) || "令牌无效或已过期"}
                           </div>
                           <div
                             style={{
@@ -1929,7 +1929,7 @@ export default function Accounts() {
                               marginTop: 4,
                             }}
                           >
-                            {verifyFailureHint || "请检查 Token 是否正确"}
+                            {verifyFailureHint || "请检查令牌是否正确"}
                           </div>
                         </div>
                       )}
@@ -1953,7 +1953,7 @@ export default function Accounts() {
                             验证中...
                           </>
                         ) : (
-                          "验证 Token"
+                          "验证令牌"
                         )}
                       </button>
                       <button
@@ -2002,7 +2002,7 @@ export default function Accounts() {
                     }}
                   >
                     <div className="info-tip">
-                      输入目标站点的账号密码，将自动登录并获取访问令牌和 API Key
+                      输入目标站点的账号密码，将自动登录并获取访问令牌和 API 密钥
                     </div>
                     <ModernSelect
                       value={String(loginForm.siteId || 0)}
@@ -2073,9 +2073,9 @@ export default function Accounts() {
                 style={{ display: "flex", flexDirection: "column", gap: 12 }}
               >
                 <div className="info-tip">
-                  API Key
+                  API 密钥
                   连接只用于代理转发，不会自动派生账号令牌。系统会按站点平台能力自动引导到
-                  Session 或 API Key 创建流程。
+                  Session 或 API 密钥创建流程。
                 </div>
                 {createIntentPreset && (
                   <div className="alert alert-info animate-scale-in">
@@ -2098,7 +2098,7 @@ export default function Accounts() {
                       {createIntentPreset.recommendedSkipModelFetch && (
                         <div>
                           建议直接跳过模型验证，先保存 Base URL +
-                          Key，再补入推荐模型完成初始化。
+                          密钥，再补入推荐模型完成初始化。
                         </div>
                       )}
                     </div>
@@ -2162,7 +2162,7 @@ export default function Accounts() {
                   style={inputStyle}
                 />
                 <textarea
-                  placeholder="粘贴 API Key"
+                  placeholder="粘贴 API 密钥"
                   value={tokenForm.accessToken}
                   onChange={(e) => {
                     setTokenForm((f) => ({
@@ -2183,14 +2183,14 @@ export default function Accounts() {
                   <div
                     style={{ fontSize: 12, color: "var(--color-text-muted)" }}
                   >
-                    已识别 {parsedApiKeys.length} 个 API Key
+                    已识别 {parsedApiKeys.length} 个 API 密钥
                     {isBatchApiKeyInput
                       ? "，添加时会逐条创建同站点连接并参与轮询"
                       : ""}
                   </div>
                 )}
                 <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                  支持换行、空格、逗号批量粘贴多个 API Key。
+                  支持换行、空格、逗号批量粘贴多个 API 密钥。
                 </div>
                 <div
                   style={{ display: "flex", flexDirection: "column", gap: 4 }}
@@ -2235,7 +2235,7 @@ export default function Accounts() {
                     }
                     style={{ width: 14, height: 14 }}
                   />
-                  <span>跳过模型验证（直接添加 API Key）</span>
+                  <span>跳过模型验证（直接添加 API 密钥）</span>
                 </label>
                 {verifyResult &&
                   verifyResult.success &&
@@ -2263,7 +2263,7 @@ export default function Accounts() {
                             d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
                           />
                         </svg>
-                        API Key 验证成功
+                        API 密钥验证成功
                       </div>
                       <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                         <div>
@@ -2284,7 +2284,7 @@ export default function Accounts() {
                   verifyResult.tokenType === "session" && (
                     <div className="alert alert-warning animate-scale-in">
                       <div className="alert-title">
-                        当前分段仅接受 API Key，请切到「Session 连接」分段创建。
+                        当前分段仅接受 API 密钥，请切到「Session 连接」分段创建。
                       </div>
                     </div>
                   )}
@@ -2303,7 +2303,7 @@ export default function Accounts() {
                     <div className="alert alert-error animate-scale-in">
                       <div className="alert-title">
                         {normalizeVerifyFailureMessage(verifyResult.message) ||
-                          "Token 无效或已过期"}
+                          "令牌无效或已过期"}
                       </div>
                       <div
                         style={{
@@ -2312,7 +2312,7 @@ export default function Accounts() {
                           marginTop: 4,
                         }}
                       >
-                        {verifyFailureHint || "请检查 Token 是否正确"}
+                        {verifyFailureHint || "请检查令牌是否正确"}
                       </div>
                     </div>
                   )}
@@ -2339,7 +2339,7 @@ export default function Accounts() {
                     ) : isBatchApiKeyInput ? (
                       "批量添加时校验"
                     ) : (
-                      "验证 API Key"
+                      "验证 API 密钥"
                     )}
                   </button>
                   <button
@@ -2387,7 +2387,7 @@ export default function Accounts() {
             <CenteredModal
               open={Boolean(rebindTarget)}
               onClose={closeRebindPanel}
-              title="重新绑定 Session Token"
+              title="重新绑定 Session 令牌"
               maxWidth={820}
               bodyStyle={{ display: "flex", flexDirection: "column", gap: 12 }}
               footer={
@@ -2407,7 +2407,7 @@ export default function Accounts() {
                   >
                     连接: {resolveAccountDisplayName(activeRebindTarget)} @{" "}
                     {activeRebindTarget.site?.name || "-"}。请粘贴新的 Session
-                    Token，验证成功后再绑定。
+                    令牌，验证成功后再绑定。
                   </div>
 
                   <div
@@ -2419,7 +2419,7 @@ export default function Accounts() {
                     }}
                   >
                     <textarea
-                      placeholder="粘贴新的 Session Token"
+                      placeholder="粘贴新的 Session 令牌"
                       value={rebindForm.accessToken}
                       onChange={(e) => {
                         setRebindForm((prev) => ({
@@ -2504,12 +2504,12 @@ export default function Accounts() {
                         className="alert alert-success animate-scale-in"
                         style={{ marginBottom: 10 }}
                       >
-                        <div className="alert-title">Session Token 有效</div>
+                        <div className="alert-title">Session 令牌有效</div>
                         <div style={{ fontSize: 12, marginTop: 4 }}>
                           用户:{" "}
                           {rebindVerifyResult.userInfo?.username || "未知"}
                           {rebindVerifyResult.apiToken
-                            ? `，已识别 API Key (${String(rebindVerifyResult.apiToken).slice(0, 8)}...)`
+                            ? `，已识别 API 密钥 (${String(rebindVerifyResult.apiToken).slice(0, 8)}...)`
                             : ""}
                         </div>
                       </div>
@@ -2523,7 +2523,7 @@ export default function Accounts() {
                       >
                         <div className="alert-title">
                           {rebindVerifyResult.message ||
-                            "Token 无效或类型不正确"}
+                            "令牌无效或类型不正确"}
                         </div>
                       </div>
                     )}
@@ -2543,7 +2543,7 @@ export default function Accounts() {
                           验证中...
                         </>
                       ) : (
-                        "验证 Token"
+                        "验证令牌"
                       )}
                     </button>
                     <button
@@ -2669,7 +2669,7 @@ export default function Accounts() {
                   启用签到
                 </label>
                 <input
-                  placeholder="Access Token"
+                  placeholder="访问令牌"
                   value={editForm.accessToken}
                   onChange={(e) =>
                     setEditForm((prev) => ({
@@ -2680,7 +2680,7 @@ export default function Accounts() {
                   style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
                 />
                 <input
-                  placeholder="API Token（可选）"
+                  placeholder="API 密钥（可选）"
                   value={editForm.apiToken}
                   onChange={(e) =>
                     setEditForm((prev) => ({
@@ -2783,7 +2783,7 @@ export default function Accounts() {
                               style={{ fontSize: 10 }}
                             >
                               {connectionMode === "apikey"
-                                ? "API Key"
+                                ? "API 密钥"
                                 : "Session"}
                             </span>
                             {parseAccountExtraConfig(a)?.proxyUrl && (
@@ -3152,7 +3152,7 @@ export default function Accounts() {
                                 style={{ fontSize: 10 }}
                               >
                                 {connectionMode === "apikey"
-                                  ? "API Key"
+                                  ? "API 密钥"
                                   : "Session"}
                               </span>
                               {parseAccountExtraConfig(a)?.proxyUrl && (
@@ -3441,14 +3441,14 @@ export default function Accounts() {
                 </svg>
                 <div className="empty-state-title">
                   {activeSegment === "apikey"
-                    ? "暂无 API Key 连接"
+                    ? "暂无 API 密钥连接"
                     : "暂无 Session 连接"}
                 </div>
                 <div className="empty-state-desc">
                   {activeSegment === "apikey"
                     ? sites.length > 0
-                      ? "请为现有站点补充 API Key 连接"
-                      : "请先添加站点，然后为站点补充 API Key 连接"
+                      ? "请为现有站点补充 API 密钥连接"
+                      : "请先添加站点，然后为站点补充 API 密钥连接"
                     : sites.length > 0
                       ? "请为现有站点添加 Session 连接"
                       : "请先添加站点，然后添加 Session 连接"}

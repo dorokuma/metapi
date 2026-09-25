@@ -600,8 +600,8 @@ export default function DownstreamKeyEditorModal({
               <div className="downstream-key-advanced-panel">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <div>
-                    <div className="downstream-key-modal-section-title">排除 API Key/令牌</div>
-                    <div className="downstream-key-modal-help">支持排除显式令牌，以及 `tokenId` 为空时实际使用的默认 API Key。</div>
+                    <div className="downstream-key-modal-section-title">排除 API 密钥/令牌</div>
+                    <div className="downstream-key-modal-help">支持排除显式令牌，以及 `tokenId` 为空时实际使用的默认 API 密钥。</div>
                   </div>
                   <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, excludedCredentialRefs: [] }))}>清空</button>
                 </div>
@@ -616,7 +616,7 @@ export default function DownstreamKeyEditorModal({
                   {exclusionSourceLoading ? (
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>加载站点与令牌中...</div>
                   ) : filteredCredentials.length === 0 ? (
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可排除 API Key/令牌</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可排除 API 密钥/令牌</div>
                   ) : filteredCredentials.map((item) => {
                     const checked = form.excludedCredentialRefs.some((ref) => buildExcludedCredentialRefKey(ref) === buildExcludedCredentialRefKey(item.ref));
                     return (

@@ -549,7 +549,7 @@ describe('downstream api keys routes', () => {
     expect(duplicateRes.statusCode).toBe(409);
     expect(duplicateRes.json()).toMatchObject({
       success: false,
-      message: 'API key 已存在',
+      message: 'API 密钥已存在',
     });
 
     const invalidBatchRes = await app.inject({
@@ -601,7 +601,7 @@ describe('downstream api keys routes', () => {
     expect(duplicateUpdateRes.statusCode).toBe(409);
     expect(duplicateUpdateRes.json()).toMatchObject({
       success: false,
-      message: 'API key 已存在',
+      message: 'API 密钥已存在',
     });
   });
 

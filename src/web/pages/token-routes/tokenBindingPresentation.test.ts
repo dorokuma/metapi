@@ -67,13 +67,13 @@ describe('tokenBindingPresentation', () => {
       accountName: 'elysiver_api',
     });
 
-    expect(result.bindingModeLabel).toBe('API令牌');
+    expect(result.bindingModeLabel).toBe('API 密钥');
     expect(result.badgeTone).toBe('warning');
     expect(result.isFollowingAccountDefault).toBe(false);
     expect(result.effectiveTokenName).toBe('elysiver_api');
-    expect(result.helperText).toContain('连接「elysiver_api」保存的 API Key');
-    expect(result.followOptionLabel).toBe('固定使用：elysiver_api(跟随 API Key 设置)');
-    expect(result.followOptionDescription).toContain('API Key');
+    expect(result.helperText).toContain('连接「elysiver_api」保存的 API 密钥');
+    expect(result.followOptionLabel).toBe('固定使用：elysiver_api(跟随 API 密钥设置)');
+    expect(result.followOptionDescription).toContain('API 密钥');
   });
 
   it('describes oauth direct binding without default-token wording', () => {

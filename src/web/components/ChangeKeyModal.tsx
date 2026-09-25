@@ -30,11 +30,11 @@ export default function ChangeKeyModal({ open, onClose }: { open: boolean; onClo
       return;
     }
     if (newToken !== confirmToken) {
-      setError('两次输入的新 Token 不一致');
+      setError('两次输入的新令牌不一致');
       return;
     }
     if (newToken.length < 6) {
-      setError('新 Token 至少 6 个字符');
+      setError('新令牌至少 6 个字符');
       return;
     }
 
@@ -42,7 +42,7 @@ export default function ChangeKeyModal({ open, onClose }: { open: boolean; onClo
     try {
       const res = await api.changeAuthToken(oldToken, newToken);
       if (res.success) {
-        toast.success('Token 已更新，请使用新 Token 重新登录');
+        toast.success('令牌已更新，请使用新令牌重新登录');
         persistAuthSession(localStorage, newToken);
         onClose();
         setOldToken('');
@@ -69,36 +69,36 @@ export default function ChangeKeyModal({ open, onClose }: { open: boolean; onClo
   const modal = (
     <div className={`modal-backdrop ${presence.isVisible ? '' : 'is-closing'}`.trim()} onClick={onClose}>
       <div className={`modal-content ${presence.isVisible ? '' : 'is-closing'}`.trim()} onClick={e => e.stopPropagation()} style={{ maxWidth: 420 }}>
-        <div className="modal-header">修改管理员 Token</div>
+        <div className="modal-header">修改管理员令牌</div>
 
         <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
-            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 6 }}>旧 Token</label>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 6 }}>旧令牌</label>
             <input
               type="password"
               value={oldToken}
               onChange={e => { setOldToken(e.target.value); setError(''); }}
-              placeholder="输入当前 Token"
+              placeholder="输入当前令牌"
               style={inputStyle}
             />
           </div>
           <div>
-            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 6 }}>新 Token</label>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 6 }}>新令牌</label>
             <input
               type="password"
               value={newToken}
               onChange={e => { setNewToken(e.target.value); setError(''); }}
-              placeholder="输入新 Token (至少 6 位)"
+              placeholder="输入新令牌 (至少 6 位)"
               style={inputStyle}
             />
           </div>
           <div>
-            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 6 }}>确认新 Token</label>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 6 }}>确认新令牌</label>
             <input
               type="password"
               value={confirmToken}
               onChange={e => { setConfirmToken(e.target.value); setError(''); }}
-              placeholder="再次输入新 Token"
+              placeholder="再次输入新令牌"
               style={inputStyle}
             />
           </div>

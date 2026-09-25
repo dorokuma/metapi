@@ -177,7 +177,7 @@ const zhToEn: Record<string, string> = {
   '图标（可选，支持 emoji）': 'Icon (optional, supports emoji)',
   '模型匹配（如 gpt-4o、claude-*、re:^claude-.*$）': 'Model pattern (e.g. gpt-4o, claude-*, re:^claude-.*$)',
   '正则请使用 re: 前缀；例如 re:^claude-(opus|sonnet)-4-6$': 'Use re: prefix for regex, e.g. re:^claude-(opus|sonnet)-4-6$',
-  '模型映射 key 支持精确匹配、通配符和 re: 正则；按顺序匹配，精确优先。': 'Model mapping keys support exact, glob and re: regex; evaluated in order with exact priority.',
+  '模型映射的键支持精确匹配、通配符和 re: 正则；按顺序匹配，精确优先。': 'Model mapping keys support exact, glob and re: regex; evaluated in order with exact priority.',
   '规则预览：命中样本': 'Rule preview: matched samples',
   '当前暂无可预览模型，请先同步模型。': 'No preview models yet. Sync models first.',
   '当前规则未命中任何样本模型。': 'Current rule does not match any sample models.',
@@ -290,10 +290,10 @@ const zhToEn: Record<string, string> = {
   '清空中...': 'Clearing...',
 
   // About page
-  '中转站的中转站 — 将你在各处注册的 New API / One API / OneHub 等 AI 中转站聚合为一个统一网关。一个 API Key、一个入口，自动发现模型、智能路由、成本最优。': 'The hub of hubs — aggregate all your New API / One API / OneHub relay sites into one unified gateway. One API Key, one endpoint, with auto model discovery, smart routing, and cost optimization.',
+  '中转站的中转站 — 将你在各处注册的 New API / One API / OneHub 等 AI 中转站聚合为一个统一网关。一个 API 密钥、一个入口，自动发现模型、智能路由、成本最优。': 'The hub of hubs — aggregate all your New API / One API / OneHub relay sites into one unified gateway. One API Key, one endpoint, with auto model discovery, smart routing, and cost optimization.',
   '核心特色': 'Key Features',
   '统一代理网关': 'Unified Proxy Gateway',
-  '一个 Key、一个入口，兼容 OpenAI / Claude 下游格式': 'One Key, one endpoint, compatible with OpenAI / Claude downstream formats',
+  '一个密钥、一个入口，兼容 OpenAI / Claude 下游格式': 'One key, one endpoint, compatible with OpenAI / Claude downstream formats',
   '智能路由引擎': 'Smart Routing Engine',
   '按成本、延迟、成功率自动选择最优通道，故障自动转移': 'Auto-selects the optimal channel by cost, latency, and success rate with automatic failover',
   '多站点聚合': 'Multi-Site Aggregation',

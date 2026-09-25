@@ -1021,10 +1021,10 @@ export async function settingsRoutes(app: FastifyInstance) {
       : config.telegramMessageThreadId;
     if (telegramTouched && nextTelegramEnabled) {
       if (!nextTelegramBotToken) {
-        return reply.code(400).send({ success: false, message: 'Telegram Bot Token 不能为空（启用 Telegram 时）' });
+        return reply.code(400).send({ success: false, message: 'Telegram Bot 令牌不能为空（启用 Telegram 时）' });
       }
       if (!nextTelegramBotToken.includes(':')) {
-        return reply.code(400).send({ success: false, message: 'Telegram Bot Token 格式无效（示例：123456:abcDEF）' });
+        return reply.code(400).send({ success: false, message: 'Telegram Bot 令牌格式无效（示例：123456:abcDEF）' });
       }
       if (!nextTelegramChatId) {
         return reply.code(400).send({ success: false, message: 'Telegram Chat ID 不能为空（启用 Telegram 时）' });
@@ -1173,7 +1173,7 @@ export async function settingsRoutes(app: FastifyInstance) {
         return reply.code(400).send({ success: false, message: '下游访问令牌至少 6 位（含 sk-）' });
       }
       if (proxyToken !== config.proxyToken) {
-        changedLabels.push('代理访问 Token');
+        changedLabels.push('代理访问令牌');
       }
       config.proxyToken = proxyToken;
       upsertSetting('proxy_token', proxyToken);
@@ -1871,7 +1871,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (changedLabels.length === 1) {
         if (changedLabels[0].startsWith('签到 Cron')) eventType = 'checkin';
         else if (changedLabels[0].startsWith('余额刷新 Cron')) eventType = 'balance';
-        else if (changedLabels[0] === '代理访问 Token') eventType = 'proxy';
+        else if (changedLabels[0] === '代理访问令牌') eventType = 'proxy';
       }
       appendSettingsEvent({
         type: eventType,

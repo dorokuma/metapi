@@ -374,7 +374,7 @@ describe('Tokens edit modal and row selection', () => {
       await flushMicrotasks();
 
       const afterOpen = JSON.stringify(root.toJSON());
-      expect(afterOpen).toContain('请粘贴完整明文 token');
+      expect(afterOpen).toContain('请粘贴完整明文令牌');
       expect(afterOpen).toContain('编辑令牌');
 
       const textarea = root.root.findAll((node) => node.type === 'textarea')[0];
@@ -424,7 +424,7 @@ describe('Tokens edit modal and row selection', () => {
       synced: true,
       status: 'synced',
       reason: 'upstream_masked_tokens',
-      message: '上游返回 1 条脱敏令牌，已保存为待补全记录，请手动补全明文 token。',
+      message: '上游返回 1 条脱敏令牌，已保存为待补全记录，请手动补全明文令牌。',
       maskedPending: 1,
       pendingTokenIds: [44],
       created: 1,
@@ -453,7 +453,7 @@ describe('Tokens edit modal and row selection', () => {
 
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('编辑令牌');
-      expect(rendered).toContain('请粘贴完整明文 token');
+      expect(rendered).toContain('请粘贴完整明文令牌');
       expect(rendered).toContain('上游返回 1 条脱敏令牌');
       expect(apiMock.syncAccountTokens).toHaveBeenCalledWith(1);
       expect(apiMock.getAccountTokenGroups).toHaveBeenCalledWith(1);

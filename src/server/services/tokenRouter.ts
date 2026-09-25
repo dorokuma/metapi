@@ -3260,7 +3260,7 @@ export class TokenRouter {
           && candidate.account.id === ref.accountId
           && candidate.site.id === ref.siteId
         ) {
-          return 'API Key/令牌已被下游密钥排除';
+          return 'API 密钥/令牌已被下游密钥排除';
         }
         continue;
       }
@@ -3273,7 +3273,7 @@ export class TokenRouter {
         const resolvedTokenValue = this.resolveChannelTokenValue(candidate);
         const accountApiToken = candidate.account.apiToken?.trim() || '';
         if (resolvedTokenValue && accountApiToken && resolvedTokenValue === accountApiToken) {
-          return 'API Key/令牌已被下游密钥排除';
+          return 'API 密钥/令牌已被下游密钥排除';
         }
       }
     }

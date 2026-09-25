@@ -91,8 +91,8 @@ describe('Accounts rebind modal', () => {
         && node.props.className.includes('modal-content')
       ));
       expect(String(modal.props.className)).toContain('modal-content');
-      expect(JSON.stringify(root.toJSON())).toContain('重新绑定 Session Token');
-      expect(JSON.stringify(root.toJSON())).toContain('粘贴新的 Session Token');
+      expect(JSON.stringify(root.toJSON())).toContain('重新绑定 Session 令牌');
+      expect(JSON.stringify(root.toJSON())).toContain('粘贴新的 Session 令牌');
     } finally {
       root?.unmount();
     }

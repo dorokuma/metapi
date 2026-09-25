@@ -20,7 +20,7 @@ const GLOBAL_EVENT_KEY: TemplateEventKey = '__global__';
 
 const TEMPLATE_EVENT_TYPES: Array<{ value: TemplateEventKey; label: string; hint: string }> = [
     { value: '__global__', label: '全局', hint: '未单独定义模板的事件类型都会使用这一组模板' },
-    { value: 'token', label: 'Token 失效', hint: '账号访问令牌失效' },
+    { value: 'token', label: '令牌失效', hint: '账号访问令牌失效' },
     { value: 'proxy', label: '代理告警', hint: '代理全部失败等路由级告警' },
     { value: 'site_notice', label: '站点公告', hint: '上游站点公告推送' },
     { value: 'checkin', label: '签到', hint: '签到失败 / Cloudflare 挑战' },
@@ -62,7 +62,7 @@ const DAILY_SUMMARY_VARIABLES: Array<{ name: string; hint: string }> = [
     { name: 'proxy_total', hint: '代理请求总数' },
     { name: 'proxy_success', hint: '代理成功数' },
     { name: 'proxy_failed', hint: '代理失败数' },
-    { name: 'proxy_total_tokens', hint: '当日 Tokens' },
+    { name: 'proxy_total_tokens', hint: '当日词元' },
     { name: 'today_spend', hint: '当日支出（美元）' },
     { name: 'today_reward', hint: '当日奖励（美元）' },
     { name: 'today_net', hint: '当日净值（美元）' },
@@ -855,7 +855,7 @@ export default function NotificationSettings() {
                             type="password"
                             value={serverChanKey}
                             onChange={(e) => setServerChanKey(e.target.value)}
-                            placeholder="输入新的 Server酱 Key（留空则不改）"
+                            placeholder="输入新的 Server酱 密钥（留空则不改）"
                             style={inputStyle}
                             disabled={!runtime.serverChanEnabled}
                         />
@@ -933,14 +933,14 @@ export default function NotificationSettings() {
                         </div>
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>
-                                Telegram Bot Token
+                                Telegram Bot 令牌
                                 {runtime.telegramBotTokenMasked && <span style={{ color: 'var(--color-primary)', marginLeft: 8, fontSize: 12 }}>(当前已设置)</span>}
                             </div>
                             <input
                                 type="password"
                                 value={telegramBotToken}
                                 onChange={(e) => setTelegramBotToken(e.target.value)}
-                                placeholder="输入新的 Bot Token（留空则不改）"
+                                placeholder="输入新的 Bot 令牌（留空则不改）"
                                 style={inputStyle}
                                 disabled={!runtime.telegramEnabled}
                             />

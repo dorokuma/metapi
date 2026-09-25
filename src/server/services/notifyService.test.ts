@@ -440,14 +440,14 @@ describe('notifyService', () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true }) });
 
     const { sendNotification } = await import('./notifyService.js');
-    await sendNotification('Token 已失效', 'x', 'token', 'error', { bypassThrottle: true });
+    await sendNotification('令牌已失效', 'x', 'token', 'error', { bypassThrottle: true });
     await sendNotification('后台任务完成', 'y', 'status', 'info', { bypassThrottle: true });
     await sendNotification('其他事件', 'z', 'checkin', 'warning', { bypassThrottle: true });
 
     const readText = (index: number) => (
       JSON.parse(((fetchMock.mock.calls[index] as [string, any])[1]).body).text as string
     );
-    expect(readText(0)).toContain('TOKEN Token 已失效');
+    expect(readText(0)).toContain('TOKEN 令牌已失效');
     expect(readText(1)).toContain('STATUS 后台任务完成');
     // 未单独定义 checkin：回退 __global__
     expect(readText(2)).toContain('GLOBAL 其他事件');

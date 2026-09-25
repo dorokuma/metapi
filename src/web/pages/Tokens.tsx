@@ -484,7 +484,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     editingTokenIdRef.current = token.id;
     setEditingTokenPendingMessage(
       isMaskedPendingToken(token)
-        ? '请粘贴完整明文 token；当前本地仅保存了上游返回的脱敏占位值。'
+        ? '请粘贴完整明文令牌；当前本地仅保存了上游返回的脱敏占位值。'
         : '',
     );
     setEditForm({
@@ -538,7 +538,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   const saveEditPanel = async () => {
     if (!editingToken) return;
     if (isMaskedPendingToken(editingToken) && !editForm.token.trim()) {
-      toast.error('请粘贴完整明文 token 后再保存');
+      toast.error('请粘贴完整明文令牌后再保存');
       return;
     }
     setSavingEdit(true);
@@ -637,7 +637,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       if (status === 'failed') {
         toast.error(`同步失败：${resolveSyncMessage(res, '请检查账号令牌或站点状态')}`);
       } else if (isMaskedPendingSyncResult(res)) {
-        toast.info(resolveSyncMessage(res, '上游返回了脱敏令牌，请补全明文 token'));
+        toast.info(resolveSyncMessage(res, '上游返回了脱敏令牌，请补全明文令牌'));
         const loaded = await load();
         const pendingIds = Array.isArray(res.pendingTokenIds)
           ? res.pendingTokenIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)
@@ -706,7 +706,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
           toast.error(`${resolveAccountLabel(item)} 同步失败：${resolveSyncMessage(item, '请检查账号配置')}`);
         });
         maskedRows.slice(0, 3).forEach((item) => {
-          toast.info(`${resolveAccountLabel(item)} 需要补全明文 token：${resolveSyncMessage(item, '上游返回脱敏令牌')}`);
+          toast.info(`${resolveAccountLabel(item)} 需要补全明文令牌：${resolveSyncMessage(item, '上游返回脱敏令牌')}`);
         });
         skippedRows.slice(0, 3).forEach((item) => {
           toast.info(`${resolveAccountLabel(item)} 已跳过：${resolveSyncMessage(item, '不满足同步条件')}`);

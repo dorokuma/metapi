@@ -2671,7 +2671,7 @@ export default function ModelTester() {
           </ParameterRow>
 
           <ParameterRow
-            title="最大 Token 数"
+            title="最大词元数"
             enabled={parameterEnabled.max_tokens}
             onToggle={() => toggleParameter('max_tokens')}
             disabled={customRequestMode}

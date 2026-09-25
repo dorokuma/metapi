@@ -860,8 +860,8 @@ describe('DownstreamKeys page', () => {
 
       const text = collectText(root!.root);
       expect(text).toContain('排除站点');
-      expect(text).toContain('排除 API Key/令牌');
-      expect(text).toContain('默认 API Key');
+      expect(text).toContain('排除 API 密钥/令牌');
+      expect(text).toContain('默认 API 密钥');
       expect(text).toContain('group-a');
 
       const inputs = root!.root.findAllByType('input');
@@ -875,7 +875,7 @@ describe('DownstreamKeys page', () => {
 
       const siteLabel = root!.root.findAll((node) => node.type === 'label' && collectText(node).includes('站点B'))[0];
       const tokenLabel = root!.root.findAll((node) => node.type === 'label' && collectText(node).includes('token-a'))[0];
-      const defaultApiKeyLabel = root!.root.findAll((node) => node.type === 'label' && collectText(node).includes('默认 API Key'))[0];
+      const defaultApiKeyLabel = root!.root.findAll((node) => node.type === 'label' && collectText(node).includes('默认 API 密钥'))[0];
       const siteCheckbox = siteLabel.findByType('input');
       const tokenCheckbox = tokenLabel.findByType('input');
       const defaultApiKeyCheckbox = defaultApiKeyLabel.findByType('input');

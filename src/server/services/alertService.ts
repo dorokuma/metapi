@@ -23,8 +23,8 @@ export async function reportTokenExpired(params: {
 
   await db.insert(schema.events).values({
     type: 'token',
-    title: 'Token 已失效',
-    message: `${accountLabel} @ ${siteLabel} 的 Token 无效或已过期${detail}`,
+    title: '令牌已失效',
+    message: `${accountLabel} @ ${siteLabel} 的令牌无效或已过期${detail}`,
     level: 'error',
     relatedId: params.accountId,
     relatedType: 'account',
@@ -43,8 +43,8 @@ export async function reportTokenExpired(params: {
   });
 
   await sendNotification(
-    'Token 已失效',
-    `${accountLabel} @ ${siteLabel} 的 Token 无效或已过期${detail}`,
+    '令牌已失效',
+    `${accountLabel} @ ${siteLabel} 的令牌无效或已过期${detail}`,
     'token',
     'error',
   );

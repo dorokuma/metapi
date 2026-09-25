@@ -494,7 +494,7 @@ describe('TokenRouter downstream policy', () => {
 
     expect(pick?.channel.id).toBe(allowedChannel.id);
     expect(blockedCandidate?.eligible).toBe(false);
-    expect(blockedCandidate?.reason).toContain('API Key/令牌已被下游密钥排除');
+    expect(blockedCandidate?.reason).toContain('API 密钥/令牌已被下游密钥排除');
     expect(allowedCandidate?.eligible).toBe(true);
   });
 
@@ -560,6 +560,6 @@ describe('TokenRouter downstream policy', () => {
 
     expect(pick?.channel.id).toBe(allowedChannel.id);
     expect(blockedCandidate?.eligible).toBe(false);
-    expect(blockedCandidate?.reason).toContain('API Key/令牌已被下游密钥排除');
+    expect(blockedCandidate?.reason).toContain('API 密钥/令牌已被下游密钥排除');
   });
 });

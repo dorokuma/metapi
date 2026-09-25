@@ -60,7 +60,7 @@ describe('ModelAnalysisPanel token summaries', () => {
 
     const rendered = collectText(root!.root);
 
-    expect(rendered).toContain('总 Tokens');
+    expect(rendered).toContain('词元总量');
     expect(rendered).toContain('611.5M');
 
     root?.unmount();

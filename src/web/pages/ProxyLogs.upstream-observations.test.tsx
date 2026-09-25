@@ -260,12 +260,132 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       expect(text).toContain('explicit');
       expect(text).toContain('2 个（展开列名）');
       expect(text).toContain('alibaba、baseten');
-      expect(text).toContain('hit 0 / miss 34');
+      expect(text).toContain('命中 0 / 未命中 34');
       expect(text).toContain('fp-desktop');
       expect(text).toContain('$0.000013');
-      expect(text).toContain('0.000027');
-      expect(text).toContain('0.000028');
+      expect(text).toContain('实际成本 $0.000013');
+      expect(text).toContain('网关成本 $0.000027');
+      expect(text).toContain('市场成本 $0.000027');
+      expect(text).toContain('网关推理成本 0.000028');
       expect(text).toContain('gen-desktop');
+      // gateway.cost 不再单独成项
+      expect(text).not.toContain('gateway.cost');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('de-duplicates the cost block: 网关成本 falls back to gateway.cost when usage.gateway_cost is missing', async () => {
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      ...PROXY_LOG,
+      upstreamObservation: {
+        ...UPSTREAM_OBSERVATION,
+        usageGatewayCost: null,
+        gatewayCostText: '0.000099',
+      },
+    });
+    const root = await renderProxyLogs();
+    try {
+      const row = root.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-101'
+      ));
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      expect(text).toContain('实际成本 $0.000013');
+      // usage.gateway_cost 缺失时回退显示 gateway.cost（沿用 formatUpstreamCostText 的原始文本）
+      expect(text).toContain('网关成本 0.000099');
+      expect(text).toContain('市场成本 $0.000027');
+      expect(text).toContain('网关推理成本 0.000028');
+
+      const titles = root.root
+        .findAll((node) => typeof node.props.title === 'string')
+        .map((node) => String(node.props.title));
+      const gatewayCostTitle = titles.find((title) => title.startsWith('usage.gateway_cost:'));
+      expect(gatewayCostTitle).toBeDefined();
+      expect(gatewayCostTitle).toContain('usage.gateway_cost: --');
+      expect(gatewayCostTitle).toContain('gateway.cost: 0.000099');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('de-duplicates the cost block: usage.gateway_cost wins over gateway.cost when both exist', async () => {
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      ...PROXY_LOG,
+      upstreamObservation: {
+        ...UPSTREAM_OBSERVATION,
+        usageGatewayCost: 0.5,
+        gatewayCostText: '9.900000',
+      },
+    });
+    const root = await renderProxyLogs();
+    try {
+      const row = root.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-101'
+      ));
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      expect(text).toContain('网关成本 $0.500000');
+      expect(text).not.toContain('网关成本 $9.900000');
+      // gateway.cost 不再单独成项（只在悬停提示里出现原始值）
+      expect(text).not.toContain('gateway.cost');
+
+      const titles = root.root
+        .findAll((node) => typeof node.props.title === 'string')
+        .map((node) => String(node.props.title));
+      const gatewayCostTitle = titles.find((title) => title.startsWith('usage.gateway_cost:'));
+      expect(gatewayCostTitle).toContain('usage.gateway_cost: $0.500000');
+      expect(gatewayCostTitle).toContain('gateway.cost: 9.900000');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('treats usage.gateway_cost = 0 as a real value: shows $0.000000 and never falls back to gateway.cost', async () => {
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      ...PROXY_LOG,
+      upstreamObservation: {
+        ...UPSTREAM_OBSERVATION,
+        usageGatewayCost: 0,
+        gatewayCostText: '9.900000',
+      },
+    });
+    const root = await renderProxyLogs();
+    try {
+      const row = root.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-101'
+      ));
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      // 0 是有效真值，不能当成缺失回退到 gateway.cost 原文
+      expect(text).toContain('网关成本 $0.000000');
+      expect(text).not.toContain('网关成本 9.900000');
+
+      const titles = root.root
+        .findAll((node) => typeof node.props.title === 'string')
+        .map((node) => String(node.props.title));
+      const gatewayCostTitle = titles.find((title) => title.startsWith('usage.gateway_cost:'));
+      expect(gatewayCostTitle).toBeDefined();
+      expect(gatewayCostTitle).toContain('usage.gateway_cost: $0.000000');
+      expect(gatewayCostTitle).toContain('gateway.cost: 9.900000');
     } finally {
       await act(async () => {
         root.unmount();
@@ -318,7 +438,7 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       expect(text).toContain('deepseek');
       expect(text).toContain('alibaba');
       expect(text).toContain('缓存命中');
-      expect(text).toContain('当前渠道清单');
+      expect(text).toContain('当前回退清单');
       expect(text).toContain('baseten');
 
       const columnHeaders = root.root

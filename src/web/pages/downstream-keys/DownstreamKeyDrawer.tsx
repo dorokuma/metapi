@@ -62,7 +62,7 @@ export default function DownstreamKeyDrawer({
       })
       .catch((err: any) => {
         if (cancelled) return;
-        toast.error(err?.message || '加载 Key 概览失败');
+        toast.error(err?.message || '加载密钥概览失败');
       })
       .finally(() => {
         if (cancelled) return;
@@ -151,7 +151,7 @@ export default function DownstreamKeyDrawer({
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
               <div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>使用趋势</div>
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>按选定时间窗口查看请求、Tokens 与成本变化。</div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>按选定时间窗口查看请求、词元与成本变化。</div>
               </div>
               <RangeToggle range={trendRange} onChange={setTrendRange} />
             </div>
@@ -203,7 +203,7 @@ export default function DownstreamKeyDrawer({
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: 12 }}>
               <div>
-                <div style={{ color: 'var(--color-text-muted)', marginBottom: 4 }}>Tokens</div>
+                <div style={{ color: 'var(--color-text-muted)', marginBottom: 4 }}>词元</div>
                 <div style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>{formatCompactTokens(currentRangeUsage?.totalTokens || 0)}</div>
               </div>
               <div>
@@ -234,7 +234,7 @@ export default function DownstreamKeyDrawer({
                 ].map((section) => (
                   <div key={section.label} style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 12 }}>
                     <div style={{ color: 'var(--color-text-primary)', fontWeight: 700, marginBottom: 8 }}>{section.label}</div>
-                    <div style={{ color: 'var(--color-text-muted)', marginBottom: 4 }}>Tokens</div>
+                    <div style={{ color: 'var(--color-text-muted)', marginBottom: 4 }}>词元</div>
                     <div style={{ color: 'var(--color-text-primary)', fontWeight: 700, marginBottom: 8 }}>{formatCompactTokens(section.data?.totalTokens || 0)}</div>
                     <div style={{ color: 'var(--color-text-muted)', marginBottom: 4 }}>请求数</div>
                     <div style={{ color: 'var(--color-text-primary)', fontWeight: 700, marginBottom: 8 }}>{(section.data?.totalRequests || 0).toLocaleString()}</div>

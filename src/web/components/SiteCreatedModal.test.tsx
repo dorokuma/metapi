@@ -69,7 +69,7 @@ describe('SiteCreatedModal', () => {
 
     expect(choiceButtons.map((button) => collectText(button))).toEqual(
       expect.arrayContaining([
-        '添加 API Key（推荐）',
+        '添加 API 密钥（推荐）',
         '添加账号（用户名密码登录）',
       ]),
     );

@@ -24,12 +24,12 @@ export default function SiteCreatedModal({
   const apiKeyFirst = initialSegment === 'apikey';
   const helperText = preset?.description
     || (apiKeyFirst
-      ? '该平台更适合直接通过 Base URL + API Key 接入，后续再补模型初始化。'
-      : '接下来您可以继续补充登录连接或 API Key。');
+      ? '该平台更适合直接通过 Base URL + API 密钥接入，后续再补模型初始化。'
+      : '接下来您可以继续补充登录连接或 API 密钥。');
   const primaryAction = apiKeyFirst
     ? {
       choice: 'apikey' as const,
-      label: '添加 API Key（推荐）',
+      label: '添加 API 密钥（推荐）',
     }
     : {
       choice: 'session' as const,
@@ -42,7 +42,7 @@ export default function SiteCreatedModal({
     }
     : {
       choice: 'apikey' as const,
-      label: '添加 API Key',
+      label: '添加 API 密钥',
     };
 
   return (
@@ -96,7 +96,7 @@ export default function SiteCreatedModal({
       )}
 
       <p className="site-created-note">
-        提示：您可以随时在“站点管理”页面补充账号或 API Key。
+        提示：您可以随时在“站点管理”页面补充账号或 API 密钥。
       </p>
     </CenteredModal>
   );

@@ -135,7 +135,7 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
   const capabilityRows = [
     {
       title: t('统一代理网关'),
-      description: t('一个 Key、一个入口，兼容 OpenAI / Claude 下游格式'),
+      description: t('一个密钥、一个入口，兼容 OpenAI / Claude 下游格式'),
     },
     {
       title: t('自动模型发现'),

@@ -697,7 +697,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       if (!site) return { success: false, message: "site not found" };
 
       if (!accessToken) {
-        return { success: false, message: "Token 不能为空" };
+        return { success: false, message: "令牌不能为空" };
       }
 
       const adapter = getAdapter(site.platform);
@@ -889,7 +889,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           if (availableModels.length === 0) {
             return {
               success: false,
-              message: "API Key 验证失败：未获取到可用模型",
+              message: "API 密钥验证失败：未获取到可用模型",
             };
           }
           return {
@@ -909,7 +909,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           }
           return {
             success: false,
-            message: err?.message || "API Key 验证失败",
+            message: err?.message || "API 密钥验证失败",
           };
         }
       }
@@ -932,7 +932,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         return {
           success: false,
           message: appendSessionTokenRebindHint(
-            err?.message || "Token 验证失败",
+            err?.message || "令牌验证失败",
           ),
         };
       }
@@ -952,7 +952,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           return {
             success: false,
             message:
-              "当前凭证是 API Key，请切换到 API Key 模式，或改用 Session Token",
+              "当前凭证是 API 密钥，请切换到 API 密钥模式，或改用 Session 令牌",
           };
         }
         return {
@@ -1086,7 +1086,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         success: false,
         message:
           credentialMode === "session"
-            ? "Session Token 验证失败"
+            ? "Session 令牌验证失败"
             : "Token invalid: cannot use it as session cookie or API key",
       };
     },
@@ -1113,7 +1113,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       if (!nextAccessToken) {
         return reply
           .code(400)
-          .send({ success: false, message: "请提供新的 Session Token" });
+          .send({ success: false, message: "请提供新的 Session 令牌" });
       }
 
       const row = await db
@@ -1162,7 +1162,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         return reply.code(400).send({
           success: false,
           message: appendSessionTokenRebindHint(
-            err?.message || "Token 验证失败",
+            err?.message || "令牌验证失败",
           ),
         });
       }
@@ -1170,7 +1170,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       if (verifyResult?.tokenType !== "session") {
         return reply.code(400).send({
           success: false,
-          message: "新的 Token 验证失败：请提供可用的 Session Token",
+          message: "新的令牌验证失败：请提供可用的 Session 令牌",
         });
       }
 
@@ -1313,7 +1313,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         ? explicitBatchTokens
         : resolveRequestedCreateTokens(body, credentialMode);
     if (requestedTokens.length === 0) {
-      return reply.code(400).send({ success: false, message: "请填写 Token" });
+      return reply.code(400).send({ success: false, message: "请填写令牌" });
     }
 
     if (credentialMode === "apikey" && requestedTokens.length > 1) {
@@ -1404,8 +1404,8 @@ export async function accountsRoutes(app: FastifyInstance) {
         requiresVerification: err?.requiresVerification === true,
         message:
           credentialMode !== "apikey"
-            ? appendSessionTokenRebindHint(err?.message || "Token 验证失败")
-            : err?.message || "API Key 验证失败",
+            ? appendSessionTokenRebindHint(err?.message || "令牌验证失败")
+            : err?.message || "API 密钥验证失败",
       });
     }
   });

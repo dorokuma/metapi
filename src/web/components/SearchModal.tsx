@@ -215,11 +215,11 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
                   </svg>
                   <div>
                     <div style={{ fontWeight: 500 }}>
-                      {a.username?.trim() || (a.segment === 'apikey' ? t('API Key 连接') : `ID:${a.id}`)}
+                      {a.username?.trim() || (a.segment === 'apikey' ? t('API 密钥连接') : `ID:${a.id}`)}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                       {a.site?.name || t('未关联站点')}
-                      {a.segment === 'apikey' ? ` · ${t('API Key 连接')}` : ''}
+                      {a.segment === 'apikey' ? ` · ${t('API 密钥连接')}` : ''}
                       {' · '}
                       {t('余额')} ${(a.balance || 0).toFixed(2)}
                     </div>
@@ -244,7 +244,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
                   <div>
                     <div style={{ fontWeight: 500 }}>{token.name}</div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      {(token.account?.username?.trim() || (token.account?.segment === 'apikey' ? t('API Key 连接') : t('未命名')))}
+                      {(token.account?.username?.trim() || (token.account?.segment === 'apikey' ? t('API 密钥连接') : t('未命名')))}
                       {' · '}
                       {token.site?.name || t('未关联站点')}
                       {token.tokenGroup ? ` · ${token.tokenGroup}` : ''}

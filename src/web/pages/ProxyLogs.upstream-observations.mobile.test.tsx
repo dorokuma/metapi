@@ -198,7 +198,10 @@ describe('ProxyLogs upstream observations (mobile)', () => {
       expect(text).toContain('deepseek');
       expect(text).toContain('sess-mobile-1');
       expect(text).toContain('baseten');
-      expect(text).toContain('hit 1 / miss 34');
+      expect(text).toContain('命中 1 / 未命中 34');
+      expect(text).toContain('网关成本 $0.000027');
+      expect(text).toContain('市场成本 $0.000027');
+      expect(text).toContain('网关推理成本 --');
       expect(text).toContain('gen-mobile');
     } finally {
       await act(async () => {
@@ -238,7 +241,10 @@ describe('ProxyLogs upstream observations (mobile)', () => {
         .findAll((node) => node.props?.className === 'mobile-field-label')
         .map((node) => collectText(node).trim());
       expect(fieldLabels).toContain('观测数');
+      expect(fieldLabels).toContain('回退数');
       expect(fieldLabels).not.toContain('请求数');
+      expect(fieldLabels).not.toContain('渠道数');
+      expect(text).toContain('当前回退清单');
 
       const mobileCards = root.root.findAll((node) => (
         node.type === 'div'

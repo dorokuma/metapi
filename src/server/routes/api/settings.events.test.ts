@@ -109,7 +109,7 @@ describe('settings and auth events', () => {
       title: '运行时设置已更新',
       relatedType: 'settings',
     });
-    expect(events[0].message || '').toContain('代理访问 Token');
+    expect(events[0].message || '').toContain('代理访问令牌');
     expect(events[0].message || '').toContain('签到 Cron');
   });
 
@@ -412,7 +412,7 @@ describe('settings and auth events', () => {
 
     expect(response.statusCode).toBe(400);
     const body = response.json() as { message?: string };
-    expect(body.message).toContain('Telegram Bot Token');
+    expect(body.message).toContain('Telegram Bot 令牌');
   });
 
   it('rejects telegram config when chat id is missing but telegram is enabled', async () => {

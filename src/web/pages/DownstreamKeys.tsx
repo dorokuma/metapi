@@ -576,8 +576,8 @@ export default function DownstreamKeys() {
           ref: { kind: 'default_api_key', siteId: Math.trunc(siteId), accountId: Math.trunc(accountId) },
           siteName: String(account?.site?.name || `站点 ${siteId}`).trim() || `站点 ${siteId}`,
           accountName: String(account?.username || `账号 ${accountId}`).trim() || `账号 ${accountId}`,
-          label: '默认 API Key',
-          detail: `使用账号默认 API Key (${apiToken.slice(0, 6)}...)`,
+          label: '默认 API 密钥',
+          detail: `使用账号默认 API 密钥 (${apiToken.slice(0, 6)}...)`,
         });
       }
 
@@ -1100,7 +1100,7 @@ export default function DownstreamKeys() {
               {range === '24h' ? '最近 24 小时' : range === '7d' ? '最近 7 天' : '全部历史'}
             </span>
             <span className="kpi-chip kpi-chip-warning">
-              Tokens {formatCompactTokens(totals.tokens)}
+              词元 {formatCompactTokens(totals.tokens)}
             </span>
           </div>
         </div>

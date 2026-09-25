@@ -1009,7 +1009,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
       return {
         success: false,
-        message: this.extractResponseMessage(res) || '登录失败：未获取到可用会话凭据，请改用 Cookie/Token 导入',
+        message: this.extractResponseMessage(res) || '登录失败：未获取到可用会话凭据，请改用 Cookie/令牌导入',
       };
     } catch (err: any) {
       return {

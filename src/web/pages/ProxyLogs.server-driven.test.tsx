@@ -274,13 +274,14 @@ describe('ProxyLogs server-driven page', () => {
 
       const text = collectText(root!.root);
       expect(text).toContain('消耗总额 $1.2300');
+      expect(text).toContain('15 词元');
       expect(text).toContain('全部 12');
       expect(text).toContain('成功 8');
       expect(text).toContain('失败 4');
       expect(text).toContain('Cherry Studio');
       expect(text).toContain('Codex');
       expect(text).toContain('推测');
-      expect(text).toContain('下游 Key: 移动端灰度');
+      expect(text).toContain('下游密钥: 移动端灰度');
       expect(text).toContain('流式');
       expect(text).toContain('首字');
     } finally {
@@ -585,7 +586,7 @@ describe('ProxyLogs server-driven page', () => {
 
       expect(apiMock.getProxyDebugTraceDetail).toHaveBeenCalledWith(701);
       expect(collectText(root.root)).toContain('原始下游请求头');
-      expect(collectText(root.root)).toContain('Attempt 记录');
+      expect(collectText(root.root)).toContain('尝试记录');
     } finally {
       root?.unmount();
     }
@@ -901,7 +902,7 @@ describe('ProxyLogs server-driven page', () => {
       await flushMicrotasks();
 
       const searchInput = root!.root.find((node) => (
-        node.type === 'input' && node.props.placeholder === '搜索模型、下游 Key、主分组、标签...'
+        node.type === 'input' && node.props.placeholder === '搜索模型、下游密钥、主分组、标签...'
       ));
       await act(async () => {
         searchInput.props.onChange({ target: { value: 'mini' } });

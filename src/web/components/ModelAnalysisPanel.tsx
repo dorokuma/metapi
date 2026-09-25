@@ -124,7 +124,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
           <div className="stat-summary-card-value">{Math.round(totals.calls).toLocaleString()}</div>
         </div>
         <div className="stat-summary-card stat-summary-green">
-          <div className="stat-summary-card-label">总 Tokens</div>
+          <div className="stat-summary-card-label">词元总量</div>
           <div className="stat-summary-card-value">{formatCompactTokenMetric(totals.tokens)}</div>
         </div>
       </div>

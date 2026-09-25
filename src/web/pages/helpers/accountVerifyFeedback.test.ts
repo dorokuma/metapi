@@ -21,8 +21,8 @@ describe('account verify feedback', () => {
 
   it('keeps token guidance for actual credential failures', () => {
     const invalidHint = buildVerifyFailureHint({ success: false, message: 'Token invalid' });
-    expect(invalidHint).toMatch(/Token/i);
-    expect(buildAddAccountPrereqHint({ success: false, message: 'Token invalid' })).toMatch(/Token/i);
+    expect(invalidHint).toContain('令牌');
+    expect(buildAddAccountPrereqHint({ success: false, message: 'Token invalid' })).toContain('令牌');
   });
 
   it('normalizes invalid user-id mismatch messages for display', () => {

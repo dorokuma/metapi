@@ -486,7 +486,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     const parsed = JSON.parse(latest!.extraConfig || '{}');
     expect(parsed.runtimeHealth?.state).toBe('unhealthy');
     expect(parsed.runtimeHealth?.source).toBe('model-discovery');
-    expect(parsed.runtimeHealth?.reason).toBe('模型获取失败，API Key 已无效');
+    expect(parsed.runtimeHealth?.reason).toBe('模型获取失败，API 密钥已无效');
     expect(parsed.runtimeHealth?.checkedAt).toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -546,14 +546,14 @@ describe('refreshModelsForAccount credential discovery', () => {
       tokenScanned: 0,
       status: 'failed',
       errorCode: 'unknown',
-      errorMessage: '模型获取失败：站点返回了防护页面，请在目标站点创建 API Key 后再同步模型',
+      errorMessage: '模型获取失败：站点返回了防护页面，请在目标站点创建 API 密钥后再同步模型',
     });
 
     const latest = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, account.id))
       .get();
     const parsed = JSON.parse(latest!.extraConfig || '{}');
-    expect(parsed.runtimeHealth?.reason).toBe('模型获取失败：站点返回了防护页面，请在目标站点创建 API Key 后再同步模型');
+    expect(parsed.runtimeHealth?.reason).toBe('模型获取失败：站点返回了防护页面，请在目标站点创建 API 密钥后再同步模型');
   });
 
   it('keeps shield guidance when challenge html arrives with http 403 discovery failure', async () => {
@@ -582,7 +582,7 @@ describe('refreshModelsForAccount credential discovery', () => {
       refreshed: true,
       status: 'failed',
       errorCode: 'unauthorized',
-      errorMessage: '模型获取失败：站点返回了防护页面，请在目标站点创建 API Key 后再同步模型',
+      errorMessage: '模型获取失败：站点返回了防护页面，请在目标站点创建 API 密钥后再同步模型',
     });
   });
 

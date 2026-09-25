@@ -103,10 +103,6 @@ describe('ProxyLogs upstream observations (mobile)', () => {
       proxyDebugTargetModel: '',
       proxyDebugRetentionHours: 24,
       proxyDebugMaxBodyBytes: 262144,
-      upstreamProviderDetectEnabled: true,
-      upstreamProviderDetectSampleRate: 1,
-      upstreamProviderDetectRetentionDays: 14,
-      upstreamProviderDetectPlatforms: ['cline.bot'],
     });
     apiMock.getProxyLogs.mockResolvedValue({
       items: [PROXY_LOG],
@@ -234,6 +230,9 @@ describe('ProxyLogs upstream observations (mobile)', () => {
       expect(text).toContain('deepseek');
       expect(text).toContain('缓存未命中');
       expect(text).toContain('baseten');
+
+      // 面板头部的「配置」入口在移动端同样可用（跳设置页上游探测分区）
+      expect(findButton(root.root, '配置')).toBeTruthy();
 
       const fieldLabels = root.root
         .findAll((node) => node.props?.className === 'mobile-field-label')

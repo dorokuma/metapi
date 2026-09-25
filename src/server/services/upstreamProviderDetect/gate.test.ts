@@ -1,19 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { config } from '../../config.js';
 import {
-  extractUpstreamProviderDetectHostname,
-  matchUpstreamProviderDetectHost,
-  normalizeUpstreamProviderDetectPlatforms,
   normalizeUpstreamProviderDetectSampleRate,
   resolveUpstreamProviderDetectSampleHit,
   shouldCollectUpstreamProviderObservation,
 } from './gate.js';
+import {
+  isUpstreamProviderDetectSiteSelected,
+  normalizeUpstreamProviderDetectSiteIds,
+} from './siteIds.js';
 
 const originalSettings = {
   enabled: config.upstreamProviderDetectEnabled,
   sampleRate: config.upstreamProviderDetectSampleRate,
   retentionDays: config.upstreamProviderDetectRetentionDays,
-  platforms: config.upstreamProviderDetectPlatforms,
+  siteIds: config.upstreamProviderDetectSiteIds,
 };
 
 describe('upstreamProviderDetect gate', () => {
@@ -21,62 +22,49 @@ describe('upstreamProviderDetect gate', () => {
     config.upstreamProviderDetectEnabled = true;
     config.upstreamProviderDetectSampleRate = 1;
     config.upstreamProviderDetectRetentionDays = 14;
-    config.upstreamProviderDetectPlatforms = ['cline.bot'];
+    config.upstreamProviderDetectSiteIds = [9];
   });
 
   afterEach(() => {
     config.upstreamProviderDetectEnabled = originalSettings.enabled;
     config.upstreamProviderDetectSampleRate = originalSettings.sampleRate;
     config.upstreamProviderDetectRetentionDays = originalSettings.retentionDays;
-    config.upstreamProviderDetectPlatforms = originalSettings.platforms;
+    config.upstreamProviderDetectSiteIds = originalSettings.siteIds;
   });
 
-  describe('normalizeUpstreamProviderDetectPlatforms', () => {
-    it('normalizes csv, scheme, wildcard, port, case and trailing dots, then dedupes', () => {
-      expect(normalizeUpstreamProviderDetectPlatforms(
-        ' Cline.BOT ,.api.cline.bot,*.cline.bot,https://api.cline.bot/api,cline.bot:443, ,',
-      )).toEqual(['cline.bot', 'api.cline.bot']);
+  describe('normalizeUpstreamProviderDetectSiteIds', () => {
+    it('accepts numbers and numeric strings, truncates floats and dedupes', () => {
+      expect(normalizeUpstreamProviderDetectSiteIds([9, '12', 9.7, ' 12 ', '9']))
+        .toEqual([9, 12]);
     });
 
-    it('accepts arrays and drops non-string or empty entries', () => {
-      expect(normalizeUpstreamProviderDetectPlatforms([' cline.bot ', 42, null, '', '*.cline.bot']))
-        .toEqual(['cline.bot']);
-      expect(normalizeUpstreamProviderDetectPlatforms(undefined)).toEqual([]);
-      expect(normalizeUpstreamProviderDetectPlatforms('')).toEqual([]);
-    });
-  });
-
-  describe('extractUpstreamProviderDetectHostname', () => {
-    it('extracts the host from full urls and scheme-less urls', () => {
-      expect(extractUpstreamProviderDetectHostname('https://api.cline.bot/api')).toBe('api.cline.bot');
-      expect(extractUpstreamProviderDetectHostname('api.cline.bot/v1')).toBe('api.cline.bot');
-      expect(extractUpstreamProviderDetectHostname('https://api.cline.bot.:8443/')).toBe('api.cline.bot');
+    it('accepts a comma separated string and single numbers', () => {
+      expect(normalizeUpstreamProviderDetectSiteIds('9, 12,,13')).toEqual([9, 12, 13]);
+      expect(normalizeUpstreamProviderDetectSiteIds('9')).toEqual([9]);
+      expect(normalizeUpstreamProviderDetectSiteIds(9)).toEqual([9]);
     });
 
-    it('returns null for malformed or non-string urls', () => {
-      expect(extractUpstreamProviderDetectHostname('')).toBeNull();
-      expect(extractUpstreamProviderDetectHostname('not a url')).toBeNull();
-      expect(extractUpstreamProviderDetectHostname(null)).toBeNull();
-      expect(extractUpstreamProviderDetectHostname(42)).toBeNull();
+    it('drops empty, negative, zero and non-numeric entries', () => {
+      expect(normalizeUpstreamProviderDetectSiteIds([0, -3, 'abc', '', null, undefined, 5]))
+        .toEqual([5]);
+      expect(normalizeUpstreamProviderDetectSiteIds(undefined)).toEqual([]);
+      expect(normalizeUpstreamProviderDetectSiteIds(null)).toEqual([]);
+      expect(normalizeUpstreamProviderDetectSiteIds('')).toEqual([]);
     });
   });
 
-  describe('matchUpstreamProviderDetectHost', () => {
-    it('matches exact hosts and dot-boundary subdomains', () => {
-      expect(matchUpstreamProviderDetectHost('https://api.cline.bot', ['cline.bot'])).toBe(true);
-      expect(matchUpstreamProviderDetectHost('https://cline.bot', ['cline.bot'])).toBe(true);
-      expect(matchUpstreamProviderDetectHost('https://api.cline.bot:8443/api', ['cline.bot'])).toBe(true);
+  describe('isUpstreamProviderDetectSiteSelected', () => {
+    it('matches numeric and numeric-string ids against the selection', () => {
+      expect(isUpstreamProviderDetectSiteSelected(9, [9, 12])).toBe(true);
+      expect(isUpstreamProviderDetectSiteSelected('12', [9, 12])).toBe(true);
     });
 
-    it('does not match lookalike hosts', () => {
-      expect(matchUpstreamProviderDetectHost('https://evilcline.bot', ['cline.bot'])).toBe(false);
-      expect(matchUpstreamProviderDetectHost('https://api.cline.bot.evil.example', ['cline.bot'])).toBe(false);
-      expect(matchUpstreamProviderDetectHost('https://api.other.example', ['cline.bot'])).toBe(false);
-    });
-
-    it('returns false without platforms or host', () => {
-      expect(matchUpstreamProviderDetectHost('https://api.cline.bot', [])).toBe(false);
-      expect(matchUpstreamProviderDetectHost('', ['cline.bot'])).toBe(false);
+    it('returns false for unselected or invalid ids', () => {
+      expect(isUpstreamProviderDetectSiteSelected(7, [9, 12])).toBe(false);
+      expect(isUpstreamProviderDetectSiteSelected(null, [9])).toBe(false);
+      expect(isUpstreamProviderDetectSiteSelected(undefined, [9])).toBe(false);
+      expect(isUpstreamProviderDetectSiteSelected(0, [9])).toBe(false);
+      expect(isUpstreamProviderDetectSiteSelected(9, [])).toBe(false);
     });
   });
 
@@ -106,37 +94,44 @@ describe('upstreamProviderDetect gate', () => {
   });
 
   describe('shouldCollectUpstreamProviderObservation', () => {
-    it('requires the master switch, a matching host suffix and a sample hit', () => {
+    it('requires the master switch, a selected site and a sample hit', () => {
       expect(shouldCollectUpstreamProviderObservation({
         requestId: 'req-1',
-        siteUrl: 'https://api.cline.bot/api',
+        siteId: 9,
+      })).toBe(true);
+      expect(shouldCollectUpstreamProviderObservation({
+        requestId: 'req-1',
+        siteId: '9',
       })).toBe(true);
 
       config.upstreamProviderDetectEnabled = false;
       expect(shouldCollectUpstreamProviderObservation({
         requestId: 'req-1',
-        siteUrl: 'https://api.cline.bot/api',
+        siteId: 9,
       })).toBe(false);
 
       config.upstreamProviderDetectEnabled = true;
       config.upstreamProviderDetectSampleRate = 0;
       expect(shouldCollectUpstreamProviderObservation({
         requestId: 'req-1',
-        siteUrl: 'https://api.cline.bot/api',
+        siteId: 9,
       })).toBe(false);
 
       config.upstreamProviderDetectSampleRate = 1;
       expect(shouldCollectUpstreamProviderObservation({
         requestId: 'req-1',
-        siteUrl: 'https://api.other.example',
+        siteId: 12,
       })).toBe(false);
     });
 
-    it('collects nothing when the platform suffix list is empty', () => {
-      config.upstreamProviderDetectPlatforms = [];
+    it('collects nothing when no site is selected (default)', () => {
+      config.upstreamProviderDetectSiteIds = [];
       expect(shouldCollectUpstreamProviderObservation({
         requestId: 'req-1',
-        siteUrl: 'https://api.cline.bot/api',
+        siteId: 9,
+      })).toBe(false);
+      expect(shouldCollectUpstreamProviderObservation({
+        requestId: 'req-1',
       })).toBe(false);
     });
   });

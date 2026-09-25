@@ -405,13 +405,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
       });
 
       const modelName = selected.actualModel || requestedModel;
-      // 上游探测旁路：只在主开关 + 站点 host 后缀 + 采样都命中时收集；
+      // 上游探测旁路：只在主开关 + 参与站点 + 采样都命中时收集；
       // 收集器随重试 attempt 作用域创建（B2），attempt 内的观测不会泄漏到下一次成功的日志；
       // 写入发生在成功日志之后，成功日志写失败则不写观测（C4 同生共死，与 chat 面一致）；
       // persist 自身不抛，不影响转发字节与状态码。
       const upstreamObservationCollector = createUpstreamProviderObservationCollector({
         requestId: String(request.id ?? ''),
-        siteUrl: selected.site.url,
+        siteId: selected.site.id,
       });
       const persistUpstreamObservation = async (streamRequest: boolean, upstreamPath: string | null) => {
         await persistUpstreamProviderObservation({

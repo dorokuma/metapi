@@ -81,7 +81,7 @@ function mergeUsageCosts(
 
 export function createUpstreamProviderObservationCollector(input: {
   requestId?: string | null;
-  siteUrl?: string | null;
+  siteId?: number | string | null;
 }): UpstreamProviderObservationCollector {
   const active = shouldCollectUpstreamProviderObservation(input);
   let latestObservation: UpstreamProviderObservation | null = null;

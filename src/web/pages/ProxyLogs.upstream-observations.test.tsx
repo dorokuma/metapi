@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import ProxyLogs from './ProxyLogs.js';
 
@@ -136,6 +136,27 @@ async function renderProxyLogs() {
   return root;
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
+async function renderProxyLogsWithLocationProbe() {
+  let root!: WebTestRenderer;
+  await act(async () => {
+    root = create(
+      <MemoryRouter initialEntries={['/logs']}>
+        <ToastProvider>
+          <ProxyLogs />
+          <LocationProbe />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+  });
+  await flushMicrotasks();
+  return root;
+}
+
 function findButton(root: ReactTestInstance, text: string): ReactTestInstance {
   return root.find((node) => (
     node.type === 'button'
@@ -175,10 +196,6 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       proxyDebugTargetModel: '',
       proxyDebugRetentionHours: 24,
       proxyDebugMaxBodyBytes: 262144,
-      upstreamProviderDetectEnabled: false,
-      upstreamProviderDetectSampleRate: 1,
-      upstreamProviderDetectRetentionDays: 14,
-      upstreamProviderDetectPlatforms: ['cline.bot'],
     });
     apiMock.getProxyLogs.mockResolvedValue(buildListResponse());
     apiMock.getProxyLogsQuery.mockImplementation((params: any) => apiMock.getProxyLogs(params));
@@ -296,7 +313,7 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       expect(apiMock.getUpstreamObservationFallbacks).toHaveBeenCalledWith({});
 
       const text = collectText(root.root);
-      expect(text).toContain('采样率 1（数值为观测数，非全量请求数）');
+      expect(text).toContain('开关、采样率与参与站点在「设置 → 上游探测」中配置');
       expect(text).toContain('提供方分布（按观测数排序，共 4 次观测）');
       expect(text).toContain('deepseek');
       expect(text).toContain('alibaba');
@@ -337,7 +354,7 @@ describe('ProxyLogs upstream observations (desktop)', () => {
     }
   });
 
-  it('edits the upstream detect switch, sample rate, retention days and platform suffixes through the debug settings modal', async () => {
+  it('no longer exposes the upstream detect settings inside the debug settings modal', async () => {
     const root = await renderProxyLogs();
     try {
       await act(async () => {
@@ -345,39 +362,25 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       });
       await flushMicrotasks();
 
-      const enabledToggle = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-enabled'
-      ));
-      const sampleRateInput = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-sample-rate'
-      ));
-      const retentionInput = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-retention-days'
-      ));
-      const platformsInput = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-platforms'
-      ));
-
-      expect(platformsInput.props.value).toBe('cline.bot');
-
-      await act(async () => {
-        enabledToggle.props.onChange({ target: { checked: true } });
-        sampleRateInput.props.onChange({ target: { value: '0.5' } });
-        retentionInput.props.onChange({ target: { value: '7' } });
-        platformsInput.props.onChange({ target: { value: 'cline.bot, example.com' } });
-      });
+      // 四项已迁到系统设置页：弹层里不再有相关输入/文案，也没有残留的 payload 触点
+      expect(root.root.findAll((node) => node.props['data-upstream-setting'] !== undefined)).toHaveLength(0);
+      const text = collectText(root.root);
+      expect(text).toContain('保存调试设置');
+      expect(text).not.toContain('站点后缀');
+      expect(text).not.toContain('上游探测（Cline 网关）');
+      expect(text).not.toContain('只对命中站点后缀的请求解析 Cline provider_metadata');
 
       await act(async () => {
         findButton(root.root, '保存调试设置').props.onClick();
       });
       await flushMicrotasks();
 
-      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith(expect.objectContaining({
-        upstreamProviderDetectEnabled: true,
-        upstreamProviderDetectSampleRate: 0.5,
-        upstreamProviderDetectRetentionDays: 7,
-        upstreamProviderDetectPlatforms: 'cline.bot, example.com',
-      }));
+      const savedPayload = apiMock.updateRuntimeSettings.mock.calls.at(-1)?.[0] || {};
+      expect(savedPayload).not.toHaveProperty('upstreamProviderDetectEnabled');
+      expect(savedPayload).not.toHaveProperty('upstreamProviderDetectSampleRate');
+      expect(savedPayload).not.toHaveProperty('upstreamProviderDetectRetentionDays');
+      expect(savedPayload).not.toHaveProperty('upstreamProviderDetectSiteIds');
+      expect(savedPayload).not.toHaveProperty('upstreamProviderDetectPlatforms');
     } finally {
       await act(async () => {
         root.unmount();
@@ -385,53 +388,17 @@ describe('ProxyLogs upstream observations (desktop)', () => {
     }
   });
 
-  it('maps array platforms from the settings response and warns when the suffix list is cleared (E3)', async () => {
-    apiMock.getRuntimeSettings.mockResolvedValue({
-      proxyDebugTraceEnabled: false,
-      proxyDebugCaptureHeaders: true,
-      proxyDebugCaptureBodies: false,
-      proxyDebugCaptureStreamChunks: false,
-      proxyDebugTargetSessionId: '',
-      proxyDebugTargetClientKind: '',
-      proxyDebugTargetModel: '',
-      proxyDebugRetentionHours: 24,
-      proxyDebugMaxBodyBytes: 262144,
-      upstreamProviderDetectEnabled: true,
-      upstreamProviderDetectSampleRate: 0.25,
-      upstreamProviderDetectRetentionDays: 3,
-      upstreamProviderDetectPlatforms: ['cline.bot', 'example.com'],
-    });
-
-    const root = await renderProxyLogs();
+  it('links from the upstream distribution panel header to the settings section', async () => {
+    const root = await renderProxyLogsWithLocationProbe();
     try {
+      expect(collectText(root.root)).toContain('/logs');
+
       await act(async () => {
-        findButton(root.root, '调试设置').props.onClick();
+        findButton(root.root, '配置').props.onClick();
       });
       await flushMicrotasks();
 
-      const enabledToggle = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-enabled'
-      ));
-      const sampleRateInput = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-sample-rate'
-      ));
-      const retentionInput = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-retention-days'
-      ));
-      const platformsInput = root.root.find((node) => (
-        node.type === 'input' && node.props['data-upstream-setting'] === 'detect-platforms'
-      ));
-
-      expect(enabledToggle.props.checked).toBe(true);
-      expect(sampleRateInput.props.value).toBe(0.25);
-      expect(retentionInput.props.value).toBe(3);
-      expect(platformsInput.props.value).toBe('cline.bot, example.com');
-
-      await act(async () => {
-        platformsInput.props.onChange({ target: { value: '' } });
-      });
-
-      expect(collectText(root.root)).toContain('后缀留空 = 不收集任何站点');
+      expect(collectText(root.root)).toContain('/settings?section=upstream-detect');
     } finally {
       await act(async () => {
         root.unmount();

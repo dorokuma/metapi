@@ -67,11 +67,6 @@ type ProxyDebugSettingsState = {
   proxyDebugTargetModel: string;
   proxyDebugRetentionHours: number;
   proxyDebugMaxBodyBytes: number;
-  upstreamProviderDetectEnabled: boolean;
-  upstreamProviderDetectSampleRate: number;
-  upstreamProviderDetectRetentionDays: number;
-  /** 逗号分隔文本；提交时交给服务端归一化，空 = 不收集任何站点（E3）。 */
-  upstreamProviderDetectPlatforms: string;
 };
 
 type ProxyDebugTraceDetailState = {
@@ -117,10 +112,6 @@ const DEFAULT_PROXY_DEBUG_SETTINGS: ProxyDebugSettingsState = {
   proxyDebugTargetModel: "",
   proxyDebugRetentionHours: 24,
   proxyDebugMaxBodyBytes: 262144,
-  upstreamProviderDetectEnabled: false,
-  upstreamProviderDetectSampleRate: 1,
-  upstreamProviderDetectRetentionDays: 14,
-  upstreamProviderDetectPlatforms: "cline.bot",
 };
 const DEBUG_REFRESH_INTERVAL_MS = 2000;
 const formInputStyle: React.CSSProperties = {
@@ -591,28 +582,6 @@ function toApiTimeBoundary(value: string): string | undefined {
   return parsed.toISOString();
 }
 
-function normalizeUpstreamSampleRateInput(value: unknown): number {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return 1;
-  return Math.min(1, Math.max(0, numeric));
-}
-
-function normalizeUpstreamRetentionDaysInput(value: unknown): number {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return 14;
-  return Math.max(0, Math.trunc(numeric));
-}
-
-function normalizeUpstreamPlatformsInput(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value
-      .filter((item): item is string => typeof item === "string")
-      .join(", ");
-  }
-  if (typeof value === "string") return value;
-  return "cline.bot";
-}
-
 function formatUpstreamCostNumber(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "--";
   return `$${value.toFixed(6)}`;
@@ -783,16 +752,6 @@ function normalizeProxyDebugSettings(value: any): ProxyDebugSettingsState {
     proxyDebugTargetModel: String(value?.proxyDebugTargetModel || ""),
     proxyDebugRetentionHours: Number(value?.proxyDebugRetentionHours || 24),
     proxyDebugMaxBodyBytes: Number(value?.proxyDebugMaxBodyBytes || 262144),
-    upstreamProviderDetectEnabled: !!value?.upstreamProviderDetectEnabled,
-    upstreamProviderDetectSampleRate: normalizeUpstreamSampleRateInput(
-      value?.upstreamProviderDetectSampleRate,
-    ),
-    upstreamProviderDetectRetentionDays: normalizeUpstreamRetentionDaysInput(
-      value?.upstreamProviderDetectRetentionDays,
-    ),
-    upstreamProviderDetectPlatforms: normalizeUpstreamPlatformsInput(
-      value?.upstreamProviderDetectPlatforms,
-    ),
   };
 }
 
@@ -815,14 +774,6 @@ function buildProxyDebugSettingsPayload(
       1024,
       Math.trunc(Number(settings.proxyDebugMaxBodyBytes || 262144)),
     ),
-    upstreamProviderDetectEnabled: settings.upstreamProviderDetectEnabled,
-    upstreamProviderDetectSampleRate: normalizeUpstreamSampleRateInput(
-      settings.upstreamProviderDetectSampleRate,
-    ),
-    upstreamProviderDetectRetentionDays: normalizeUpstreamRetentionDaysInput(
-      settings.upstreamProviderDetectRetentionDays,
-    ),
-    upstreamProviderDetectPlatforms: settings.upstreamProviderDetectPlatforms.trim(),
   };
 }
 
@@ -1073,6 +1024,9 @@ export default function ProxyLogs() {
   }, [location.search]);
 
   useEffect(() => {
+    // 只在 /logs 上同步筛选参数：离开本页（例如从上游分布「配置」跳设置页）时
+    // 不要用本页的筛选状态覆盖目标页的 query。
+    if (location.pathname !== "/logs") return;
     const nextSearch = buildProxyLogsRouteSearch({
       page,
       pageSize,
@@ -2278,109 +2232,6 @@ export default function ProxyLogs() {
         </div>
       </ResponsiveFormGrid>
 
-      <div style={formSectionStyle}>
-        <div style={formSectionLabelStyle}>上游探测（Cline 网关）</div>
-        <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ display: "grid", gap: 4 }}>
-            <label style={debugCheckboxRowStyle}>
-              <input
-                type="checkbox"
-                checked={debugDraftSettings.upstreamProviderDetectEnabled}
-                data-upstream-setting="detect-enabled"
-                onChange={(e) =>
-                  setDebugDraftSettings((current) => ({
-                    ...current,
-                    upstreamProviderDetectEnabled: !!e.target.checked,
-                  }))
-                }
-              />
-              开启上游探测
-            </label>
-            <div
-              style={{
-                fontSize: 12,
-                color: "var(--color-text-muted)",
-                marginLeft: 24,
-              }}
-            >
-              只对命中站点后缀的请求解析 Cline provider_metadata，写入独立观测表；不改下游字节，不参与计费。
-            </div>
-          </div>
-          <ResponsiveFormGrid columns={2}>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                采样率（0–1，1 = 全量）
-              </span>
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step={0.1}
-                value={debugDraftSettings.upstreamProviderDetectSampleRate}
-                data-upstream-setting="detect-sample-rate"
-                onChange={(e) =>
-                  setDebugDraftSettings((current) => ({
-                    ...current,
-                    upstreamProviderDetectSampleRate: Number(e.target.value),
-                  }))
-                }
-                style={formInputStyle}
-              />
-            </label>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                观测保留天数（0 = 不清理）
-              </span>
-              <input
-                type="number"
-                min={0}
-                value={debugDraftSettings.upstreamProviderDetectRetentionDays}
-                data-upstream-setting="detect-retention-days"
-                onChange={(e) =>
-                  setDebugDraftSettings((current) => ({
-                    ...current,
-                    upstreamProviderDetectRetentionDays: Number(
-                      e.target.value || 0,
-                    ),
-                  }))
-                }
-                style={formInputStyle}
-              />
-            </label>
-          </ResponsiveFormGrid>
-          <label style={{ display: "grid", gap: 6 }}>
-            <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-              站点后缀（逗号分隔）
-            </span>
-            <input
-              type="text"
-              value={debugDraftSettings.upstreamProviderDetectPlatforms}
-              data-upstream-setting="detect-platforms"
-              onChange={(e) =>
-                setDebugDraftSettings((current) => ({
-                  ...current,
-                  upstreamProviderDetectPlatforms: e.target.value,
-                }))
-              }
-              placeholder="cline.bot"
-              style={formInputStyle}
-            />
-          </label>
-          {debugDraftSettings.upstreamProviderDetectPlatforms.trim().length === 0 ? (
-            <div style={{ fontSize: 12, color: "var(--color-warning)" }}>
-              后缀留空 = 不收集任何站点（即使总开关开启）。
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-              只有站点 URL 的 host 命中这些后缀或其子域名才会收集（api.cline.bot 命中 cline.bot）。
-            </div>
-          )}
-          <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-            观测默认保留 14 天（短于日志 30 天）；请求详情按 ±2s 唯一匹配，对不上不猜测。
-          </div>
-        </div>
-      </div>
-
       {isMobile ? debugSettingsFooter : null}
     </div>
   );
@@ -2918,12 +2769,19 @@ export default function ProxyLogs() {
                 marginTop: 4,
               }}
             >
-              上游自报，非 metapi 计费；按当前筛选（站点/模型/时间）查询，默认最近 7 天。采样率{" "}
-              {debugSettings.upstreamProviderDetectSampleRate}
-              （数值为观测数，非全量请求数）。
+              上游自报，非 metapi 计费；按当前筛选（站点/模型/时间）查询，默认最近 7 天（数值为观测数，非全量请求数）。开关、采样率与参与站点在「设置 → 上游探测」中配置。
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: "1px solid var(--color-border)" }}
+              data-upstream-config-entry
+              onClick={() => navigate("/settings?section=upstream-detect")}
+            >
+              配置
+            </button>
             <button
               type="button"
               className="btn btn-ghost"
@@ -2981,7 +2839,7 @@ export default function ProxyLogs() {
                 </div>
                 {upstreamDistribution.length === 0 ? (
                   <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                    当前筛选下暂无观测（需在调试设置里开启上游探测，且窗口内未超出观测保留期）。
+                    当前筛选下暂无观测（需在「设置 → 上游探测」中开启并勾选参与站点，且窗口内未超出观测保留期）。
                   </div>
                 ) : isMobile ? (
                   <div className="mobile-card-list">

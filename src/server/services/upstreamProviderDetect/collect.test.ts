@@ -10,10 +10,10 @@ const originalSettings = {
   enabled: config.upstreamProviderDetectEnabled,
   sampleRate: config.upstreamProviderDetectSampleRate,
   retentionDays: config.upstreamProviderDetectRetentionDays,
-  platforms: config.upstreamProviderDetectPlatforms,
+  siteIds: config.upstreamProviderDetectSiteIds,
 };
 
-const REQUEST_INPUT = { requestId: 'req-collector-test', siteUrl: 'https://api.cline.bot' };
+const REQUEST_INPUT = { requestId: 'req-collector-test', siteId: 9 };
 
 function createActiveCollector(): UpstreamProviderObservationCollector {
   return createUpstreamProviderObservationCollector(REQUEST_INPUT);
@@ -49,14 +49,14 @@ describe('upstream provider observation collector', () => {
     config.upstreamProviderDetectEnabled = true;
     config.upstreamProviderDetectSampleRate = 1;
     config.upstreamProviderDetectRetentionDays = 14;
-    config.upstreamProviderDetectPlatforms = ['cline.bot'];
+    config.upstreamProviderDetectSiteIds = [9];
   });
 
   afterEach(() => {
     config.upstreamProviderDetectEnabled = originalSettings.enabled;
     config.upstreamProviderDetectSampleRate = originalSettings.sampleRate;
     config.upstreamProviderDetectRetentionDays = originalSettings.retentionDays;
-    config.upstreamProviderDetectPlatforms = originalSettings.platforms;
+    config.upstreamProviderDetectSiteIds = originalSettings.siteIds;
   });
 
   it('is inactive (and observes nothing) when the gate does not match', () => {
@@ -67,13 +67,19 @@ describe('upstream provider observation collector', () => {
     expect(collector.snapshot()).toBeNull();
 
     config.upstreamProviderDetectEnabled = true;
-    const offHost = createUpstreamProviderObservationCollector({
-      requestId: 'req-off-host',
-      siteUrl: 'https://api.other.example',
+    const offSite = createUpstreamProviderObservationCollector({
+      requestId: 'req-off-site',
+      siteId: 12,
     });
-    expect(offHost.active).toBe(false);
-    offHost.observe(routingFrame({ finalProvider: 'deepseek' }));
-    expect(offHost.snapshot()).toBeNull();
+    expect(offSite.active).toBe(false);
+    offSite.observe(routingFrame({ finalProvider: 'deepseek' }));
+    expect(offSite.snapshot()).toBeNull();
+
+    config.upstreamProviderDetectSiteIds = [];
+    const noSelection = createActiveCollector();
+    expect(noSelection.active).toBe(false);
+    noSelection.observe(routingFrame({ finalProvider: 'deepseek' }));
+    expect(noSelection.snapshot()).toBeNull();
   });
 
   it('returns null until a frame carries routing, and ignores non-object payloads', () => {

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import type { FastifyServerOptions } from 'fastify';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
+import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -147,9 +148,8 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     upstreamProviderDetectEnabled: parseBoolean(env.UPSTREAM_PROVIDER_DETECT_ENABLED, false),
     upstreamProviderDetectSampleRate: Math.min(1, Math.max(0, parseNumber(env.UPSTREAM_PROVIDER_DETECT_SAMPLE_RATE, 1))),
     upstreamProviderDetectRetentionDays: Math.max(0, Math.trunc(parseNumber(env.UPSTREAM_PROVIDER_DETECT_RETENTION_DAYS, 14))),
-    upstreamProviderDetectPlatforms: env.UPSTREAM_PROVIDER_DETECT_PLATFORMS === undefined
-      ? ['cline.bot']
-      : parseCsvList(env.UPSTREAM_PROVIDER_DETECT_PLATFORMS),
+    // 参与探测的站点 id（逗号分隔）；默认空 = 不采集，发布环节负责写入等价值。
+    upstreamProviderDetectSiteIds: normalizeUpstreamProviderDetectSiteIds(env.UPSTREAM_PROVIDER_DETECT_SITE_IDS),
     openAiServiceTierRules: parseJsonValue(env.OPENAI_SERVICE_TIER_RULES_JSON || env.OPENAI_SERVICE_TIER_RULES),
     modelAvailabilityProbeEnabled: parseBoolean(env.MODEL_AVAILABILITY_PROBE_ENABLED, false),
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),

@@ -383,7 +383,7 @@ export type RuntimeSettingsPayload = {
   upstreamProviderDetectEnabled?: boolean;
   upstreamProviderDetectSampleRate?: number;
   upstreamProviderDetectRetentionDays?: number;
-  upstreamProviderDetectPlatforms?: string[] | string;
+  upstreamProviderDetectSiteIds?: number[];
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;

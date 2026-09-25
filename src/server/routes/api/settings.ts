@@ -54,7 +54,7 @@ import {
   saveNotificationTemplates,
 } from '../../services/notificationTemplates.js';
 import { DAILY_SUMMARY_TEMPLATE_VARIABLES } from '../../services/dailySummaryService.js';
-import { normalizeUpstreamProviderDetectPlatforms } from '../../services/upstreamProviderDetect/gate.js';
+import { normalizeUpstreamProviderDetectSiteIds } from '../../services/upstreamProviderDetect/siteIds.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -81,7 +81,7 @@ interface RuntimeSettingsBody {
   upstreamProviderDetectEnabled?: boolean;
   upstreamProviderDetectSampleRate?: number;
   upstreamProviderDetectRetentionDays?: number;
-  upstreamProviderDetectPlatforms?: string[] | string;
+  upstreamProviderDetectSiteIds?: number[] | string[] | number | string;
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
@@ -552,8 +552,8 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.upstreamProviderDetectRetentionDays = Math.trunc(retentionDays);
       return;
     }
-    case 'upstream_provider_detect_platforms': {
-      config.upstreamProviderDetectPlatforms = normalizeUpstreamProviderDetectPlatforms(value);
+    case 'upstream_provider_detect_site_ids': {
+      config.upstreamProviderDetectSiteIds = normalizeUpstreamProviderDetectSiteIds(value);
       return;
     }
     case 'proxy_empty_content_fail_enabled': {
@@ -786,7 +786,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     upstreamProviderDetectEnabled: config.upstreamProviderDetectEnabled,
     upstreamProviderDetectSampleRate: config.upstreamProviderDetectSampleRate,
     upstreamProviderDetectRetentionDays: config.upstreamProviderDetectRetentionDays,
-    upstreamProviderDetectPlatforms: config.upstreamProviderDetectPlatforms,
+    upstreamProviderDetectSiteIds: config.upstreamProviderDetectSiteIds,
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
@@ -1511,13 +1511,13 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('upstream_provider_detect_retention_days', config.upstreamProviderDetectRetentionDays);
     }
 
-    if (body.upstreamProviderDetectPlatforms !== undefined) {
-      const nextPlatforms = normalizeUpstreamProviderDetectPlatforms(body.upstreamProviderDetectPlatforms);
-      if (JSON.stringify(nextPlatforms) !== JSON.stringify(config.upstreamProviderDetectPlatforms)) {
-        changedLabels.push('上游探测站点后缀');
+    if (body.upstreamProviderDetectSiteIds !== undefined) {
+      const nextSiteIds = normalizeUpstreamProviderDetectSiteIds(body.upstreamProviderDetectSiteIds);
+      if (JSON.stringify(nextSiteIds) !== JSON.stringify(config.upstreamProviderDetectSiteIds)) {
+        changedLabels.push('上游探测参与站点');
       }
-      config.upstreamProviderDetectPlatforms = nextPlatforms;
-      upsertSetting('upstream_provider_detect_platforms', nextPlatforms);
+      config.upstreamProviderDetectSiteIds = nextSiteIds;
+      upsertSetting('upstream_provider_detect_site_ids', nextSiteIds);
     }
 
     if (body.proxyErrorKeywords !== undefined) {

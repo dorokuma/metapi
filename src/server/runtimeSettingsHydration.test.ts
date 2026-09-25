@@ -54,4 +54,24 @@ describe('applyRuntimeSettings', () => {
 
     expect(config.globalAllowedModels).toEqual(['model-alpha', 'model-beta', 'model-gamma']);
   });
+
+  it('hydrates the upstream detect participating-site selection and normalizes it', () => {
+    config.upstreamProviderDetectSiteIds = [];
+
+    applyRuntimeSettings(new Map([
+      ['upstream_provider_detect_site_ids', JSON.stringify([9, '12', 9, 0, 'bad'])],
+    ]));
+
+    expect(config.upstreamProviderDetectSiteIds).toEqual([9, 12]);
+  });
+
+  it('ignores the removed legacy host-suffix key during hydration', () => {
+    config.upstreamProviderDetectSiteIds = [3];
+
+    applyRuntimeSettings(new Map([
+      ['upstream_provider_detect_platforms', JSON.stringify(['cline.bot'])],
+    ]));
+
+    expect(config.upstreamProviderDetectSiteIds).toEqual([3]);
+  });
 });

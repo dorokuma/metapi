@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
@@ -58,6 +59,56 @@ type SettingsPillTone = 'neutral' | 'primary' | 'danger' | 'warning';
 type PayloadRulesEditorSectionKey = PayloadRuleAction;
 type PayloadRulesEditorDrafts = Record<PayloadRulesEditorSectionKey, string>;
 
+type SettingsSiteOption = {
+  id: number;
+  name: string;
+  url?: string;
+};
+
+const UPSTREAM_DETECT_SECTION_ID = 'upstream-detect';
+
+function normalizeUpstreamDetectSampleRate(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.min(1, Math.max(0, numeric));
+}
+
+function normalizeUpstreamDetectRetentionDays(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 14;
+  return Math.max(0, Math.trunc(numeric));
+}
+
+function normalizeUpstreamDetectSiteIds(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<number>();
+  const result: number[] = [];
+  for (const item of value) {
+    const numeric = Math.trunc(Number(item));
+    if (!Number.isInteger(numeric) || numeric <= 0 || seen.has(numeric)) continue;
+    seen.add(numeric);
+    result.push(numeric);
+  }
+  return result;
+}
+
+function normalizeSettingsSiteOptions(value: unknown): SettingsSiteOption[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<number>();
+  const result: SettingsSiteOption[] = [];
+  for (const item of value as Array<Record<string, unknown>>) {
+    const id = Math.trunc(Number(item?.id));
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    result.push({
+      id,
+      name: typeof item?.name === 'string' && item.name.trim().length > 0 ? item.name : `#${id}`,
+      url: typeof item?.url === 'string' ? item.url : undefined,
+    });
+  }
+  return result;
+}
+
 type RuntimeSettings = {
   checkinCron: string;
   checkinScheduleMode: 'cron' | 'interval';
@@ -82,6 +133,10 @@ type RuntimeSettings = {
   systemProxyUrl: string;
   proxyErrorKeywords: string[];
   proxyEmptyContentFailEnabled: boolean;
+  upstreamProviderDetectEnabled: boolean;
+  upstreamProviderDetectSampleRate: number;
+  upstreamProviderDetectRetentionDays: number;
+  upstreamProviderDetectSiteIds: number[];
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
@@ -341,6 +396,11 @@ function toRouteCooldownSeconds(value: number, unit: RouteCooldownUnit): number 
 
 export default function Settings() {
   const isMobile = useIsMobile();
+  const location = useLocation();
+  const focusSection = useMemo(
+    () => new URLSearchParams(location.search).get('section'),
+    [location.search],
+  );
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
     checkinScheduleMode: 'cron',
@@ -365,6 +425,10 @@ export default function Settings() {
     systemProxyUrl: '',
     proxyErrorKeywords: [],
     proxyEmptyContentFailEnabled: false,
+    upstreamProviderDetectEnabled: false,
+    upstreamProviderDetectSampleRate: 1,
+    upstreamProviderDetectRetentionDays: 14,
+    upstreamProviderDetectSiteIds: [],
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
   const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
@@ -385,6 +449,9 @@ export default function Settings() {
   const [savingPayloadRules, setSavingPayloadRules] = useState(false);
   const [showPayloadRulesEditor, setShowPayloadRulesEditor] = useState(false);
   const [savingRouting, setSavingRouting] = useState(false);
+  const [savingUpstreamDetect, setSavingUpstreamDetect] = useState(false);
+  const [upstreamDetectSites, setUpstreamDetectSites] = useState<SettingsSiteOption[] | null>(null);
+  const [upstreamDetectSitesFailed, setUpstreamDetectSitesFailed] = useState(false);
   const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
   const [allBrandNames, setAllBrandNames] = useState<string[] | null>(null);
   const [blockedBrands, setBlockedBrands] = useState<string[]>([]);
@@ -704,6 +771,16 @@ export default function Settings() {
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string')
           : [],
         proxyEmptyContentFailEnabled: !!runtimeInfo.proxyEmptyContentFailEnabled,
+        upstreamProviderDetectEnabled: !!runtimeInfo.upstreamProviderDetectEnabled,
+        upstreamProviderDetectSampleRate: normalizeUpstreamDetectSampleRate(
+          runtimeInfo.upstreamProviderDetectSampleRate,
+        ),
+        upstreamProviderDetectRetentionDays: normalizeUpstreamDetectRetentionDays(
+          runtimeInfo.upstreamProviderDetectRetentionDays,
+        ),
+        upstreamProviderDetectSiteIds: normalizeUpstreamDetectSiteIds(
+          runtimeInfo.upstreamProviderDetectSiteIds,
+        ),
         proxyTokenMasked: runtimeInfo.proxyTokenMasked || '',
         adminIpAllowlist: Array.isArray(runtimeInfo.adminIpAllowlist)
           ? runtimeInfo.adminIpAllowlist.filter((item: unknown) => typeof item === 'string')
@@ -755,6 +832,16 @@ export default function Settings() {
     api.getBrandList()
       .then((res: any) => setAllBrandNames(Array.isArray(res?.brands) ? res.brands : []))
       .catch(() => setAllBrandNames([]));
+    // Load site list in background (non-blocking, best-effort) for 上游探测参与站点选择
+    Promise.resolve()
+      .then(() => api.getSites())
+      .then((rows: unknown) => {
+        setUpstreamDetectSites(normalizeSettingsSiteOptions(rows));
+        setUpstreamDetectSitesFailed(false);
+      })
+      .catch(() => {
+        setUpstreamDetectSitesFailed(true);
+      });
     // Load available models in background (non-blocking, best-effort)
     api.getModelTokenCandidates()
       .then((res: any) => {
@@ -768,6 +855,15 @@ export default function Settings() {
   useEffect(() => {
     loadSettings();
   }, []);
+
+  // /logs「上游分布」面板的「配置」入口带上 ?section=upstream-detect：
+  // 设置页按 id 锚点滚动到对应分区（元素在首次 render 后即已挂载）。
+  useEffect(() => {
+    if (!focusSection) return;
+    if (typeof document === 'undefined') return;
+    const target = document.getElementById(`settings-section-${focusSection}`);
+    target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }, [focusSection]);
 
   const normalizeProxyTokenSuffix = (raw: string) => {
     const compact = raw.replace(/\s+/g, '');
@@ -1074,11 +1170,74 @@ export default function Settings() {
     }
   };
 
+  const saveUpstreamDetect = async () => {
+    setSavingUpstreamDetect(true);
+    try {
+      const submittedSiteIds = normalizeUpstreamDetectSiteIds(runtime.upstreamProviderDetectSiteIds);
+      const res = await api.updateRuntimeSettings({
+        upstreamProviderDetectEnabled: runtime.upstreamProviderDetectEnabled,
+        upstreamProviderDetectSampleRate: normalizeUpstreamDetectSampleRate(
+          runtime.upstreamProviderDetectSampleRate,
+        ),
+        upstreamProviderDetectRetentionDays: normalizeUpstreamDetectRetentionDays(
+          runtime.upstreamProviderDetectRetentionDays,
+        ),
+        upstreamProviderDetectSiteIds: submittedSiteIds,
+      });
+      setRuntime((prev) => ({
+        ...prev,
+        upstreamProviderDetectEnabled: res?.upstreamProviderDetectEnabled === undefined
+          ? prev.upstreamProviderDetectEnabled
+          : !!res.upstreamProviderDetectEnabled,
+        upstreamProviderDetectSampleRate: res?.upstreamProviderDetectSampleRate === undefined
+          ? prev.upstreamProviderDetectSampleRate
+          : normalizeUpstreamDetectSampleRate(res.upstreamProviderDetectSampleRate),
+        upstreamProviderDetectRetentionDays: res?.upstreamProviderDetectRetentionDays === undefined
+          ? prev.upstreamProviderDetectRetentionDays
+          : normalizeUpstreamDetectRetentionDays(res.upstreamProviderDetectRetentionDays),
+        upstreamProviderDetectSiteIds: res?.upstreamProviderDetectSiteIds === undefined
+          ? submittedSiteIds
+          : normalizeUpstreamDetectSiteIds(res.upstreamProviderDetectSiteIds),
+      }));
+      toast.success('上游探测设置已保存，已热生效');
+    } catch (err: any) {
+      toast.error(err?.message || '保存上游探测设置失败');
+    } finally {
+      setSavingUpstreamDetect(false);
+    }
+  };
+
   const applyRoutingPreset = (preset: 'balanced' | 'stable' | 'cost') => {
     setRuntime((prev) => ({
       ...prev,
       routingWeights: applyRoutingProfilePreset(preset),
     }));
+  };
+
+  const upstreamDetectStatusLabel = runtime.upstreamProviderDetectEnabled ? '已开启' : '未开启';
+  const upstreamDetectSiteCountLabel = runtime.upstreamProviderDetectSiteIds.length > 0
+    ? `${runtime.upstreamProviderDetectSiteIds.length} 个参与站点`
+    : '未选参与站点';
+  const toggleUpstreamDetectSite = (siteId: number, checked: boolean) => {
+    setRuntime((prev) => {
+      const currentSiteIds = prev.upstreamProviderDetectSiteIds;
+      const nextSiteIds = checked
+        ? (currentSiteIds.includes(siteId) ? currentSiteIds : [...currentSiteIds, siteId])
+        : currentSiteIds.filter((id) => id !== siteId);
+      return { ...prev, upstreamProviderDetectSiteIds: nextSiteIds };
+    });
+  };
+  const selectAllUpstreamDetectSites = () => {
+    setRuntime((prev) => ({
+      ...prev,
+      upstreamProviderDetectSiteIds: normalizeUpstreamDetectSiteIds([
+        ...prev.upstreamProviderDetectSiteIds,
+        ...(upstreamDetectSites || []).map((site) => site.id),
+      ]),
+    }));
+  };
+  const clearUpstreamDetectSites = () => {
+    setRuntime((prev) => ({ ...prev, upstreamProviderDetectSiteIds: [] }));
   };
 
   const handleSaveBrandFilter = async () => {
@@ -2256,6 +2415,174 @@ export default function Settings() {
           <div style={{ marginTop: 12 }}>
             <button onClick={saveRouting} disabled={savingRouting} className="btn btn-primary">
               {savingRouting ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存路由策略'}
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="card animate-slide-up stagger-5"
+          style={settingsModernCardStyle}
+          id={`settings-section-${UPSTREAM_DETECT_SECTION_ID}`}
+          data-settings-card={UPSTREAM_DETECT_SECTION_ID}
+        >
+          <div style={settingsModernHeaderStyle}>
+            <div style={settingsModernTitleBlockStyle}>
+              <div style={settingsModernTitleStyle}>上游探测</div>
+              <div style={settingsModernDescriptionStyle}>
+                解析上游网关返回的路由元数据（provider_metadata.gateway.routing），记录每笔请求实际命中的上游提供方；适用于返回该结构的网关（例如 Cline）。
+              </div>
+            </div>
+            <div style={settingsModernPillRowStyle}>
+              <span style={getSettingsPillStyle(runtime.upstreamProviderDetectEnabled ? 'primary' : 'neutral')}>
+                {upstreamDetectStatusLabel}
+              </span>
+              <span style={getSettingsPillStyle(runtime.upstreamProviderDetectSiteIds.length > 0 ? 'primary' : 'neutral')}>
+                {upstreamDetectSiteCountLabel}
+              </span>
+            </div>
+          </div>
+          <label style={settingsModernToggleStyle}>
+            <div style={settingsModernToggleCopyStyle}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>开启上游探测</span>
+              <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
+                只旁路记录，不改下游字节、不参与计费；保存后立即生效。关闭时不会解析任何上游响应。
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={runtime.upstreamProviderDetectEnabled}
+              data-upstream-detect-field="enabled"
+              onChange={(e) => setRuntime((prev) => ({ ...prev, upstreamProviderDetectEnabled: e.target.checked }))}
+              style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
+            />
+          </label>
+          <ResponsiveFormGrid columns={2}>
+            <div style={settingsModernFieldCardStyle}>
+              <div style={settingsModernFieldLabelStyle}>采样率（0–1，1 = 全量）</div>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.1}
+                value={runtime.upstreamProviderDetectSampleRate}
+                data-upstream-detect-field="sample-rate"
+                onChange={(e) => {
+                  const nextValue = Number(e.target.value);
+                  setRuntime((prev) => ({
+                    ...prev,
+                    upstreamProviderDetectSampleRate: Number.isFinite(nextValue)
+                      ? Math.min(1, Math.max(0, nextValue))
+                      : prev.upstreamProviderDetectSampleRate,
+                  }));
+                }}
+                style={inputStyle}
+              />
+              <div style={settingsModernFieldHintStyle}>
+                按请求 id 稳定采样，同一请求结果不随刷新变化。
+              </div>
+            </div>
+            <div style={settingsModernFieldCardStyle}>
+              <div style={settingsModernFieldLabelStyle}>观测保留天数（0 = 不清理）</div>
+              <input
+                type="number"
+                min={0}
+                value={runtime.upstreamProviderDetectRetentionDays}
+                data-upstream-detect-field="retention-days"
+                onChange={(e) => {
+                  const nextValue = Number(e.target.value);
+                  setRuntime((prev) => ({
+                    ...prev,
+                    upstreamProviderDetectRetentionDays: Number.isFinite(nextValue) && nextValue >= 0
+                      ? Math.trunc(nextValue)
+                      : prev.upstreamProviderDetectRetentionDays,
+                  }));
+                }}
+                style={inputStyle}
+              />
+              <div style={settingsModernFieldHintStyle}>
+                观测默认保留 14 天（短于日志 30 天）；请求详情按 ±2s 唯一匹配，对不上不猜测。
+              </div>
+            </div>
+          </ResponsiveFormGrid>
+          <div style={settingsModernFieldCardStyle} data-upstream-detect-sites>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <div style={settingsModernFieldLabelStyle}>参与站点（多选）</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px' }}
+                  onClick={selectAllUpstreamDetectSites}
+                  disabled={!upstreamDetectSites || upstreamDetectSites.length === 0}
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px' }}
+                  onClick={clearUpstreamDetectSites}
+                  disabled={runtime.upstreamProviderDetectSiteIds.length === 0}
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+            {upstreamDetectSites === null ? (
+              <div style={settingsModernFieldHintStyle}>
+                {upstreamDetectSitesFailed ? '站点列表加载失败，请刷新页面后重试' : '加载站点列表中...'}
+              </div>
+            ) : upstreamDetectSites.length === 0 ? (
+              <div style={settingsModernFieldHintStyle}>暂无站点，可先到「站点」页添加</div>
+            ) : (
+              <div
+                style={{
+                  display: 'grid',
+                  gap: 6,
+                  maxHeight: 240,
+                  overflowY: 'auto',
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--color-border-light)',
+                  background: 'var(--color-bg)',
+                }}
+              >
+                {upstreamDetectSites.map((site) => (
+                  <label
+                    key={site.id}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={runtime.upstreamProviderDetectSiteIds.includes(site.id)}
+                      data-upstream-detect-site={site.id}
+                      onChange={(e) => toggleUpstreamDetectSite(site.id, e.target.checked)}
+                    />
+                    <span>{site.name}</span>
+                    {site.url ? (
+                      <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{site.url}</span>
+                    ) : null}
+                  </label>
+                ))}
+              </div>
+            )}
+            {runtime.upstreamProviderDetectSiteIds.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--color-warning)' }}>
+                未选择任何站点 = 不采集（即使总开关开启）
+              </div>
+            ) : (
+              <div style={settingsModernFieldHintStyle}>
+                只有勾选站点的请求才会解析并记录上游观测；勾选变化保存后立即生效，无需重启。
+              </div>
+            )}
+          </div>
+          <div style={settingsModernActionsStyle}>
+            <button
+              onClick={saveUpstreamDetect}
+              disabled={savingUpstreamDetect}
+              className="btn btn-primary"
+            >
+              {savingUpstreamDetect ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存上游探测设置'}
             </button>
           </div>
         </div>

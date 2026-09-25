@@ -1,70 +1,16 @@
 /**
- * Gate for upstream-provider detection: master switch, host suffix allowlist
- * and request-level sampling. All three must pass before any payload is
- * parsed, so disabled/non-matching traffic costs nothing on the hot path.
+ * Gate for upstream-provider detection: master switch, participating-site
+ * selection and request-level sampling. All three must pass before any payload
+ * is parsed, so disabled/non-selected traffic costs nothing on the hot path.
  *
- * Host matching deliberately uses the site URL host suffix (not
- * `sites.platform`), so enabling `cline.bot` never turns on collection for
- * every OpenAI-compatible site.
+ * Site selection deliberately matches `sites.id` (the proxy already knows the
+ * selected site per attempt) instead of a host suffix: one site changing its
+ * URL can never silently enable collection for another site that happens to
+ * share the host, and an empty selection means "collect nothing".
  */
 
 import { config } from '../../config.js';
-
-function normalizePlatformSuffix(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const raw = value.trim();
-  if (!raw) return null;
-
-  const withoutScheme = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
-  const authority = withoutScheme.split(/[/?#]/, 1)[0] ?? '';
-  const withoutWildcard = authority.replace(/^\*?\.?/, '');
-  const withoutPort = withoutWildcard.replace(/:\d+$/, '');
-  const normalized = withoutPort.toLowerCase().replace(/\.+$/, '');
-  return normalized || null;
-}
-
-export function normalizeUpstreamProviderDetectPlatforms(value: unknown): string[] {
-  const rawItems = Array.isArray(value)
-    ? value
-    : (typeof value === 'string' ? value.split(',') : []);
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const item of rawItems) {
-    const suffix = normalizePlatformSuffix(item);
-    if (!suffix || seen.has(suffix)) continue;
-    seen.add(suffix);
-    result.push(suffix);
-  }
-  return result;
-}
-
-export function extractUpstreamProviderDetectHostname(siteUrl: unknown): string | null {
-  if (typeof siteUrl !== 'string') return null;
-  const raw = siteUrl.trim();
-  if (!raw) return null;
-
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
-  try {
-    const hostname = new URL(withScheme).hostname.trim().toLowerCase();
-    const normalized = hostname.replace(/\.+$/, '');
-    return normalized || null;
-  } catch {
-    return null;
-  }
-}
-
-/** `api.cline.bot` matches suffix `cline.bot`; boundary-safe (no `evilcline.bot`). */
-export function matchUpstreamProviderDetectHost(siteUrl: unknown, platforms: readonly unknown[]): boolean {
-  if (!Array.isArray(platforms) || platforms.length === 0) return false;
-  const hostname = extractUpstreamProviderDetectHostname(siteUrl);
-  if (!hostname) return false;
-
-  return platforms.some((platform) => {
-    const suffix = normalizePlatformSuffix(platform);
-    if (!suffix) return false;
-    return hostname === suffix || hostname.endsWith(`.${suffix}`);
-  });
-}
+import { isUpstreamProviderDetectSiteSelected } from './siteIds.js';
 
 export function normalizeUpstreamProviderDetectSampleRate(value: unknown): number {
   if (value === undefined || value === null || value === '') return 1;
@@ -93,13 +39,13 @@ export function resolveUpstreamProviderDetectSampleHit(requestId: unknown, sampl
 
 export function shouldCollectUpstreamProviderObservation(input: {
   requestId?: string | null;
-  siteUrl?: string | null;
+  siteId?: number | string | null;
 }): boolean {
   if (config.upstreamProviderDetectEnabled !== true) return false;
 
-  const platforms = config.upstreamProviderDetectPlatforms;
-  if (!Array.isArray(platforms) || platforms.length === 0) return false;
-  if (!matchUpstreamProviderDetectHost(input.siteUrl, platforms)) return false;
+  const siteIds = config.upstreamProviderDetectSiteIds;
+  if (!Array.isArray(siteIds) || siteIds.length === 0) return false;
+  if (!isUpstreamProviderDetectSiteSelected(input.siteId, siteIds)) return false;
 
   return resolveUpstreamProviderDetectSampleHit(input.requestId, config.upstreamProviderDetectSampleRate);
 }

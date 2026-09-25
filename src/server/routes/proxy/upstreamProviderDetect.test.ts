@@ -83,7 +83,7 @@ const { testDataDir } = vi.hoisted(() => {
 });
 
 /**
- * 阶段 2 验收：开关 + host 后缀命中时流式/非流式各落 1 行，其余情况 0 行。
+ * 阶段 2 验收：总开关 + 参与站点命中 + 采样命中时流式/非流式各落 1 行，其余情况 0 行。
  *
  * C4 口径：观测行与成功 proxy log 同生共死——只有最终成功、且已写入成功 proxy log
  * 的那一次请求才写观测行；下游断开/上游流断裂/失败响应都不会产生观测行。
@@ -98,7 +98,7 @@ describe('upstream provider detection bypass', () => {
     enabled: config.upstreamProviderDetectEnabled,
     sampleRate: config.upstreamProviderDetectSampleRate,
     retentionDays: config.upstreamProviderDetectRetentionDays,
-    platforms: config.upstreamProviderDetectPlatforms,
+    siteIds: config.upstreamProviderDetectSiteIds,
   };
 
   const createSseResponse = (chunks: string[], status = 200) => {
@@ -186,7 +186,8 @@ describe('upstream provider detection bypass', () => {
     config.upstreamProviderDetectEnabled = true;
     config.upstreamProviderDetectSampleRate = 1;
     config.upstreamProviderDetectRetentionDays = 14;
-    config.upstreamProviderDetectPlatforms = ['cline.bot'];
+    // 默认未勾选任何参与站点：各用例在 seed 站点后显式配置。
+    config.upstreamProviderDetectSiteIds = [];
     config.proxyErrorKeywords = [];
     config.proxyEmptyContentFailEnabled = false;
     (config as any).openAiServiceTierRules = undefined;
@@ -221,12 +222,13 @@ describe('upstream provider detection bypass', () => {
     config.upstreamProviderDetectEnabled = originalDetectSettings.enabled;
     config.upstreamProviderDetectSampleRate = originalDetectSettings.sampleRate;
     config.upstreamProviderDetectRetentionDays = originalDetectSettings.retentionDays;
-    config.upstreamProviderDetectPlatforms = originalDetectSettings.platforms;
+    config.upstreamProviderDetectSiteIds = originalDetectSettings.siteIds;
     rmSync(resolve(dataDir), { recursive: true, force: true });
   });
 
   it('writes one observation for a successful non-stream chat request', async () => {
     const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
     selectSeededChannel(seeded);
     fetchMock.mockResolvedValue(new Response(JSON.stringify(nonStreamFixture), {
       status: 200,
@@ -291,6 +293,7 @@ describe('upstream provider detection bypass', () => {
 
   it('writes one observation for a successful streamed chat request without changing SSE bytes', async () => {
     const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
     selectSeededChannel(seeded);
     fetchMock.mockResolvedValue(createSseResponse([
       `data: ${JSON.stringify(streamFirstChunkFixture)}\n\n`,
@@ -334,6 +337,7 @@ describe('upstream provider detection bypass', () => {
   it('writes nothing when the master switch is off', async () => {
     config.upstreamProviderDetectEnabled = false;
     const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
     selectSeededChannel(seeded);
     fetchMock.mockResolvedValue(new Response(JSON.stringify(nonStreamFixture), {
       status: 200,
@@ -354,8 +358,31 @@ describe('upstream provider detection bypass', () => {
     expect(await db.select().from(schema.proxyLogs).all()).toHaveLength(1);
   });
 
-  it('writes nothing for a site whose host does not match the configured suffixes', async () => {
-    const seeded = await seedSite({ url: 'https://api.other-gateway.example' });
+  it('writes nothing for a site that is not in the participating-site selection', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id + 1000];
+    selectSeededChannel(seeded);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(nonStreamFixture), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(await readObservations()).toHaveLength(0);
+  });
+
+  it('writes nothing when no participating site is selected (default)', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [];
     selectSeededChannel(seeded);
     fetchMock.mockResolvedValue(new Response(JSON.stringify(nonStreamFixture), {
       status: 200,
@@ -377,6 +404,7 @@ describe('upstream provider detection bypass', () => {
 
   it('writes nothing when the upstream stream breaks before completion (co-life with the success log)', async () => {
     const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
     selectSeededChannel(seeded);
     const encoder = new TextEncoder();
     fetchMock.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
@@ -408,6 +436,7 @@ describe('upstream provider detection bypass', () => {
 
   it('writes nothing for failed upstream responses', async () => {
     const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
     selectSeededChannel(seeded);
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       error: { message: 'upstream exploded', type: 'server_error' },

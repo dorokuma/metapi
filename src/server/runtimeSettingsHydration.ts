@@ -3,7 +3,7 @@ import {
   normalizeTokenRouterFailureCooldownMaxSec,
 } from './config.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
-import { normalizeUpstreamProviderDetectPlatforms } from './services/upstreamProviderDetect/gate.js';
+import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -325,8 +325,8 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.upstreamProviderDetectRetentionDays = Math.trunc(upstreamProviderDetectRetentionDays);
   }
 
-  const upstreamProviderDetectPlatforms = parseSettingFromMap<string[] | string>(settingsMap, 'upstream_provider_detect_platforms');
-  if (upstreamProviderDetectPlatforms !== undefined) {
-    config.upstreamProviderDetectPlatforms = normalizeUpstreamProviderDetectPlatforms(upstreamProviderDetectPlatforms);
+  const upstreamProviderDetectSiteIds = parseSettingFromMap<number[] | string[] | number | string>(settingsMap, 'upstream_provider_detect_site_ids');
+  if (upstreamProviderDetectSiteIds !== undefined) {
+    config.upstreamProviderDetectSiteIds = normalizeUpstreamProviderDetectSiteIds(upstreamProviderDetectSiteIds);
   }
 }

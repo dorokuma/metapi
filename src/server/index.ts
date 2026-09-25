@@ -32,6 +32,7 @@ import {
   startUpstreamProviderObservationPruneScheduler,
   stopUpstreamProviderObservationPruneScheduler,
 } from './services/upstreamProviderDetect/pruneScheduler.js';
+import { dropLegacyUpstreamProviderDetectPlatformsSetting } from './services/upstreamProviderDetect/legacySettings.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
@@ -208,6 +209,7 @@ try {
   }
   await ensureProxyLogBillingDetailsColumn();
   await ensureNotificationTemplatesMigratedAtStartup();
+  await dropLegacyUpstreamProviderDetectPlatformsSetting();
   await repairStoredCreatedAtValues();
   await migrateSiteApiKeysToAccounts();
   await ensureDefaultSitesSeeded();

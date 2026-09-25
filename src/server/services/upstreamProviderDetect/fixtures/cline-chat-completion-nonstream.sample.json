@@ -1,0 +1,120 @@
+{
+  "data": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "logprobs": null,
+        "message": {
+          "content": "ok",
+          "provider_metadata": {
+            "deepseek": {
+              "choiceIndex": 0,
+              "messageRole": "assistant",
+              "promptCacheHitTokens": 0,
+              "promptCacheMissTokens": 34,
+              "responseObject": "chat.completion",
+              "systemFingerprint": "aeb56401ca74e127821c4f9126dcb669"
+            },
+            "gateway": {
+              "cost": "0.000027",
+              "gatewayCost": "0.000027",
+              "generationId": "gen_01M3BKQJW7VBXF3CAJGGKNP2WA",
+              "inferenceCost": "0.000027",
+              "inputInferenceCost": "0.0000102",
+              "marketCost": "0.000027",
+              "outputInferenceCost": "0.0000168",
+              "routing": {
+                "affinity": {
+                  "outcome": "confirmed",
+                  "pinnedProvider": "deepseek"
+                },
+                "canonicalSlug": "deepseek/deepseek-v4.1-flash",
+                "clientSessionId": "sess-4d605219a573c92da07b4d11786413c8",
+                "clientSessionIdSource": "explicit",
+                "fallbacksAvailable": [
+                  "alibaba",
+                  "baseten",
+                  "fireworks",
+                  "runware",
+                  "relace",
+                  "particle",
+                  "novita",
+                  "togetherai",
+                  "deepinfra",
+                  "wafer",
+                  "parasail",
+                  "gmicloud",
+                  "modal",
+                  "morph",
+                  "boundless"
+                ],
+                "finalProvider": "deepseek",
+                "modelAttemptCount": 1,
+                "modelAttempts": [
+                  {
+                    "canonicalSlug": "deepseek/deepseek-v4.1-flash",
+                    "providerAttemptCount": 1,
+                    "providerAttempts": [
+                      {
+                        "credentialType": "system",
+                        "endTime": 1790317416078,
+                        "provider": "deepseek",
+                        "startTime": 1790317415317,
+                        "statusCode": 200,
+                        "success": true
+                      }
+                    ],
+                    "success": true
+                  }
+                ],
+                "originalModelId": "deepseek/deepseek-v4.1-flash",
+                "planningReasoning": "System credentials planned for: deepseek, alibaba, baseten, fireworks, runware, relace, particle, novita, togetherai, deepinfra, wafer, parasail, gmicloud, modal, morph, boundless. Total execution order: deepseek(system) → alibaba(system) → baseten(system) → fireworks(system) → runware(system) → relace(system) → particle(system) → novita(system) → togetherai(system) → deepinfra(system) → wafer(system) → parasail(system) → gmicloud(system) → modal(system) → morph(system) → boundless(system)",
+                "resolvedProvider": "deepseek",
+                "totalProviderAttemptCount": 1
+              },
+              "surchargeCost": "0"
+            }
+          },
+          "reasoning": "The user asks me to reply with \"ok\". Simple.",
+          "reasoning_details": [
+            {
+              "format": "unknown",
+              "index": 0,
+              "text": "The user asks me to reply with \"ok\". Simple.",
+              "type": "reasoning.text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 1790317416,
+    "generationId": "gen_01M3BKQJW7VBXF3CAJGGKNP2WA",
+    "id": "gen_01M3BKQJW7VBXF3CAJGGKNP2WA",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "object": "chat.completion",
+    "system_fingerprint": "fp_xtc4keuslh",
+    "usage": {
+      "cache_creation_input_tokens": 0,
+      "completion_tokens": 14,
+      "completion_tokens_details": {
+        "image_tokens": 0,
+        "reasoning_tokens": 12
+      },
+      "cost": 0.0000135,
+      "cost_details": null,
+      "gateway_cost": 0.000027,
+      "is_byok": false,
+      "market_cost": 0.000027,
+      "prompt_tokens": 34,
+      "prompt_tokens_details": {
+        "audio_tokens": 0,
+        "cached_tokens": 0,
+        "video_tokens": 0
+      },
+      "total_tokens": 48
+    }
+  },
+  "success": true
+}

@@ -3,6 +3,7 @@ import {
   normalizeTokenRouterFailureCooldownMaxSec,
 } from './config.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
+import { normalizeUpstreamProviderDetectPlatforms } from './services/upstreamProviderDetect/gate.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -303,5 +304,29 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const adminIpAllowlist = parseSettingFromMap<string[] | string>(settingsMap, 'admin_ip_allowlist');
   if (adminIpAllowlist !== undefined) {
     config.adminIpAllowlist = toStringList(adminIpAllowlist);
+  }
+
+  const upstreamProviderDetectEnabled = parseSettingFromMap<boolean>(settingsMap, 'upstream_provider_detect_enabled');
+  if (typeof upstreamProviderDetectEnabled === 'boolean') {
+    config.upstreamProviderDetectEnabled = upstreamProviderDetectEnabled;
+  }
+
+  const upstreamProviderDetectSampleRate = parseSettingFromMap<number>(settingsMap, 'upstream_provider_detect_sample_rate');
+  if (typeof upstreamProviderDetectSampleRate === 'number' && Number.isFinite(upstreamProviderDetectSampleRate)) {
+    config.upstreamProviderDetectSampleRate = Math.min(1, Math.max(0, upstreamProviderDetectSampleRate));
+  }
+
+  const upstreamProviderDetectRetentionDays = parseSettingFromMap<number>(settingsMap, 'upstream_provider_detect_retention_days');
+  if (
+    typeof upstreamProviderDetectRetentionDays === 'number'
+    && Number.isFinite(upstreamProviderDetectRetentionDays)
+    && upstreamProviderDetectRetentionDays >= 0
+  ) {
+    config.upstreamProviderDetectRetentionDays = Math.trunc(upstreamProviderDetectRetentionDays);
+  }
+
+  const upstreamProviderDetectPlatforms = parseSettingFromMap<string[] | string>(settingsMap, 'upstream_provider_detect_platforms');
+  if (upstreamProviderDetectPlatforms !== undefined) {
+    config.upstreamProviderDetectPlatforms = normalizeUpstreamProviderDetectPlatforms(upstreamProviderDetectPlatforms);
   }
 }

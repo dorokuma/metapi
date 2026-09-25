@@ -278,6 +278,57 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   clientFamilyCreatedIdx: index('proxy_logs_client_family_created_at_idx').on(table.clientFamily, table.createdAt),
 }));
 
+// 上游探测观测表（Cline 网关 provider_metadata 摘要）。仅追加，不改 proxy_logs 列；
+// 不含 header、prompt/completion 正文，provider request id 与 planningReasoning 不落库。
+export const upstreamProviderObservations = sqliteTable('upstream_provider_observations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  proxyLogId: integer('proxy_log_id'), // v1 可空：详情按时间窗匹配，不回填 proxy_logs.id
+  siteId: integer('site_id'),
+  accountId: integer('account_id'),
+  routeId: integer('route_id'),
+  channelId: integer('channel_id'),
+  downstreamApiKeyId: integer('downstream_api_key_id'),
+  requestedModel: text('requested_model'),
+  actualModel: text('actual_model'),
+  upstreamPath: text('upstream_path'),
+  isStream: integer('is_stream', { mode: 'boolean' }),
+  parserId: text('parser_id').notNull().default('cline-gateway'),
+  parserVersion: integer('parser_version').notNull().default(1),
+  finalProvider: text('final_provider'),
+  resolvedProvider: text('resolved_provider'),
+  canonicalSlug: text('canonical_slug'),
+  originalModelId: text('original_model_id'),
+  affinityOutcome: text('affinity_outcome'),
+  affinityPinnedProvider: text('affinity_pinned_provider'),
+  clientSessionId: text('client_session_id'),
+  clientSessionIdSource: text('client_session_id_source'),
+  fallbacksJson: text('fallbacks_json'),
+  fallbackCount: integer('fallback_count'),
+  modelAttemptsJson: text('model_attempts_json'),
+  attemptsTruncated: integer('attempts_truncated').notNull().default(0),
+  modelAttemptCount: integer('model_attempt_count'),
+  totalProviderAttemptCount: integer('total_provider_attempt_count'),
+  cacheHitTokens: integer('cache_hit_tokens'),
+  cacheMissTokens: integer('cache_miss_tokens'),
+  systemFingerprint: text('system_fingerprint'),
+  usageCost: real('usage_cost'),
+  usageGatewayCost: real('usage_gateway_cost'),
+  usageMarketCost: real('usage_market_cost'),
+  gatewayCostText: text('gateway_cost_text'),
+  gatewayInferenceCostText: text('gateway_inference_cost_text'),
+  gatewayGenerationId: text('gateway_generation_id'),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  createdAtIdx: index('upstream_provider_obs_created_idx').on(table.createdAt),
+  siteProviderCreatedIdx: index('upstream_provider_obs_site_provider_created_idx')
+    .on(table.siteId, table.finalProvider, table.createdAt),
+  modelProviderCreatedIdx: index('upstream_provider_obs_model_provider_created_idx')
+    .on(table.requestedModel, table.finalProvider, table.createdAt),
+  sessionCreatedIdx: index('upstream_provider_obs_session_created_idx')
+    .on(table.clientSessionId, table.createdAt),
+  proxyLogIdx: index('upstream_provider_obs_proxy_log_idx').on(table.proxyLogId),
+}));
+
 export const proxyDebugTraces = sqliteTable('proxy_debug_traces', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   downstreamPath: text('downstream_path').notNull(),

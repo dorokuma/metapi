@@ -18,7 +18,10 @@ import {
   type ProxyLogListItem,
   type ProxyLogsSummary,
   type ProxyLogStatusFilter,
+  type ProxyLogUpstreamObservation,
   type ProxyLogUsageSource,
+  type UpstreamProviderDistributionItem,
+  type UpstreamProviderFallbackGroup,
 } from "../api.js";
 import { useToast } from "../components/Toast.js";
 import { ModelBadge } from "../components/BrandIcon.js";
@@ -64,6 +67,11 @@ type ProxyDebugSettingsState = {
   proxyDebugTargetModel: string;
   proxyDebugRetentionHours: number;
   proxyDebugMaxBodyBytes: number;
+  upstreamProviderDetectEnabled: boolean;
+  upstreamProviderDetectSampleRate: number;
+  upstreamProviderDetectRetentionDays: number;
+  /** 逗号分隔文本；提交时交给服务端归一化，空 = 不收集任何站点（E3）。 */
+  upstreamProviderDetectPlatforms: string;
 };
 
 type ProxyDebugTraceDetailState = {
@@ -109,6 +117,10 @@ const DEFAULT_PROXY_DEBUG_SETTINGS: ProxyDebugSettingsState = {
   proxyDebugTargetModel: "",
   proxyDebugRetentionHours: 24,
   proxyDebugMaxBodyBytes: 262144,
+  upstreamProviderDetectEnabled: false,
+  upstreamProviderDetectSampleRate: 1,
+  upstreamProviderDetectRetentionDays: 14,
+  upstreamProviderDetectPlatforms: "cline.bot",
 };
 const DEBUG_REFRESH_INTERVAL_MS = 2000;
 const formInputStyle: React.CSSProperties = {
@@ -579,6 +591,187 @@ function toApiTimeBoundary(value: string): string | undefined {
   return parsed.toISOString();
 }
 
+function normalizeUpstreamSampleRateInput(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.min(1, Math.max(0, numeric));
+}
+
+function normalizeUpstreamRetentionDaysInput(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 14;
+  return Math.max(0, Math.trunc(numeric));
+}
+
+function normalizeUpstreamPlatformsInput(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === "string")
+      .join(", ");
+  }
+  if (typeof value === "string") return value;
+  return "cline.bot";
+}
+
+function formatUpstreamCostNumber(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  return `$${value.toFixed(6)}`;
+}
+
+function formatUpstreamCostText(value: string | null | undefined): string {
+  if (typeof value !== "string") return "--";
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : "--";
+}
+
+function renderUpstreamObservationRow(
+  label: string,
+  value: React.ReactNode,
+  keyPrefix: string,
+) {
+  return (
+    <div
+      key={`${keyPrefix}-${label}`}
+      style={{ display: "flex", gap: 6, alignItems: "flex-start" }}
+    >
+      <span
+        style={{
+          color: "var(--color-text-muted)",
+          flexShrink: 0,
+          minWidth: 72,
+        }}
+      >
+        {label}
+      </span>
+      <div style={{ minWidth: 0, wordBreak: "break-word" }}>{value}</div>
+    </div>
+  );
+}
+
+/**
+ * 阶段 4：「实际上游」内容块。观测为 null 时给 F4 文案（观测 14 天 < 日志 30 天，
+ * 超出保留期是「没命中」的常见原因），不做其它猜测。上游自报费用与 metapi 计费无关，
+ * 必须显式标注。fallback 只展示个数，名字放 <details> 里按需展开。
+ */
+function renderUpstreamObservationBody(
+  observation: ProxyLogUpstreamObservation | null | undefined,
+  keyPrefix: string,
+): React.ReactNode {
+  if (!observation) {
+    return (
+      <span style={{ color: "var(--color-text-muted)" }}>
+        未记录上游观测，可能超出保留期（观测默认保留 14 天，短于日志 30 天）
+      </span>
+    );
+  }
+
+  const fallbacks = Array.isArray(observation.fallbacks)
+    ? observation.fallbacks
+    : [];
+  const fallbackCount = observation.fallbackCount ?? fallbacks.length;
+  const affinityParts = [
+    observation.affinityOutcome
+      ? `结果 ${observation.affinityOutcome}`
+      : null,
+    observation.affinityPinnedProvider
+      ? `上游钉选 ${observation.affinityPinnedProvider}`
+      : null,
+  ].filter(Boolean);
+  const cacheParts = [
+    `hit ${observation.cacheHitTokens ?? "--"}`,
+    `miss ${observation.cacheMissTokens ?? "--"}`,
+    observation.systemFingerprint
+      ? `fingerprint ${observation.systemFingerprint}`
+      : null,
+  ].filter(Boolean);
+  const attemptNote = observation.attemptsTruncated
+    ? "（attempts 已截断存储）"
+    : "";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ color: "var(--color-text-muted)" }}>
+        上游自报，非 metapi 计费
+      </div>
+      {renderUpstreamObservationRow(
+        "提供方",
+        <span>
+          <strong style={{ color: "var(--color-text-primary)" }}>
+            {observation.finalProvider || "--"}
+          </strong>
+          {observation.resolvedProvider ? `（resolved ${observation.resolvedProvider}）` : ""}
+        </span>,
+        keyPrefix,
+      )}
+      {renderUpstreamObservationRow(
+        "规范模型",
+        observation.canonicalSlug ? (
+          <span>
+            {observation.canonicalSlug}
+            {observation.originalModelId &&
+            observation.originalModelId !== observation.canonicalSlug
+              ? `（原始 ${observation.originalModelId}）`
+              : ""}
+          </span>
+        ) : (
+          "--"
+        ),
+        keyPrefix,
+      )}
+      {renderUpstreamObservationRow(
+        "会话亲和",
+        <span>
+          {affinityParts.length > 0 ? affinityParts.join("、") : "--"}
+          {observation.clientSessionId ? (
+            <>
+              {affinityParts.length > 0 ? "；" : ""}
+              clientSession {observation.clientSessionId}
+              {observation.clientSessionIdSource
+                ? `（${observation.clientSessionIdSource}）`
+                : ""}
+            </>
+          ) : null}
+        </span>,
+        keyPrefix,
+      )}
+      {renderUpstreamObservationRow(
+        "Fallback",
+        fallbackCount > 0 ? (
+          <details>
+            <summary style={{ cursor: "pointer" }}>
+              {fallbackCount} 个（展开列名）
+            </summary>
+            <div>{fallbacks.length > 0 ? fallbacks.join("、") : "--"}</div>
+          </details>
+        ) : (
+          "0 个"
+        ),
+        keyPrefix,
+      )}
+      {renderUpstreamObservationRow("缓存", cacheParts.join(" / "), keyPrefix)}
+      {renderUpstreamObservationRow(
+        "上游成本",
+        <span>
+          {`usage.cost ${formatUpstreamCostNumber(observation.usageCost)} / gateway_cost ${formatUpstreamCostNumber(observation.usageGatewayCost)} / market_cost ${formatUpstreamCostNumber(observation.usageMarketCost)}`}
+          <br />
+          {`gateway.cost ${formatUpstreamCostText(observation.gatewayCostText)} / gateway.inferenceCost ${formatUpstreamCostText(observation.gatewayInferenceCostText)}`}
+        </span>,
+        keyPrefix,
+      )}
+      {renderUpstreamObservationRow(
+        "Generation",
+        observation.gatewayGenerationId || "--",
+        keyPrefix,
+      )}
+      {renderUpstreamObservationRow(
+        "Attempts",
+        `${observation.modelAttemptCount ?? "--"} 个模型 / ${observation.totalProviderAttemptCount ?? "--"} 次 provider 尝试${attemptNote}`,
+        keyPrefix,
+      )}
+    </div>
+  );
+}
+
 function normalizeProxyDebugSettings(value: any): ProxyDebugSettingsState {
   return {
     proxyDebugTraceEnabled: !!value?.proxyDebugTraceEnabled,
@@ -590,6 +783,16 @@ function normalizeProxyDebugSettings(value: any): ProxyDebugSettingsState {
     proxyDebugTargetModel: String(value?.proxyDebugTargetModel || ""),
     proxyDebugRetentionHours: Number(value?.proxyDebugRetentionHours || 24),
     proxyDebugMaxBodyBytes: Number(value?.proxyDebugMaxBodyBytes || 262144),
+    upstreamProviderDetectEnabled: !!value?.upstreamProviderDetectEnabled,
+    upstreamProviderDetectSampleRate: normalizeUpstreamSampleRateInput(
+      value?.upstreamProviderDetectSampleRate,
+    ),
+    upstreamProviderDetectRetentionDays: normalizeUpstreamRetentionDaysInput(
+      value?.upstreamProviderDetectRetentionDays,
+    ),
+    upstreamProviderDetectPlatforms: normalizeUpstreamPlatformsInput(
+      value?.upstreamProviderDetectPlatforms,
+    ),
   };
 }
 
@@ -612,6 +815,14 @@ function buildProxyDebugSettingsPayload(
       1024,
       Math.trunc(Number(settings.proxyDebugMaxBodyBytes || 262144)),
     ),
+    upstreamProviderDetectEnabled: settings.upstreamProviderDetectEnabled,
+    upstreamProviderDetectSampleRate: normalizeUpstreamSampleRateInput(
+      settings.upstreamProviderDetectSampleRate,
+    ),
+    upstreamProviderDetectRetentionDays: normalizeUpstreamRetentionDaysInput(
+      settings.upstreamProviderDetectRetentionDays,
+    ),
+    upstreamProviderDetectPlatforms: settings.upstreamProviderDetectPlatforms.trim(),
   };
 }
 
@@ -810,6 +1021,17 @@ export default function ProxyLogs() {
   const [debugDetailById, setDebugDetailById] = useState<
     Record<number, ProxyDebugTraceDetailState>
   >({});
+  const [upstreamPanelExpanded, setUpstreamPanelExpanded] = useState(false);
+  const [upstreamPanelLoading, setUpstreamPanelLoading] = useState(false);
+  const [upstreamPanelError, setUpstreamPanelError] = useState<string | null>(
+    null,
+  );
+  const [upstreamDistribution, setUpstreamDistribution] = useState<
+    UpstreamProviderDistributionItem[]
+  >([]);
+  const [upstreamFallbackGroups, setUpstreamFallbackGroups] = useState<
+    UpstreamProviderFallbackGroup[]
+  >([]);
   const isMobile = useIsMobile(768);
   const toast = useToast();
   const loadSeq = useRef(0);
@@ -1359,6 +1581,53 @@ export default function ProxyLogs() {
       },
     );
   }, [debugSettings, persistDebugSettings]);
+
+  // 上游分布面板沿用当前页筛选（站点/模型/时间），服务端把窗口封顶到 7 天（F3）；
+  // 只在面板展开后请求，失败只 toast + 行内错误，不白屏。
+  const loadUpstreamDistribution = useCallback(async () => {
+    if (hasInvalidTimeRange) {
+      setUpstreamDistribution([]);
+      setUpstreamFallbackGroups([]);
+      setUpstreamPanelError("时间范围无效，未查询上游分布");
+      return;
+    }
+    setUpstreamPanelLoading(true);
+    setUpstreamPanelError(null);
+    try {
+      const params = {
+        ...(siteFilter ? { siteId: siteFilter } : {}),
+        ...(deferredSearchInput ? { model: deferredSearchInput } : {}),
+        ...(fromApiBoundary ? { from: fromApiBoundary } : {}),
+        ...(toApiBoundaryValue ? { to: toApiBoundaryValue } : {}),
+      };
+      const [distribution, fallbacks] = await Promise.all([
+        api.getUpstreamObservationDistribution(params),
+        api.getUpstreamObservationFallbacks(params),
+      ]);
+      setUpstreamDistribution(Array.isArray(distribution) ? distribution : []);
+      setUpstreamFallbackGroups(
+        Array.isArray(fallbacks?.items) ? fallbacks.items : [],
+      );
+    } catch (error: any) {
+      const message = error?.message || "加载上游分布失败";
+      setUpstreamPanelError(message);
+      toast.error(message);
+    } finally {
+      setUpstreamPanelLoading(false);
+    }
+  }, [
+    deferredSearchInput,
+    fromApiBoundary,
+    hasInvalidTimeRange,
+    siteFilter,
+    toApiBoundaryValue,
+    toast,
+  ]);
+
+  useEffect(() => {
+    if (!upstreamPanelExpanded) return;
+    void loadUpstreamDistribution();
+  }, [loadUpstreamDistribution, upstreamPanelExpanded]);
 
   const handleToggleExpand = useCallback(
     (id: number) => {
@@ -2009,6 +2278,109 @@ export default function ProxyLogs() {
         </div>
       </ResponsiveFormGrid>
 
+      <div style={formSectionStyle}>
+        <div style={formSectionLabelStyle}>上游探测（Cline 网关）</div>
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ display: "grid", gap: 4 }}>
+            <label style={debugCheckboxRowStyle}>
+              <input
+                type="checkbox"
+                checked={debugDraftSettings.upstreamProviderDetectEnabled}
+                data-upstream-setting="detect-enabled"
+                onChange={(e) =>
+                  setDebugDraftSettings((current) => ({
+                    ...current,
+                    upstreamProviderDetectEnabled: !!e.target.checked,
+                  }))
+                }
+              />
+              开启上游探测
+            </label>
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--color-text-muted)",
+                marginLeft: 24,
+              }}
+            >
+              只对命中站点后缀的请求解析 Cline provider_metadata，写入独立观测表；不改下游字节，不参与计费。
+            </div>
+          </div>
+          <ResponsiveFormGrid columns={2}>
+            <label style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                采样率（0–1，1 = 全量）
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.1}
+                value={debugDraftSettings.upstreamProviderDetectSampleRate}
+                data-upstream-setting="detect-sample-rate"
+                onChange={(e) =>
+                  setDebugDraftSettings((current) => ({
+                    ...current,
+                    upstreamProviderDetectSampleRate: Number(e.target.value),
+                  }))
+                }
+                style={formInputStyle}
+              />
+            </label>
+            <label style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                观测保留天数（0 = 不清理）
+              </span>
+              <input
+                type="number"
+                min={0}
+                value={debugDraftSettings.upstreamProviderDetectRetentionDays}
+                data-upstream-setting="detect-retention-days"
+                onChange={(e) =>
+                  setDebugDraftSettings((current) => ({
+                    ...current,
+                    upstreamProviderDetectRetentionDays: Number(
+                      e.target.value || 0,
+                    ),
+                  }))
+                }
+                style={formInputStyle}
+              />
+            </label>
+          </ResponsiveFormGrid>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+              站点后缀（逗号分隔）
+            </span>
+            <input
+              type="text"
+              value={debugDraftSettings.upstreamProviderDetectPlatforms}
+              data-upstream-setting="detect-platforms"
+              onChange={(e) =>
+                setDebugDraftSettings((current) => ({
+                  ...current,
+                  upstreamProviderDetectPlatforms: e.target.value,
+                }))
+              }
+              placeholder="cline.bot"
+              style={formInputStyle}
+            />
+          </label>
+          {debugDraftSettings.upstreamProviderDetectPlatforms.trim().length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--color-warning)" }}>
+              后缀留空 = 不收集任何站点（即使总开关开启）。
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+              只有站点 URL 的 host 命中这些后缀或其子域名才会收集（api.cline.bot 命中 cline.bot）。
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+            观测默认保留 14 天（短于日志 30 天）；请求详情按 ±2s 唯一匹配，对不上不猜测。
+          </div>
+        </div>
+      </div>
+
       {isMobile ? debugSettingsFooter : null}
     </div>
   );
@@ -2510,6 +2882,256 @@ export default function ProxyLogs() {
         </div>
       </div>
 
+      <div
+        className="card"
+        style={{
+          marginBottom: 12,
+          padding: 14,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: "var(--color-text-primary)",
+              }}
+            >
+              上游分布
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--color-text-muted)",
+                marginTop: 4,
+              }}
+            >
+              上游自报，非 metapi 计费；按当前筛选（站点/模型/时间）查询，默认最近 7 天。采样率{" "}
+              {debugSettings.upstreamProviderDetectSampleRate}
+              （数值为观测数，非全量请求数）。
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: "1px solid var(--color-border)" }}
+              aria-expanded={upstreamPanelExpanded}
+              data-upstream-panel-toggle
+              onClick={() => setUpstreamPanelExpanded((current) => !current)}
+            >
+              {upstreamPanelExpanded ? "收起分布面板" : "展开分布面板"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: "1px solid var(--color-border)" }}
+              onClick={() => void loadUpstreamDistribution()}
+              disabled={upstreamPanelLoading}
+            >
+              {upstreamPanelLoading ? "刷新中..." : "刷新分布"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        className={`anim-collapse ${upstreamPanelExpanded ? "is-open" : ""}`.trim()}
+        data-upstream-panel-body
+        style={{ marginBottom: upstreamPanelExpanded ? 12 : 0 }}
+      >
+        <div className="anim-collapse-inner">
+          <div className="card" style={{ padding: 12 }}>
+            {upstreamPanelLoading ? (
+              <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                加载上游分布中...
+              </div>
+            ) : upstreamPanelError ? (
+              <div className="alert alert-error" style={{ marginBottom: 0 }}>
+                {upstreamPanelError}
+              </div>
+            ) : (
+              <>
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-text-primary)",
+                    marginBottom: 8,
+                  }}
+                >
+                  提供方分布（按观测数排序，共{" "}
+                  {upstreamDistribution.reduce(
+                    (sum, item) => sum + item.requests,
+                    0,
+                  )}{" "}
+                  次观测）
+                </div>
+                {upstreamDistribution.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                    当前筛选下暂无观测（需在调试设置里开启上游探测，且窗口内未超出观测保留期）。
+                  </div>
+                ) : isMobile ? (
+                  <div className="mobile-card-list">
+                    {upstreamDistribution.map((item) => (
+                      <MobileCard
+                        key={`upstream-provider-${item.provider}`}
+                        title={item.provider}
+                        compact
+                      >
+                        <MobileField label="观测数" value={item.requests} />
+                        <MobileField
+                          label="缓存命中"
+                          value={item.cacheHitTokens.toLocaleString()}
+                        />
+                        <MobileField
+                          label="缓存未命中"
+                          value={item.cacheMissTokens.toLocaleString()}
+                        />
+                      </MobileCard>
+                    ))}
+                  </div>
+                ) : (
+                  <table className="data-table" style={{ width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th>提供方</th>
+                        <th style={{ textAlign: "right" }}>观测数</th>
+                        <th style={{ textAlign: "right" }}>缓存命中</th>
+                        <th style={{ textAlign: "right" }}>缓存未命中</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {upstreamDistribution.map((item) => (
+                        <tr key={`upstream-provider-${item.provider}`}>
+                          <td style={{ fontSize: 12, fontWeight: 600 }}>
+                            {item.provider}
+                          </td>
+                          <td
+                            style={{
+                              textAlign: "right",
+                              fontSize: 12,
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {item.requests}
+                          </td>
+                          <td
+                            style={{
+                              textAlign: "right",
+                              fontSize: 12,
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {item.cacheHitTokens.toLocaleString()}
+                          </td>
+                          <td
+                            style={{
+                              textAlign: "right",
+                              fontSize: 12,
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {item.cacheMissTokens.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-text-primary)",
+                    margin: "14px 0 8px",
+                  }}
+                >
+                  当前渠道清单（每个站点/模型/规范模型取窗口内最新一条，不跨行并集）
+                </div>
+                {upstreamFallbackGroups.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                    暂无渠道清单（观测未携带 fallbacks 数据）。
+                  </div>
+                ) : isMobile ? (
+                  <div className="mobile-card-list">
+                    {upstreamFallbackGroups.map((group) => (
+                      <MobileCard
+                        key={`upstream-fallback-${group.siteId ?? "na"}-${group.requestedModel ?? "na"}-${group.canonicalSlug ?? "na"}`}
+                        title={
+                          group.canonicalSlug || group.requestedModel || "未知模型"
+                        }
+                        subtitle={`站点 ${group.siteId ?? "--"} · ${formatDateTimeLocal(group.latestCreatedAt)}`}
+                        compact
+                      >
+                        <MobileField
+                          label="实际上游"
+                          value={group.finalProvider || "--"}
+                        />
+                        <MobileField
+                          label="渠道数"
+                          value={
+                            group.fallbackCount ??
+                            (group.fallbacks ? group.fallbacks.length : 0)
+                          }
+                        />
+                        <MobileField
+                          label="渠道"
+                          stacked
+                          value={
+                            group.fallbacks && group.fallbacks.length > 0
+                              ? group.fallbacks.join("、")
+                              : "--"
+                          }
+                        />
+                      </MobileCard>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {upstreamFallbackGroups.map((group) => (
+                      <div
+                        key={`upstream-fallback-${group.siteId ?? "na"}-${group.requestedModel ?? "na"}-${group.canonicalSlug ?? "na"}`}
+                        style={{ fontSize: 12 }}
+                      >
+                        <div>
+                          <strong>
+                            {group.canonicalSlug ||
+                              group.requestedModel ||
+                              "未知模型"}
+                          </strong>
+                          <span style={{ color: "var(--color-text-muted)" }}>
+                            {` · 站点 ${group.siteId ?? "--"} · ${group.finalProvider ?? "--"} · ${formatDateTimeLocal(group.latestCreatedAt)}`}
+                          </span>
+                        </div>
+                        <div style={{ color: "var(--color-text-muted)" }}>
+                          {group.fallbacks && group.fallbacks.length > 0
+                            ? group.fallbacks.join("、")
+                            : "--"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
       {isMobile ? (
         <MobileDrawer
           open={showDebugSettingsModal}
@@ -2782,6 +3404,16 @@ export default function ProxyLogs() {
                           includeGeneric: true,
                         })}
                       />
+                      {detail ? (
+                        <MobileField
+                          label="实际上游"
+                          stacked
+                          value={renderUpstreamObservationBody(
+                            detail.upstreamObservation,
+                            `mobile-${log.id}`,
+                          )}
+                        />
+                      ) : null}
                       {downstreamKeySummary && (
                         <div style={{ color: "var(--color-text-muted)" }}>
                           {downstreamKeySummary}
@@ -3457,6 +4089,32 @@ export default function ProxyLogs() {
                                     </span>
                                   )}
                                 </div>
+
+                                {detail && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      gap: 6,
+                                      alignItems: "flex-start",
+                                    }}
+                                  >
+                                    <span
+                                      style={{
+                                        fontWeight: 600,
+                                        color: "var(--color-info)",
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      实际上游
+                                    </span>
+                                    <div style={{ minWidth: 0 }}>
+                                      {renderUpstreamObservationBody(
+                                        detail.upstreamObservation,
+                                        `desktop-${log.id}`,
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
 
                                 {detail &&
                                   pathMeta.errorMessage.trim().length > 0 && (

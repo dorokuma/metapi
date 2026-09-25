@@ -24,6 +24,11 @@ import {
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
+import {
+  createUpstreamProviderObservationCollector,
+  observeUpstreamProviderObservationSseText,
+} from '../../services/upstreamProviderDetect/collect.js';
+import { persistUpstreamProviderObservation } from '../../services/upstreamProviderDetect/store.js';
 import { getProxyAuthContext, getProxyResourceOwner } from '../../middleware/auth.js';
 import { normalizeInputFileBlock } from '../../transformers/shared/inputFile.js';
 import { promoteRequiredEndpointCandidateAfterProtocolError } from '../../transformers/shared/endpointCompatibility.js';
@@ -400,6 +405,28 @@ export async function handleOpenAiResponsesSurfaceRequest(
       });
 
       const modelName = selected.actualModel || requestedModel;
+      // 上游探测旁路：只在主开关 + 站点 host 后缀 + 采样都命中时收集；
+      // 收集器随重试 attempt 作用域创建（B2），attempt 内的观测不会泄漏到下一次成功的日志；
+      // 写入发生在成功日志之后，成功日志写失败则不写观测（C4 同生共死，与 chat 面一致）；
+      // persist 自身不抛，不影响转发字节与状态码。
+      const upstreamObservationCollector = createUpstreamProviderObservationCollector({
+        requestId: String(request.id ?? ''),
+        siteUrl: selected.site.url,
+      });
+      const persistUpstreamObservation = async (streamRequest: boolean, upstreamPath: string | null) => {
+        await persistUpstreamProviderObservation({
+          observation: upstreamObservationCollector.snapshot(),
+          siteId: selected.site.id,
+          accountId: selected.account.id,
+          routeId: selected.channel.routeId ?? null,
+          channelId: selected.channel.id,
+          downstreamApiKeyId,
+          requestedModel,
+          actualModel: modelName,
+          upstreamPath,
+          isStream: streamRequest,
+        });
+      };
       const oauth = getOauthInfoFromAccount(selected.account);
       const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
       const codexSessionId = isCodexSite
@@ -892,6 +919,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 errorLabel: '[responses] post-stream bookkeeping failed:',
               },
             });
+            await persistUpstreamObservation(true, successfulUpstreamPath);
           } catch (error) {
             console.error('[responses] post-stream success logging failed:', error);
           }
@@ -938,6 +966,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 if (codexSessionStoreKey) {
                   rememberCodexSessionResponseId(codexSessionStoreKey, payload);
                 }
+                upstreamObservationCollector.observe(payload);
               }
             },
             writeLines,
@@ -1093,6 +1122,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
             if (looksLikeResponsesSseText(rawText)) {
               try {
                 const collectedPayload = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
+                upstreamObservationCollector.observe(collectedPayload);
+                // B4: also scan the raw SSE frames; the rebuilt payload drops
+                // chat-shaped `choices[].delta.provider_metadata`.
+                observeUpstreamProviderObservationSseText(upstreamObservationCollector, rawText);
                 upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(collectedPayload);
                 parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(collectedPayload));
                 const createdPayload = {
@@ -1254,10 +1287,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
           rawText = collected.rawText;
           upstreamData = collected.payload;
+          // B4: the rebuilt payload is SSE-aggregated, not a chat-shaped body;
+          // scan the raw frames so provider_metadata is still observed.
+          observeUpstreamProviderObservationSseText(upstreamObservationCollector, rawText);
         } else {
           rawText = await readRuntimeResponseText(upstream);
           if (looksLikeResponsesSseText(rawText)) {
             upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
+            observeUpstreamProviderObservationSseText(upstreamObservationCollector, rawText);
           } else {
             upstreamData = rawText;
             try {
@@ -1276,6 +1313,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         const latency = Date.now() - startTime;
         const parsedUsage = parseProxyUsage(upstreamData);
         const upstreamUsagePresent = hasProxyUsagePayload(upstreamData);
+        upstreamObservationCollector.observe(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
 	        if (failure) {
 	          clearSurfaceStickyChannel({
@@ -1343,6 +1381,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               errorLabel: '[responses] post-response bookkeeping failed:',
             },
           });
+            await persistUpstreamObservation(false, successfulUpstreamPath);
 	        } catch (error) {
 	          console.error('[responses] post-response success logging failed:', error);
 	        }

@@ -380,6 +380,10 @@ export type RuntimeSettingsPayload = {
   proxyDebugTargetModel?: string;
   proxyDebugRetentionHours?: number;
   proxyDebugMaxBodyBytes?: number;
+  upstreamProviderDetectEnabled?: boolean;
+  upstreamProviderDetectSampleRate?: number;
+  upstreamProviderDetectRetentionDays?: number;
+  upstreamProviderDetectPlatforms?: string[] | string;
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;
@@ -491,6 +495,109 @@ export type ProxyLogDetail = ProxyLogListItem & {
   channelId?: number | null;
   httpStatus?: number | null;
   billingDetails?: ProxyLogBillingDetails;
+  /** 阶段 3：详情末尾追加的上游观测；null = 未记录/无法唯一匹配（不猜）。 */
+  upstreamObservation?: ProxyLogUpstreamObservation | null;
+};
+
+export type ProxyLogUpstreamObservation = {
+  id: number;
+  createdAt: string;
+  proxyLogId: number | null;
+  siteId: number | null;
+  accountId: number | null;
+  routeId: number | null;
+  channelId: number | null;
+  downstreamApiKeyId: number | null;
+  requestedModel: string | null;
+  actualModel: string | null;
+  upstreamPath: string | null;
+  isStream: boolean | null;
+  parserId: string;
+  parserVersion: number;
+  finalProvider: string | null;
+  resolvedProvider: string | null;
+  canonicalSlug: string | null;
+  originalModelId: string | null;
+  affinityOutcome: string | null;
+  affinityPinnedProvider: string | null;
+  clientSessionId: string | null;
+  clientSessionIdSource: string | null;
+  fallbacks: string[] | null;
+  fallbackCount: number | null;
+  modelAttempts: Array<{
+    canonicalSlug: string | null;
+    success: boolean | null;
+    providerAttemptCount: number | null;
+    providers: Array<{
+      provider: string | null;
+      credentialType: string | null;
+      statusCode: number | null;
+      success: boolean | null;
+    }>;
+  }> | null;
+  attemptsTruncated: boolean;
+  modelAttemptCount: number | null;
+  totalProviderAttemptCount: number | null;
+  cacheHitTokens: number | null;
+  cacheMissTokens: number | null;
+  systemFingerprint: string | null;
+  usageCost: number | null;
+  usageGatewayCost: number | null;
+  usageMarketCost: number | null;
+  gatewayCostText: string | null;
+  gatewayInferenceCostText: string | null;
+  gatewayGenerationId: string | null;
+};
+
+export type UpstreamObservationQueryParams = {
+  siteId?: number;
+  model?: string;
+  from?: string;
+  to?: string;
+};
+
+export type UpstreamProviderDistributionItem = {
+  provider: string;
+  requests: number;
+  cacheHitTokens: number;
+  cacheMissTokens: number;
+};
+
+export type UpstreamProviderFallbackGroup = {
+  siteId: number | null;
+  requestedModel: string | null;
+  canonicalSlug: string | null;
+  finalProvider: string | null;
+  latestCreatedAt: string;
+  fallbacks: string[] | null;
+  fallbackCount: number | null;
+};
+
+export type UpstreamProviderFallbacksResponse = {
+  items: UpstreamProviderFallbackGroup[];
+  truncated: boolean;
+};
+
+export type UpstreamProviderSessionItem = {
+  id: number;
+  createdAt: string;
+  siteId: number | null;
+  accountId: number | null;
+  routeId: number | null;
+  channelId: number | null;
+  requestedModel: string | null;
+  finalProvider: string | null;
+  canonicalSlug: string | null;
+  affinityOutcome: string | null;
+  affinityPinnedProvider: string | null;
+  cacheHitTokens: number | null;
+  cacheMissTokens: number | null;
+};
+
+export type UpstreamProviderSessionResponse = {
+  clientSessionId: string;
+  count: number;
+  items: UpstreamProviderSessionItem[];
 };
 
 export type ProxyLogsSummary = {
@@ -1087,6 +1194,19 @@ export const api = {
   },
   getProxyLogDetail: (id: number) =>
     request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
+  // 阶段 3：上游观测聚合读取（只增不改既有方法）
+  getUpstreamObservationDistribution: (params?: UpstreamObservationQueryParams) =>
+    request(
+      `/api/stats/upstream-observations/distribution${buildQueryString(params)}`,
+    ) as Promise<UpstreamProviderDistributionItem[]>,
+  getUpstreamObservationFallbacks: (params?: UpstreamObservationQueryParams) =>
+    request(
+      `/api/stats/upstream-observations/fallbacks${buildQueryString(params)}`,
+    ) as Promise<UpstreamProviderFallbacksResponse>,
+  getUpstreamObservationSession: (clientSessionId: string) =>
+    request(
+      `/api/stats/upstream-observations/sessions${buildQueryString({ clientSessionId })}`,
+    ) as Promise<UpstreamProviderSessionResponse>,
   getProxyDebugTraces: (params?: { limit?: number }) =>
     request(
       `/api/stats/proxy-debug/traces${buildQueryString(params)}`,

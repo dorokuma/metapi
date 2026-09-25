@@ -144,6 +144,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     proxyDebugTargetModel: (env.PROXY_DEBUG_TARGET_MODEL || '').trim(),
     proxyDebugRetentionHours: Math.max(1, Math.trunc(parseNumber(env.PROXY_DEBUG_RETENTION_HOURS, 24))),
     proxyDebugMaxBodyBytes: Math.max(1024, Math.trunc(parseNumber(env.PROXY_DEBUG_MAX_BODY_BYTES, 262_144))),
+    upstreamProviderDetectEnabled: parseBoolean(env.UPSTREAM_PROVIDER_DETECT_ENABLED, false),
+    upstreamProviderDetectSampleRate: Math.min(1, Math.max(0, parseNumber(env.UPSTREAM_PROVIDER_DETECT_SAMPLE_RATE, 1))),
+    upstreamProviderDetectRetentionDays: Math.max(0, Math.trunc(parseNumber(env.UPSTREAM_PROVIDER_DETECT_RETENTION_DAYS, 14))),
+    upstreamProviderDetectPlatforms: env.UPSTREAM_PROVIDER_DETECT_PLATFORMS === undefined
+      ? ['cline.bot']
+      : parseCsvList(env.UPSTREAM_PROVIDER_DETECT_PLATFORMS),
     openAiServiceTierRules: parseJsonValue(env.OPENAI_SERVICE_TIER_RULES_JSON || env.OPENAI_SERVICE_TIER_RULES),
     modelAvailabilityProbeEnabled: parseBoolean(env.MODEL_AVAILABILITY_PROBE_ENABLED, false),
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),

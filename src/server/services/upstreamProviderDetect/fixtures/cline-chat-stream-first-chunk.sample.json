@@ -1,0 +1,17 @@
+{
+  "id": "gen_01M3BM0EVD723255539TXJAGCC",
+  "object": "chat.completion.chunk",
+  "created": 1790317706,
+  "model": "deepseek/deepseek-v4.1-flash",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant"
+      },
+      "logprobs": null,
+      "finish_reason": null
+    }
+  ],
+  "system_fingerprint": "fp_6c0f5z76em"
+}

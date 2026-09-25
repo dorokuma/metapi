@@ -11,6 +11,7 @@ import { accountsRoutes } from './routes/api/accounts.js';
 import { checkinRoutes } from './routes/api/checkin.js';
 import { tokensRoutes } from './routes/api/tokens.js';
 import { statsRoutes } from './routes/api/stats.js';
+import { upstreamObservationsRoutes } from './routes/api/upstreamObservations.js';
 import { authRoutes } from './routes/api/auth.js';
 import { settingsRoutes } from './routes/api/settings.js';
 import { accountTokensRoutes } from './routes/api/accountTokens.js';
@@ -27,6 +28,10 @@ import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler } from './services/checkinScheduler.js';
 import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
+import {
+  startUpstreamProviderObservationPruneScheduler,
+  stopUpstreamProviderObservationPruneScheduler,
+} from './services/upstreamProviderDetect/pruneScheduler.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
@@ -234,6 +239,7 @@ await app.register(accountsRoutes);
 await app.register(checkinRoutes);
 await app.register(tokensRoutes);
 await app.register(statsRoutes);
+await app.register(upstreamObservationsRoutes);
 await app.register(authRoutes);
 await app.register(settingsRoutes);
 await app.register(accountTokensRoutes);
@@ -294,11 +300,13 @@ try {
 }
 setLegacyProxyLogRetentionFallbackEnabled(!config.logCleanupConfigured);
 startProxyFileRetentionService();
+startUpstreamProviderObservationPruneScheduler();
 app.addHook('onClose', async () => {
   stopSiteAnnouncementPolling();
   stopUpdateCenterPolling();
   stopProxyFileRetentionService();
   stopProxyLogRetentionService();
+  stopUpstreamProviderObservationPruneScheduler();
   stopModelAvailabilityProbeScheduler();
   stopChannelRecoveryProbeScheduler();
   await stopUsageAggregationProjectorScheduler();

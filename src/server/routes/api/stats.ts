@@ -31,6 +31,7 @@ import {
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
 } from "../../services/proxyLogStore.js";
+import { findUpstreamProviderObservationForProxyLog } from "../../services/upstreamProviderDetect/query.js";
 import {
   getProxyDebugTraceDetail,
   listProxyDebugTraces,
@@ -1028,7 +1029,41 @@ export async function statsRoutes(app: FastifyInstance) {
         return reply.code(404).send({ message: "proxy log not found" });
       }
 
-      return mapProxyLogRow(row, { includeBillingDetails: true });
+      const detail = mapProxyLogRow(row, { includeBillingDetails: true });
+      // 上游探测（阶段 3）：详情末尾追加一条可空观测。仅 success 日志参与匹配
+      // （观测只随成功日志产生（C4），失败日志不得借展示邻居上游）；±2s 唯一命中才返回，
+      // 0 条 / 多条都返回 null（不猜），metrics 埋点在 query 模块内。
+      const upstreamObservationMatch = await findUpstreamProviderObservationForProxyLog({
+        accountId:
+          typeof row.proxy_logs.accountId === "number"
+            ? row.proxy_logs.accountId
+            : null,
+        channelId:
+          typeof row.proxy_logs.channelId === "number"
+            ? row.proxy_logs.channelId
+            : null,
+        requestedModel:
+          typeof row.proxy_logs.modelRequested === "string"
+            ? row.proxy_logs.modelRequested
+            : null,
+        createdAt:
+          typeof row.proxy_logs.createdAt === "string"
+            ? row.proxy_logs.createdAt
+            : null,
+        isStream:
+          row.proxy_logs.isStream == null
+            ? null
+            : Boolean(row.proxy_logs.isStream),
+        status:
+          typeof row.proxy_logs.status === "string"
+            ? row.proxy_logs.status
+            : null,
+      });
+
+      return {
+        ...detail,
+        upstreamObservation: upstreamObservationMatch.observation,
+      };
     },
   );
 

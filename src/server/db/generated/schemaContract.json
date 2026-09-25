@@ -2295,6 +2295,232 @@
           "primaryKey": false
         }
       }
+    },
+    "upstream_provider_observations": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "proxy_log_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "route_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "channel_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "downstream_api_key_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "requested_model": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "actual_model": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "upstream_path": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "is_stream": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "parser_id": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'cline-gateway'",
+          "primaryKey": false
+        },
+        "parser_version": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "1",
+          "primaryKey": false
+        },
+        "final_provider": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "resolved_provider": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "canonical_slug": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "original_model_id": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "affinity_outcome": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "affinity_pinned_provider": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "client_session_id": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "client_session_id_source": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fallbacks_json": {
+          "logicalType": "json",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fallback_count": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_attempts_json": {
+          "logicalType": "json",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "attempts_truncated": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "model_attempt_count": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "total_provider_attempt_count": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "cache_hit_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "cache_miss_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "system_fingerprint": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "usage_cost": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "usage_gateway_cost": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "usage_market_cost": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "gateway_cost_text": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "gateway_inference_cost_text": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "gateway_generation_id": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
     }
   },
   "indexes": [
@@ -3011,6 +3237,51 @@
       "table": "token_routes",
       "columns": [
         "model_pattern"
+      ],
+      "unique": false
+    },
+    {
+      "name": "upstream_provider_obs_created_idx",
+      "table": "upstream_provider_observations",
+      "columns": [
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "upstream_provider_obs_model_provider_created_idx",
+      "table": "upstream_provider_observations",
+      "columns": [
+        "requested_model",
+        "final_provider",
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "upstream_provider_obs_proxy_log_idx",
+      "table": "upstream_provider_observations",
+      "columns": [
+        "proxy_log_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "upstream_provider_obs_session_created_idx",
+      "table": "upstream_provider_observations",
+      "columns": [
+        "client_session_id",
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "upstream_provider_obs_site_provider_created_idx",
+      "table": "upstream_provider_observations",
+      "columns": [
+        "site_id",
+        "final_provider",
+        "created_at"
       ],
       "unique": false
     }

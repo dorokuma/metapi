@@ -24,6 +24,11 @@ import {
 } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
+import {
+  createUpstreamProviderObservationCollector,
+  observeUpstreamProviderObservationSseText,
+} from '../../services/upstreamProviderDetect/collect.js';
+import { persistUpstreamProviderObservation } from '../../services/upstreamProviderDetect/store.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
 import { shouldPreferResponsesForAnthropicContinuation } from '../../transformers/anthropic/messages/compatibility.js';
@@ -446,6 +451,27 @@ export async function handleChatSurfaceRequest(
 
     const modelName = selected.actualModel || requestedModel;
     const oauth = getOauthInfoFromAccount(selected.account);
+    // 上游探测旁路：只在主开关 + 站点 host 后缀 + 采样都命中时收集；
+    // 收集器随重试 attempt 作用域创建（B2），attempt 内的观测不会泄漏到下一次成功的日志；
+    // 写入发生在成功日志之后，失败只 warn，不影响转发字节与状态码。
+    const upstreamObservationCollector = createUpstreamProviderObservationCollector({
+      requestId: String(request.id ?? ''),
+      siteUrl: selected.site.url,
+    });
+    const persistUpstreamObservation = async (streamRequest: boolean, upstreamPath: string | null) => {
+      await persistUpstreamProviderObservation({
+        observation: upstreamObservationCollector.snapshot(),
+        siteId: selected.site.id,
+        accountId: selected.account.id,
+        routeId: selected.channel.routeId ?? null,
+        channelId: selected.channel.id,
+        downstreamApiKeyId,
+        requestedModel,
+        actualModel: modelName,
+        upstreamPath,
+        isStream: streamRequest,
+      });
+    };
     const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
     let endpointCandidates = [
       ...await resolveUpstreamEndpointCandidates(
@@ -774,6 +800,7 @@ export async function handleChatSurfaceRequest(
               errorLabel: '[proxy/chat] failed to record success metrics',
             },
           });
+          await persistUpstreamObservation(true, successfulUpstreamPath);
         };
 
         const writeLines = (lines: string[]) => {
@@ -802,6 +829,7 @@ export async function handleChatSurfaceRequest(
             if (payload && typeof payload === 'object') {
               upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(payload);
               parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
+              upstreamObservationCollector.observe(payload);
             }
           },
           onEventParsed: (payload) => {
@@ -1151,10 +1179,14 @@ export async function handleChatSurfaceRequest(
         const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
         rawText = collected.rawText;
         upstreamData = collected.payload;
+        // B4: the rebuilt payload is SSE-aggregated, not a chat-shaped body;
+        // scan the raw frames so provider_metadata is still observed.
+        observeUpstreamProviderObservationSseText(upstreamObservationCollector, rawText);
       } else {
         rawText = await readRuntimeResponseText(upstream);
         if (looksLikeResponsesSseText(rawText)) {
           upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
+          observeUpstreamProviderObservationSseText(upstreamObservationCollector, rawText);
         } else {
           upstreamData = rawText;
           try {
@@ -1189,6 +1221,7 @@ export async function handleChatSurfaceRequest(
       const latency = Date.now() - startTime;
       const parsedUsage = parseProxyUsage(upstreamData);
       const upstreamUsagePresent = hasProxyUsagePayload(upstreamData);
+      upstreamObservationCollector.observe(upstreamData);
       const failure = detectProxyFailure({ rawText, usage: parsedUsage });
       if (failure) {
         clearSurfaceStickyChannel({
@@ -1249,6 +1282,7 @@ export async function handleChatSurfaceRequest(
           errorLabel: '[proxy/chat] failed to record success metrics',
         },
       });
+      await persistUpstreamObservation(false, successfulUpstreamPath);
       await finalizeDebugSuccess(
         upstream.status,
         successfulUpstreamPath,

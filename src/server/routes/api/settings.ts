@@ -54,6 +54,7 @@ import {
   saveNotificationTemplates,
 } from '../../services/notificationTemplates.js';
 import { DAILY_SUMMARY_TEMPLATE_VARIABLES } from '../../services/dailySummaryService.js';
+import { normalizeUpstreamProviderDetectPlatforms } from '../../services/upstreamProviderDetect/gate.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -77,6 +78,10 @@ interface RuntimeSettingsBody {
   proxyDebugTargetModel?: string;
   proxyDebugRetentionHours?: number;
   proxyDebugMaxBodyBytes?: number;
+  upstreamProviderDetectEnabled?: boolean;
+  upstreamProviderDetectSampleRate?: number;
+  upstreamProviderDetectRetentionDays?: number;
+  upstreamProviderDetectPlatforms?: string[] | string;
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
@@ -530,6 +535,27 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.proxyDebugMaxBodyBytes = Math.trunc(maxBodyBytes);
       return;
     }
+    case 'upstream_provider_detect_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.upstreamProviderDetectEnabled = value;
+      return;
+    }
+    case 'upstream_provider_detect_sample_rate': {
+      const sampleRate = Number(value);
+      if (!Number.isFinite(sampleRate)) return;
+      config.upstreamProviderDetectSampleRate = Math.min(1, Math.max(0, sampleRate));
+      return;
+    }
+    case 'upstream_provider_detect_retention_days': {
+      const retentionDays = Number(value);
+      if (!Number.isFinite(retentionDays) || retentionDays < 0) return;
+      config.upstreamProviderDetectRetentionDays = Math.trunc(retentionDays);
+      return;
+    }
+    case 'upstream_provider_detect_platforms': {
+      config.upstreamProviderDetectPlatforms = normalizeUpstreamProviderDetectPlatforms(value);
+      return;
+    }
     case 'proxy_empty_content_fail_enabled': {
       try {
         config.proxyEmptyContentFailEnabled = parseBooleanFlag(value, '空内容判定失败开关');
@@ -757,6 +783,10 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyDebugTargetModel: config.proxyDebugTargetModel,
     proxyDebugRetentionHours: config.proxyDebugRetentionHours,
     proxyDebugMaxBodyBytes: config.proxyDebugMaxBodyBytes,
+    upstreamProviderDetectEnabled: config.upstreamProviderDetectEnabled,
+    upstreamProviderDetectSampleRate: config.upstreamProviderDetectSampleRate,
+    upstreamProviderDetectRetentionDays: config.upstreamProviderDetectRetentionDays,
+    upstreamProviderDetectPlatforms: config.upstreamProviderDetectPlatforms,
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
@@ -1436,6 +1466,58 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.proxyDebugMaxBodyBytes = nextValue;
       upsertSetting('proxy_debug_max_body_bytes', config.proxyDebugMaxBodyBytes);
+    }
+
+    if (body.upstreamProviderDetectEnabled !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.upstreamProviderDetectEnabled, '上游探测开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '上游探测开关格式无效',
+        });
+      }
+      if (nextValue !== config.upstreamProviderDetectEnabled) {
+        changedLabels.push('上游探测');
+      }
+      config.upstreamProviderDetectEnabled = nextValue;
+      upsertSetting('upstream_provider_detect_enabled', config.upstreamProviderDetectEnabled);
+    }
+
+    if (body.upstreamProviderDetectSampleRate !== undefined) {
+      const sampleRate = Number(body.upstreamProviderDetectSampleRate);
+      if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+        return reply.code(400).send({ success: false, message: '上游探测采样率必须是 0 到 1 之间的数字' });
+      }
+      const nextValue = Math.min(1, Math.max(0, sampleRate));
+      if (nextValue !== config.upstreamProviderDetectSampleRate) {
+        changedLabels.push(`上游探测采样率（${config.upstreamProviderDetectSampleRate} -> ${nextValue}）`);
+      }
+      config.upstreamProviderDetectSampleRate = nextValue;
+      upsertSetting('upstream_provider_detect_sample_rate', config.upstreamProviderDetectSampleRate);
+    }
+
+    if (body.upstreamProviderDetectRetentionDays !== undefined) {
+      const retentionDays = Number(body.upstreamProviderDetectRetentionDays);
+      if (!Number.isFinite(retentionDays) || retentionDays < 0) {
+        return reply.code(400).send({ success: false, message: '上游探测保留天数必须是大于等于 0 的整数' });
+      }
+      const nextValue = Math.trunc(retentionDays);
+      if (nextValue !== config.upstreamProviderDetectRetentionDays) {
+        changedLabels.push(`上游探测保留天数（${config.upstreamProviderDetectRetentionDays}d -> ${nextValue}d）`);
+      }
+      config.upstreamProviderDetectRetentionDays = nextValue;
+      upsertSetting('upstream_provider_detect_retention_days', config.upstreamProviderDetectRetentionDays);
+    }
+
+    if (body.upstreamProviderDetectPlatforms !== undefined) {
+      const nextPlatforms = normalizeUpstreamProviderDetectPlatforms(body.upstreamProviderDetectPlatforms);
+      if (JSON.stringify(nextPlatforms) !== JSON.stringify(config.upstreamProviderDetectPlatforms)) {
+        changedLabels.push('上游探测站点后缀');
+      }
+      config.upstreamProviderDetectPlatforms = nextPlatforms;
+      upsertSetting('upstream_provider_detect_platforms', nextPlatforms);
     }
 
     if (body.proxyErrorKeywords !== undefined) {

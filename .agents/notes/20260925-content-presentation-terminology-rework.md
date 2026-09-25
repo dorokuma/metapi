@@ -42,3 +42,15 @@ supersedes: ""
 
 - 用户 2026-09-25 派发：「内容展示」全量返工（特性文案中文化 + 全项目术语三规范 + i18n 同步 + 测试同步），清单 A–H。
 - 前序笔记：`.agents/notes/20260925-upstream-provider-detect-settings-relocation.md`、`.agents/notes/20260925-upstream-provider-detect-oracle-followups.md`。
+
+## 值层映射（follow-up：会话亲和行英文值词漏网）
+
+- 背景：术语返工后观测块仍有两处英文「值词」原样渲染：`结果 confirmed`、`客户端会话 sess-…（explicit）`；`deepseek` / `sess-…` 为标识符，保留。
+- 修复（仅渲染层，桌面 / 移动共用的 `renderUpstreamObservationBody`；服务端解析与 DB 存值不动）：
+  - `affinityOutcome`：`confirmed` → 「已确认」，未知值原样透传；
+  - `clientSessionIdSource`：`explicit` → 「显式」，未知值原样透传。
+- 映射策略：精确匹配（大小写敏感）→中文、未知值与大小写变体原样透传、上游新增枚举值出现时补充映射。
+- i18n：`i18n.supplement.ts` 补 `'已确认': 'confirmed'`、`'显式': 'explicit'`，英文模式还原原英文；含「显式」的既有长句键按最长匹配整句命中，不回归。
+- 测试：桌面 / 移动观测块用例断言中文值词 + 未知值透传用例；变异验证：撤掉值映射→桌面 / 移动两处用例失败，撤掉 i18n 键→en 模式用例失败。曾出现的副作用：未入字典的 `显式群组…`（tokens 服务端消息）与 Sites 页 `关闭时请求本身显式传入…` 的 en 兜底文本从「整段 Untranslated」变为保留 `explicit` 词干——该副作用已由下方 en 补键覆盖。
+- 顺扫结论（上游探测展示面）：除上述两值词外，观测块 / 分布面板 / 设置分区的其余值均为标识符 / 品牌 / 协议字段 / 原始 ID（finalProvider、resolvedProvider、canonicalSlug、originalModelId、affinityPinnedProvider、fallbacks、systemFingerprint、gatewayGenerationId、clientSessionId、provider），按保留类不动。
+- en 补键（跟随本次值层短键）：`i18n.supplement.ts` 为含「显式」的未映射整句补 6 条键——tokens 接口 5 条（「显式群组至少需要选择一个来源模型」「显式群组不能引用自身作为来源模型」「显式群组只能选择精确模型路由作为来源模型」「显式群组不支持直接维护通道」「显式群组必须填写对外模型名」）+ Sites 页开关说明 1 条（「关闭时请求本身显式传入的请求头优先级更高。」）；`i18n.test.ts` 补 en 整句探针，短键「显式」不再命中长句前缀。

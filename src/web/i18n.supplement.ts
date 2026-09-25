@@ -835,6 +835,17 @@ export const zhToEnSupplemental: Record<string, string> = {
   '解析为': 'resolved as',
   '上游钉选': 'Upstream pinned',
   '结果': 'Result',
+  // 值层映射：会话亲和行的值词（confirmed / explicit）中文显示，英文模式经此还原原英文
+  '已确认': 'confirmed',
+  '显式': 'explicit',
+  // 短键「显式」会命中长句前缀：以下含「显式」的整句必须整段命中，否则 en 模式
+  // 会退化成「explicit群组…」半翻译混排；前 5 条为 tokens 接口消息，末条为站点页开关说明
+  '显式群组至少需要选择一个来源模型': 'Explicit groups require at least one source model',
+  '显式群组不能引用自身作为来源模型': 'An explicit group cannot reference itself as a source model',
+  '显式群组只能选择精确模型路由作为来源模型': 'Explicit groups can only use exact model routes as source models',
+  '显式群组不支持直接维护通道': 'Explicit groups cannot manage channels directly',
+  '显式群组必须填写对外模型名': 'Explicit groups require a public model name',
+  '关闭时请求本身显式传入的请求头优先级更高。': 'When disabled, headers explicitly passed in the request take precedence.',
   '原始': 'original',
   '回退': 'Fallback',
   '缓存': 'Cache',

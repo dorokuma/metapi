@@ -254,10 +254,12 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       expect(text).toContain('上游自报，非 metapi 计费');
       expect(text).toContain('deepseek');
       expect(text).toContain('deepseek/deepseek-v4.1-flash');
-      expect(text).toContain('confirmed');
+      // 值层映射：confirmed → 已确认、explicit → 显式（仅显示层，不渲染上游原值）
+      expect(text).toContain('结果 已确认');
       expect(text).toContain('上游钉选 deepseek');
-      expect(text).toContain('sess-desktop-1');
-      expect(text).toContain('explicit');
+      expect(text).toContain('客户端会话 sess-desktop-1（显式）');
+      expect(text).not.toContain('confirmed');
+      expect(text).not.toContain('explicit');
       expect(text).toContain('2 个（展开列名）');
       expect(text).toContain('alibaba、baseten');
       expect(text).toContain('命中 0 / 未命中 34');
@@ -270,6 +272,39 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       expect(text).toContain('gen-desktop');
       // gateway.cost 不再单独成项
       expect(text).not.toContain('gateway.cost');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('passes unmapped affinity outcome and session source values through unchanged', async () => {
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      ...PROXY_LOG,
+      upstreamObservation: {
+        ...UPSTREAM_OBSERVATION,
+        affinityOutcome: 'miss',
+        clientSessionId: 'sess-desktop-2',
+        clientSessionIdSource: 'heuristic',
+      },
+    });
+    const root = await renderProxyLogs();
+    try {
+      const row = root.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-101'
+      ));
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      // 未知值不做猜测映射，原样透传
+      expect(text).toContain('结果 miss');
+      expect(text).toContain('客户端会话 sess-desktop-2（heuristic）');
+      expect(text).not.toContain('已确认');
+      expect(text).not.toContain('显式');
     } finally {
       await act(async () => {
         root.unmount();

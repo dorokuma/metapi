@@ -597,6 +597,28 @@ function formatUpstreamCostText(value: string | null | undefined): string {
   return trimmed.length > 0 ? trimmed : "--";
 }
 
+// 值层显示映射：DB / 接口仍存上游原值，仅渲染层把已知值词换成中文，未知值原样透传。
+const UPSTREAM_AFFINITY_OUTCOME_LABELS: Record<string, string> = {
+  confirmed: "已确认",
+};
+const UPSTREAM_CLIENT_SESSION_ID_SOURCE_LABELS: Record<string, string> = {
+  explicit: "显式",
+};
+
+function formatUpstreamAffinityOutcomeLabel(
+  value: string | null | undefined,
+): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return UPSTREAM_AFFINITY_OUTCOME_LABELS[value] ?? value;
+}
+
+function formatUpstreamClientSessionIdSourceLabel(
+  value: string | null | undefined,
+): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return UPSTREAM_CLIENT_SESSION_ID_SOURCE_LABELS[value] ?? value;
+}
+
 function renderUpstreamObservationRow(
   label: string,
   value: React.ReactNode,
@@ -642,10 +664,14 @@ function renderUpstreamObservationBody(
     ? observation.fallbacks
     : [];
   const fallbackCount = observation.fallbackCount ?? fallbacks.length;
+  const affinityOutcomeLabel = formatUpstreamAffinityOutcomeLabel(
+    observation.affinityOutcome,
+  );
+  const clientSessionIdSourceLabel = formatUpstreamClientSessionIdSourceLabel(
+    observation.clientSessionIdSource,
+  );
   const affinityParts = [
-    observation.affinityOutcome
-      ? `结果 ${observation.affinityOutcome}`
-      : null,
+    affinityOutcomeLabel ? `结果 ${affinityOutcomeLabel}` : null,
     observation.affinityPinnedProvider
       ? `上游钉选 ${observation.affinityPinnedProvider}`
       : null,
@@ -716,8 +742,8 @@ function renderUpstreamObservationBody(
             <>
               {affinityParts.length > 0 ? "；" : ""}
               客户端会话 {observation.clientSessionId}
-              {observation.clientSessionIdSource
-                ? `（${observation.clientSessionIdSource}）`
+              {clientSessionIdSourceLabel
+                ? `（${clientSessionIdSourceLabel}）`
                 : ""}
             </>
           ) : null}

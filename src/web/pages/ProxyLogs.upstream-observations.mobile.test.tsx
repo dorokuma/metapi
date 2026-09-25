@@ -72,6 +72,33 @@ const PROXY_LOG = {
   siteUrl: 'https://api.cline.bot',
 };
 
+const UPSTREAM_OBSERVATION = {
+  id: 501,
+  createdAt: '2026-03-09 16:00:01',
+  finalProvider: 'deepseek',
+  resolvedProvider: 'deepseek',
+  canonicalSlug: 'deepseek/deepseek-v4.1-flash',
+  originalModelId: 'deepseek/deepseek-v4.1-flash',
+  affinityOutcome: 'confirmed',
+  affinityPinnedProvider: 'deepseek',
+  clientSessionId: 'sess-mobile-1',
+  clientSessionIdSource: 'explicit',
+  fallbacks: ['alibaba', 'baseten'],
+  fallbackCount: 2,
+  cacheHitTokens: 1,
+  cacheMissTokens: 34,
+  systemFingerprint: 'fp-mobile',
+  usageCost: 0.000013,
+  usageGatewayCost: 0.000027,
+  usageMarketCost: 0.000027,
+  gatewayCostText: '0.000027',
+  gatewayInferenceCostText: null,
+  gatewayGenerationId: 'gen-mobile',
+  modelAttemptCount: 1,
+  totalProviderAttemptCount: 1,
+  attemptsTruncated: false,
+};
+
 describe('ProxyLogs upstream observations (mobile)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -120,32 +147,7 @@ describe('ProxyLogs upstream observations (mobile)', () => {
     });
     apiMock.getProxyLogDetail.mockResolvedValue({
       ...PROXY_LOG,
-      upstreamObservation: {
-        id: 501,
-        createdAt: '2026-03-09 16:00:01',
-        finalProvider: 'deepseek',
-        resolvedProvider: 'deepseek',
-        canonicalSlug: 'deepseek/deepseek-v4.1-flash',
-        originalModelId: 'deepseek/deepseek-v4.1-flash',
-        affinityOutcome: 'confirmed',
-        affinityPinnedProvider: 'deepseek',
-        clientSessionId: 'sess-mobile-1',
-        clientSessionIdSource: 'explicit',
-        fallbacks: ['alibaba', 'baseten'],
-        fallbackCount: 2,
-        cacheHitTokens: 1,
-        cacheMissTokens: 34,
-        systemFingerprint: 'fp-mobile',
-        usageCost: 0.000013,
-        usageGatewayCost: 0.000027,
-        usageMarketCost: 0.000027,
-        gatewayCostText: '0.000027',
-        gatewayInferenceCostText: null,
-        gatewayGenerationId: 'gen-mobile',
-        modelAttemptCount: 1,
-        totalProviderAttemptCount: 1,
-        attemptsTruncated: false,
-      },
+      upstreamObservation: UPSTREAM_OBSERVATION,
     });
     apiMock.getProxyDebugTraces.mockResolvedValue({ items: [] });
     apiMock.getProxyDebugTraceDetail.mockResolvedValue({ trace: null, attempts: [] });
@@ -196,13 +198,59 @@ describe('ProxyLogs upstream observations (mobile)', () => {
       expect(text).toContain('实际上游');
       expect(text).toContain('上游自报，非 metapi 计费');
       expect(text).toContain('deepseek');
-      expect(text).toContain('sess-mobile-1');
+      // 值层映射：confirmed → 已确认、explicit → 显式（桌面/移动共用出口）
+      expect(text).toContain('结果 已确认');
+      expect(text).toContain('客户端会话 sess-mobile-1（显式）');
+      expect(text).not.toContain('confirmed');
+      expect(text).not.toContain('explicit');
       expect(text).toContain('baseten');
       expect(text).toContain('命中 1 / 未命中 34');
       expect(text).toContain('网关成本 $0.000027');
       expect(text).toContain('市场成本 $0.000027');
       expect(text).toContain('网关推理成本 --');
       expect(text).toContain('gen-mobile');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('passes unmapped affinity outcome and session source values through unchanged on mobile', async () => {
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      ...PROXY_LOG,
+      upstreamObservation: {
+        ...UPSTREAM_OBSERVATION,
+        affinityOutcome: 'miss',
+        clientSessionId: 'sess-mobile-2',
+        clientSessionIdSource: 'heuristic',
+      },
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButton(root.root, '详情').props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      // 未知值不做猜测映射，原样透传
+      expect(text).toContain('结果 miss');
+      expect(text).toContain('客户端会话 sess-mobile-2（heuristic）');
+      expect(text).not.toContain('已确认');
+      expect(text).not.toContain('显式');
     } finally {
       await act(async () => {
         root.unmount();

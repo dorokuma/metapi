@@ -40,6 +40,94 @@ describe('proxyUsageFallbackService', () => {
     ]);
   });
 
+  it('converts new-api use_time seconds into requestTimeMs', () => {
+    const logs = extractSelfLogItems({
+      data: {
+        items: [
+          {
+            model_name: 'gpt-4o',
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            quota: 100,
+            created_at: 1_700_000_124,
+            use_time: 1.6,
+            request_time: 9999,
+          },
+          {
+            model_name: 'gpt-4o-mini',
+            prompt_tokens: 8,
+            completion_tokens: 2,
+            quota: 40,
+            created_at: 1_700_000_123,
+            use_time: 3,
+          },
+        ],
+      },
+    });
+
+    expect(logs.map((item) => item.requestTimeMs)).toEqual([1600, 3000]);
+  });
+
+  it('treats use_time 0 as explicit and missing use_time as zero without other fields', () => {
+    const zero = extractSelfLogItems({
+      data: [{
+        model_name: 'gpt-4o',
+        created_at: 1_700_000_123,
+        use_time: 0,
+        request_time: 1450,
+      }],
+    });
+    expect(zero[0]?.requestTimeMs).toBe(0);
+
+    const missing = extractSelfLogItems({
+      data: [{
+        model_name: 'gpt-4o',
+        created_at: 1_700_000_123,
+      }],
+    });
+    expect(missing[0]?.requestTimeMs).toBe(0);
+  });
+
+  it('falls back to request_time and duration_ms when use_time is absent', () => {
+    const fromRequestTime = extractSelfLogItems({
+      data: [{
+        model_name: 'gpt-4o',
+        created_at: 1_700_000_123,
+        request_time: 1450,
+      }],
+    });
+    expect(fromRequestTime[0]?.requestTimeMs).toBe(1450);
+
+    const fromDuration = extractSelfLogItems({
+      data: [{
+        model_name: 'gpt-4o',
+        created_at: 1_700_000_123,
+        duration_ms: 23000,
+      }],
+    });
+    expect(fromDuration[0]?.requestTimeMs).toBe(23000);
+  });
+
+  it('applies the latency hard gate once use_time is converted to milliseconds', () => {
+    const logs = extractSelfLogItems({
+      data: [{
+        model_name: 'gpt-4o',
+        prompt_tokens: 10,
+        completion_tokens: 4,
+        quota: 100,
+        created_at: 1_700_000_008,
+        use_time: 20,
+      }],
+    });
+
+    expect(findBestSelfLogMatch(logs, {
+      modelName: 'gpt-4o',
+      requestStartedAtMs: 1_700_000_005_000,
+      requestEndedAtMs: 1_700_000_008_000,
+      localLatencyMs: 3_000,
+    })).toBeNull();
+  });
+
   it('extracts cache billing metadata from self-log other payload', () => {
     const payload = {
       success: true,

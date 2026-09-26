@@ -99,6 +99,30 @@ function toPositiveInt(value: unknown): number {
   return Math.max(0, Math.round(toNumber(value, 0)));
 }
 
+// new-api `/api/log/self` reports latency as `use_time` in seconds.
+// Absent or non-numeric values fall through so callers can keep the
+// millisecond fields (`request_time` / `duration_ms`). A present 0 is an
+// explicit reading and must not fall through.
+function toUseTimeMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const seconds = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(seconds)) return null;
+  return toPositiveInt(seconds * 1000);
+}
+
+function readRequestTimeMs(row: Record<string, unknown>): number {
+  const fromUseTime = toUseTimeMs(row.use_time ?? row.useTime);
+  if (fromUseTime !== null) return fromUseTime;
+  // Legacy / other platforms already expose milliseconds.
+  return toPositiveInt(
+    row.request_time
+      ?? row.requestTime
+      ?? row.duration_ms
+      ?? row.durationMs,
+  );
+}
+
 function roundCost(value: number): number {
   return Math.round(Math.max(0, value) * 1_000_000) / 1_000_000;
 }
@@ -246,12 +270,7 @@ function mapSelfLogItem(raw: unknown): SelfLogItem | null {
   const tokenValue = normalizeTokenMatchValue(
     typeof apiKeyRecord?.key === 'string' ? apiKeyRecord.key : '',
   );
-  const requestTimeMs = toPositiveInt(
-    row.request_time
-      ?? row.requestTime
-      ?? row.duration_ms
-      ?? row.durationMs,
-  );
+  const requestTimeMs = readRequestTimeMs(row);
 
   return {
     modelName,

@@ -116,11 +116,13 @@ describe('upstream provider detection bypass', () => {
     });
   };
 
-  async function seedSite(input: { url: string; platform?: string }) {
+  async function seedSite(input: { url: string; platform?: string; preferredEndpoint?: string }) {
     const site = await db.insert(schema.sites).values({
       name: `site-${input.url}`,
       url: input.url,
       platform: input.platform ?? 'openai',
+      // 空串表示不钉端点；'chat' 让 /v1/responses 下游走上游 /v1/chat/completions。
+      preferredEndpoint: input.preferredEndpoint ?? '',
       status: 'active',
     }).returning().get();
     const account = await db.insert(schema.accounts).values({
@@ -164,8 +166,10 @@ describe('upstream provider detection bypass', () => {
     closeDbConnections = dbModule.closeDbConnections;
 
     const routesModule = await import('./chat.js');
+    const responsesRoutesModule = await import('./responses.js');
     app = Fastify();
     await app.register(routesModule.chatProxyRoute);
+    await app.register(responsesRoutesModule.responsesProxyRoute);
   });
 
   beforeEach(async () => {
@@ -250,7 +254,6 @@ describe('upstream provider detection bypass', () => {
     const rows = await readObservations();
     expect(rows, JSON.stringify(rows)).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      proxyLogId: null,
       siteId: seeded.site.id,
       accountId: seeded.account.id,
       routeId: 22,
@@ -285,10 +288,11 @@ describe('upstream provider detection bypass', () => {
     expect(rows[0].modelAttemptsJson).toContain('deepseek');
     expect(rows[0].modelAttemptsJson).not.toContain('providerRequestId');
 
-    // 旁路不改成功日志本身
+    // 旁路不改成功日志本身，且观测硬钉到该次请求唯一 success 日志
     const logs = await db.select().from(schema.proxyLogs).all();
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({ status: 'success', httpStatus: 200, isStream: false });
+    expect(rows[0].proxyLogId).toBe(logs[0].id);
   });
 
   it('writes one observation for a successful streamed chat request without changing SSE bytes', async () => {
@@ -332,6 +336,7 @@ describe('upstream provider detection bypass', () => {
     const logs = await db.select().from(schema.proxyLogs).all();
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({ status: 'success', httpStatus: 200, isStream: true });
+    expect(rows[0].proxyLogId).toBe(logs[0].id);
   });
 
   it('writes nothing when the master switch is off', async () => {
@@ -456,5 +461,142 @@ describe('upstream provider detection bypass', () => {
 
     expect(response.statusCode).toBeGreaterThanOrEqual(500);
     expect(await readObservations()).toHaveLength(0);
+  });
+
+  it('writes one hard-linked observation for a successful non-stream /v1/responses request', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
+    selectSeededChannel(seeded);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(nonStreamFixture), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer downstream-key' },
+      payload: {
+        model: 'deepseek/deepseek-v4.1-flash',
+        input: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+
+    const rows = await readObservations();
+    expect(rows, JSON.stringify(rows)).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      siteId: seeded.site.id,
+      isStream: false,
+      finalProvider: 'deepseek',
+    });
+
+    const logs = await db.select().from(schema.proxyLogs).all();
+    const successLogs = logs.filter((log) => log.status === 'success');
+    expect(successLogs).toHaveLength(1);
+    expect(rows[0].proxyLogId).toBe(successLogs[0].id);
+  });
+
+  it('writes one hard-linked observation for a streamed /v1/responses request (chat upstream)', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot', preferredEndpoint: 'chat' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
+    selectSeededChannel(seeded);
+    fetchMock.mockResolvedValue(createSseResponse([
+      `data: ${JSON.stringify(streamFirstChunkFixture)}\n\n`,
+      `data: ${JSON.stringify(streamFinalChunkFixture)}\n\n`,
+      'data: [DONE]\n\n',
+    ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer downstream-key' },
+      payload: {
+        model: 'deepseek/deepseek-v4.1-flash',
+        input: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+
+    const rows = await readObservations();
+    expect(rows, JSON.stringify(rows)).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      siteId: seeded.site.id,
+      isStream: true,
+      finalProvider: 'deepseek',
+    });
+
+    const logs = await db.select().from(schema.proxyLogs).all();
+    const successLogs = logs.filter((log) => log.status === 'success');
+    expect(successLogs).toHaveLength(1);
+    expect(rows[0].proxyLogId).toBe(successLogs[0].id);
+  });
+
+  it('hard-links the websocket replay exit of /v1/responses through the surface', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot', preferredEndpoint: 'chat' });
+    config.upstreamProviderDetectSiteIds = [seeded.site.id];
+    selectSeededChannel(seeded);
+    // Chat-shaped SSE upstream ending in [DONE]: the websocket transport exit
+    // reads the raw text, rebuilds one final payload and replays exactly
+    // `response.created` -> terminal event -> `[DONE]` downstream.
+    fetchMock.mockResolvedValue(createSseResponse([
+      `data: ${JSON.stringify(streamFirstChunkFixture)}\n\n`,
+      `data: ${JSON.stringify(streamFinalChunkFixture)}\n\n`,
+      'data: [DONE]\n\n',
+    ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        authorization: 'Bearer downstream-key',
+        'x-metapi-responses-websocket-transport': '1',
+      },
+      payload: {
+        model: 'deepseek/deepseek-v4.1-flash',
+        input: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+
+    // Replay-arm evidence (this fails on any other exit): only the synthesized
+    // replay emits exactly these three frames — a `response.created` frame
+    // carrying the in_progress/empty payload, the terminal frame, `[DONE]` —
+    // with no incremental `response.in_progress` / `response.output_text.delta`
+    // frames. The generic stream session over the same upstream bytes (same
+    // request minus the websocket transport header) emits no `response.created`
+    // at all (terminal frame + `[DONE]` only).
+    const frames = response.body.split('\n\n').filter((frame) => frame.length > 0);
+    expect(frames).toHaveLength(3);
+    expect(frames[0]).toContain('event: response.created');
+    expect(frames[1]).toContain('event: response.completed');
+    expect(frames[2]).toBe('data: [DONE]');
+    const created = JSON.parse(frames[0].slice(frames[0].indexOf('data: ') + 'data: '.length));
+    expect(created).toMatchObject({
+      type: 'response.created',
+      response: {
+        status: 'in_progress',
+        output: [],
+        output_text: '',
+      },
+    });
+
+    const rows = await readObservations();
+    expect(rows, JSON.stringify(rows)).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      siteId: seeded.site.id,
+      isStream: true,
+      finalProvider: 'deepseek',
+    });
+    const logs = await db.select().from(schema.proxyLogs).all();
+    const successLogs = logs.filter((log) => log.status === 'success');
+    expect(successLogs).toHaveLength(1);
+    expect(successLogs[0]).toMatchObject({ isStream: true });
+    expect(rows[0].proxyLogId).toBe(successLogs[0].id);
   });
 });

@@ -77,9 +77,9 @@ export type ExecuteEndpointFlowInput = {
   tryRecover?: (ctx: EndpointAttemptContext) => Promise<EndpointRecoverResult>;
   shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean;
   shouldAbortRemainingEndpoints?: (ctx: EndpointAttemptContext & { errText: string }) => boolean;
-  onDowngrade?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
-  onAttemptFailure?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
-  onAttemptSuccess?: (ctx: EndpointAttemptSuccessContext) => void | Promise<void>;
+  onDowngrade?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<unknown>;
+  onAttemptFailure?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<unknown>;
+  onAttemptSuccess?: (ctx: EndpointAttemptSuccessContext) => void | Promise<unknown>;
 };
 
 export function withUpstreamPath(path: string, message: string): string {
@@ -87,7 +87,7 @@ export function withUpstreamPath(path: string, message: string): string {
 }
 
 async function runEndpointFlowHook<T>(
-  hook: ((ctx: T) => void | Promise<void>) | undefined,
+  hook: ((ctx: T) => void | Promise<unknown>) | undefined,
   ctx: T,
   hookName: string,
 ): Promise<void> {

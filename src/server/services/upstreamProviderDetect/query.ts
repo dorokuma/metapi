@@ -2,18 +2,37 @@
  * Read side for upstream-provider observations: detail matching plus the
  * aggregate queries used by the `/api/stats/upstream-observations/*` routes.
  *
- * Detail association (F1): v1 does not backfill `proxy_log_id`, so the detail
- * API finds a unique observation by
- * `(account_id, channel_id, requested_model, created_at ± 2s)` — optionally
- * narrowed by `is_stream`. The ±2s window is computed in JS and applied with
- * plain `gte`/`lte` on the stored UTC ISO strings; no dialect-specific date
- * functions are involved. Zero or more than one candidate means "no guess":
- * the caller receives `observation: null` plus the candidate count.
+ * Detail association (v2.1 hard linkage): rows written after this change pin the
+ * id of the success `proxy_logs` row they belong to (`proxy_log_id`). Matching
+ * order is
+ * 1. status gate: only `status === 'success'` logs are eligible (C4) — anything
+ *    else returns `matchKind: 'skipped'` and is not counted;
+ * 2. hard lookup by `proxy_log_id = id` when the key carries a positive
+ *    integer. Exactly one row with matching key columns is returned as
+ *    `matchKind: 'hard'` (no ±2s requirement, no key-completeness requirement);
+ *    one row whose key columns conflict is withheld as `matchKind: 'hardAnomaly'`
+ *    with `candidateCount: 1` (only "both sides present and unequal" counts — a
+ *    missing value is never a conflict); two or more rows for the same id are
+ *    withheld as `matchKind: 'hardAmbiguous'` with `candidateCount >= 2` and
+ *    never fall back to the window; zero rows fall through;
+ * 3. window fallback (±2s, `is_stream` narrowing when the log has a boolean) is
+ *    restricted to `proxy_log_id IS NULL`, so rows already pinned to other logs
+ *    can no longer be borrowed. The window is computed in JS and applied with
+ *    plain `gte`/`lte` on the stored UTC ISO strings; no dialect-specific date
+ *    functions are involved. Zero or more than one candidate means "no guess".
  *
- * F2 metrics: every detail match records hit / ambiguous / zero-hit outcomes
- * (incomplete keys are counted separately, since they cannot participate in the
- * ±2s population at all). A throttled log line reports the counters and flags
- * `hardLinkSuggested` once the ambiguous rate exceeds 5 %.
+ * Legacy rows (and "log written but no id available") keep `proxy_log_id IS NULL`
+ * forever: nothing is backfilled.
+ *
+ * Metrics: `evaluated` only counts window hit / ambiguous / miss outcomes.
+ * `hardHits` counts exactly-one-clean hard rows and never includes `hardAnomaly`
+ * or `hardAmbiguous`; those have their own counters and stay out of
+ * `evaluated`, so `ambiguousRate` (window-only) is not diluted. With hard
+ * linkage healthy and `sample_rate = 1`, detail lookups are almost all hard
+ * hits and `evaluated` tends to 0, which keeps `hardLinkSuggested` false on
+ * purpose — that is not a broken metric. A throttled log line reports the
+ * counters and flags `hardLinkSuggested` once the window-fallback ambiguous rate
+ * exceeds 5 % (hint is window health, no longer "go build hard linkage").
  */
 
 import { and, asc, desc, eq, gte, isNotNull, isNull, lte, sql } from 'drizzle-orm';
@@ -89,13 +108,32 @@ export type UpstreamProviderProxyLogMatchKey = {
    * any other value short-circuits to "no observation".
    */
   status?: string | null;
+  /**
+   * Id of the proxy log being opened. When it is a positive integer the hard
+   * `proxy_log_id = id` lookup runs first; rows without an id skip it and go
+   * straight to the ±2s window.
+   */
+  proxyLogId?: number | null;
 };
+
+/**
+ * Internal-only match provenance. Never returned by the HTTP API: the detail
+ * route still exposes only `upstreamObservation`.
+ */
+export type UpstreamProviderObservationMatchKind =
+  | 'skipped'
+  | 'hard'
+  | 'hardAnomaly'
+  | 'hardAmbiguous'
+  | 'window'
+  | 'incompleteKey';
 
 export type UpstreamProviderObservationDetailMatch = {
   observation: UpstreamProviderObservationView | null;
   candidateCount: number;
   windowFrom: string | null;
   windowTo: string | null;
+  matchKind: UpstreamProviderObservationMatchKind;
 };
 
 export type UpstreamProviderObservationMatchMetrics = {
@@ -104,6 +142,12 @@ export type UpstreamProviderObservationMatchMetrics = {
   ambiguous: number;
   misses: number;
   incompleteKey: number;
+  /** Hard hits that were returned; excludes `hardAnomaly` and `hardAmbiguous`. */
+  hardHits: number;
+  /** Two or more rows pinned to the same `proxy_log_id` (defensive). */
+  hardAmbiguous: number;
+  /** The pinned row disagrees with a key column that is present on both sides. */
+  hardAnomaly: number;
   ambiguousRate: number;
   hardLinkSuggested: boolean;
 };
@@ -156,8 +200,13 @@ let matchMetrics = {
   ambiguous: 0,
   misses: 0,
   incompleteKey: 0,
+  hardHits: 0,
+  hardAmbiguous: 0,
+  hardAnomaly: 0,
 };
 let lastMatchMetricsLogAtMs = 0;
+let hardAnomalyWarningLogged = false;
+let hardAmbiguousWarningLogged = false;
 
 function computeAmbiguousRate(metrics: { evaluated: number; ambiguous: number }): number {
   if (metrics.evaluated <= 0) return 0;
@@ -175,8 +224,46 @@ export function getUpstreamProviderObservationMatchMetrics(): UpstreamProviderOb
 
 /** Test/diagnostic helper; production counters are monotonic for the process. */
 export function resetUpstreamProviderObservationMatchMetrics(nowMs = Date.now()): void {
-  matchMetrics = { evaluated: 0, uniqueHits: 0, ambiguous: 0, misses: 0, incompleteKey: 0 };
+  matchMetrics = {
+    evaluated: 0,
+    uniqueHits: 0,
+    ambiguous: 0,
+    misses: 0,
+    incompleteKey: 0,
+    hardHits: 0,
+    hardAmbiguous: 0,
+    hardAnomaly: 0,
+  };
   lastMatchMetricsLogAtMs = nowMs;
+  hardAnomalyWarningLogged = false;
+  hardAmbiguousWarningLogged = false;
+}
+
+function maybeLogMatchMetrics(nowMs: number): void {
+  if (nowMs - lastMatchMetricsLogAtMs < MATCH_METRICS_LOG_INTERVAL_MS) return;
+  lastMatchMetricsLogAtMs = nowMs;
+
+  const metrics = getUpstreamProviderObservationMatchMetrics();
+  console.info(
+    '[upstream-provider-detect] detail match metrics',
+    {
+      evaluated: metrics.evaluated,
+      uniqueHits: metrics.uniqueHits,
+      ambiguous: metrics.ambiguous,
+      misses: metrics.misses,
+      incompleteKey: metrics.incompleteKey,
+      hardHits: metrics.hardHits,
+      hardAmbiguous: metrics.hardAmbiguous,
+      hardAnomaly: metrics.hardAnomaly,
+      ambiguousRate: Number(metrics.ambiguousRate.toFixed(4)),
+      ...(metrics.hardLinkSuggested
+        ? {
+          hardLinkSuggested: true,
+          hint: 'time-window fallback ambiguous rate > 5% (proxy_log_id IS NULL matches only); hard linkage is active, this is not a "go build hard linkage" signal',
+        }
+        : {}),
+    },
+  );
 }
 
 function recordDetailMatchOutcome(outcome: 'hit' | 'ambiguous' | 'miss' | 'incompleteKey', nowMs = Date.now()): void {
@@ -190,24 +277,32 @@ function recordDetailMatchOutcome(outcome: 'hit' | 'ambiguous' | 'miss' | 'incom
   }
 
   if (outcome === 'incompleteKey') return;
-  if (nowMs - lastMatchMetricsLogAtMs < MATCH_METRICS_LOG_INTERVAL_MS) return;
-  lastMatchMetricsLogAtMs = nowMs;
+  maybeLogMatchMetrics(nowMs);
+}
 
-  const metrics = getUpstreamProviderObservationMatchMetrics();
-  console.info(
-    '[upstream-provider-detect] detail match metrics',
-    {
-      evaluated: metrics.evaluated,
-      uniqueHits: metrics.uniqueHits,
-      ambiguous: metrics.ambiguous,
-      misses: metrics.misses,
-      incompleteKey: metrics.incompleteKey,
-      ambiguousRate: Number(metrics.ambiguousRate.toFixed(4)),
-      ...(metrics.hardLinkSuggested
-        ? { hardLinkSuggested: true, hint: 'ambiguous rate > 5%: evaluate hard proxy_log_id linkage' }
-        : {}),
-    },
-  );
+/**
+ * Hard-id outcomes never touch `evaluated`: a healthy hard hit is not part of
+ * the window-fallback population, and `hardHits` deliberately excludes both
+ * defensive branches so "returned" and "found but withheld" stay separable.
+ */
+function recordHardMatchOutcome(outcome: 'hard' | 'hardAmbiguous' | 'hardAnomaly', nowMs = Date.now()): void {
+  if (outcome === 'hard') {
+    matchMetrics.hardHits++;
+  } else if (outcome === 'hardAmbiguous') {
+    matchMetrics.hardAmbiguous++;
+    if (!hardAmbiguousWarningLogged) {
+      hardAmbiguousWarningLogged = true;
+      console.warn('[upstream-provider-detect] multiple observations pinned to the same proxy_log_id; returning no observation');
+    }
+  } else {
+    matchMetrics.hardAnomaly++;
+    if (!hardAnomalyWarningLogged) {
+      hardAnomalyWarningLogged = true;
+      console.warn('[upstream-provider-detect] hard-linked observation disagrees with the proxy log keys; returning no observation');
+    }
+  }
+
+  maybeLogMatchMetrics(nowMs);
 }
 
 function toPositiveInt(value: unknown): number | null {
@@ -313,36 +408,117 @@ function mapObservationRow(
 }
 
 /**
- * Finds the unique ±2s observation for one proxy log.
+ * Key columns of a hard-pinned row that are present on both sides must agree;
+ * a missing value (null, empty string, non-boolean stream flag, non-positive
+ * id) is never treated as a conflict, so legacy rows that lost `is_stream` to
+ * the column-compat retry keep matching.
+ */
+function hasHardKeyMismatch(
+  row: typeof schema.upstreamProviderObservations.$inferSelect,
+  key: {
+    accountId: number | null;
+    channelId: number | null;
+    requestedModel: string | null;
+    isStream?: boolean | null;
+  },
+): boolean {
+  const rowAccountId = toPositiveInt(row.accountId);
+  if (rowAccountId != null && key.accountId != null && rowAccountId !== key.accountId) return true;
+  const rowChannelId = toPositiveInt(row.channelId);
+  if (rowChannelId != null && key.channelId != null && rowChannelId !== key.channelId) return true;
+  const rowRequestedModel = normalizeModelKey(row.requestedModel);
+  if (rowRequestedModel != null && key.requestedModel != null && rowRequestedModel !== key.requestedModel) return true;
+  if (typeof key.isStream === 'boolean' && row.isStream != null && Boolean(row.isStream) !== key.isStream) return true;
+  return false;
+}
+
+/**
+ * Finds the observation for one proxy log: hard `proxy_log_id` first, then the
+ * legacy ±2s window restricted to `proxy_log_id IS NULL` rows.
  *
  * Only `status === 'success'` proxy logs are eligible: observations are
  * written in the same breath as the success log (C4), so matching a
  * failed/retried log — or a log whose status is unknown — would only ever
  * surface a neighbour's upstream (also when `sample_rate < 1` hides the
- * request that produced the observation). Skipped lookups stay out of the F2
- * match metrics: they are not part of the ±2s population.
+ * request that produced the observation). Skipped lookups stay out of the
+ * match metrics: they are not part of the fallback population.
  *
- * `observation === null` + `candidateCount === 0` -> no observation in the
- * window (never observed, pruned, detection disabled, or skipped status).
- * `observation === null` + `candidateCount > 1` -> ambiguous window; the caller
- * must not guess between candidates.
+ * Hard lookup: exactly one row with no key conflict -> `matchKind: 'hard'` +
+ * `hardHits++` (no key-completeness requirement, no window requirement). One
+ * conflicting row -> `null` + `matchKind: 'hardAnomaly'` + `candidateCount: 1`
+ * (kept out of `hardHits`; no window fallback). Two or more rows pinned to the
+ * same id -> `null` + `matchKind: 'hardAmbiguous'` + `candidateCount >= 2`
+ * (defensive only; no window fallback).
+ *
+ * Window fallback: one candidate -> the row; zero candidates -> no observation
+ * (`candidateCount: 0`, a miss); more than one NULL-pinned candidate ->
+ * `candidateCount > 1` and "no guess". Incomplete window keys skip the window
+ * entirely (`incompleteKey`) — but only after the hard lookup had its chance.
  */
 export async function findUpstreamProviderObservationForProxyLog(
   key: UpstreamProviderProxyLogMatchKey,
   nowMs = Date.now(),
 ): Promise<UpstreamProviderObservationDetailMatch> {
   if (normalizeStatus(key.status) !== 'success') {
-    return { observation: null, candidateCount: 0, windowFrom: null, windowTo: null };
+    return { observation: null, candidateCount: 0, windowFrom: null, windowTo: null, matchKind: 'skipped' };
   }
 
   const accountId = toPositiveInt(key.accountId);
   const channelId = toPositiveInt(key.channelId);
   const requestedModel = normalizeModelKey(key.requestedModel);
   const createdAt = parseStoredUtcDateTime(key.createdAt ?? null);
+  const proxyLogId = toPositiveInt(key.proxyLogId);
+
+  // Hard lookup first: the id is the authority and does not require the window
+  // keys to be complete.
+  if (proxyLogId != null) {
+    const hardRows = await db
+      .select()
+      .from(schema.upstreamProviderObservations)
+      .where(eq(schema.upstreamProviderObservations.proxyLogId, proxyLogId))
+      .orderBy(asc(schema.upstreamProviderObservations.id))
+      .limit(2)
+      .all();
+
+    if (hardRows.length >= 2) {
+      recordHardMatchOutcome('hardAmbiguous', nowMs);
+      return {
+        observation: null,
+        candidateCount: hardRows.length,
+        windowFrom: null,
+        windowTo: null,
+        matchKind: 'hardAmbiguous',
+      };
+    }
+
+    const hardRow = hardRows[0];
+    if (hardRow) {
+      if (hasHardKeyMismatch(hardRow, { accountId, channelId, requestedModel, isStream: key.isStream })) {
+        recordHardMatchOutcome('hardAnomaly', nowMs);
+        return {
+          // candidateCount 1 separates "pinned row found but withheld" from
+          // "nothing matched / nothing observed". Internal only, never in the API.
+          observation: null,
+          candidateCount: 1,
+          windowFrom: null,
+          windowTo: null,
+          matchKind: 'hardAnomaly',
+        };
+      }
+      recordHardMatchOutcome('hard', nowMs);
+      return {
+        observation: mapObservationRow(hardRow),
+        candidateCount: 1,
+        windowFrom: null,
+        windowTo: null,
+        matchKind: 'hard',
+      };
+    }
+  }
 
   if (accountId == null || channelId == null || !requestedModel || !createdAt) {
     recordDetailMatchOutcome('incompleteKey', nowMs);
-    return { observation: null, candidateCount: 0, windowFrom: null, windowTo: null };
+    return { observation: null, candidateCount: 0, windowFrom: null, windowTo: null, matchKind: 'incompleteKey' };
   }
 
   const windowFrom = formatUtcSqlDateTime(
@@ -358,9 +534,14 @@ export async function findUpstreamProviderObservationForProxyLog(
     eq(schema.upstreamProviderObservations.requestedModel, requestedModel),
     gte(schema.upstreamProviderObservations.createdAt, windowFrom),
     lte(schema.upstreamProviderObservations.createdAt, windowTo),
+    // Hard linkage: a row already pinned to some log belongs to that log by
+    // definition. Counting it here would manufacture a fake unique hit (single
+    // pinned neighbour) or a fake ambiguity (pinned + NULL); both are wrong, and
+    // the legacy behaviour for rows that are all NULL is unchanged.
+    isNull(schema.upstreamProviderObservations.proxyLogId),
   ];
-  // F1 optional narrowing: only apply when the proxy log has an explicit
-  // boolean, so legacy rows without `is_stream` keep matching.
+  // Optional narrowing: only apply when the proxy log has an explicit boolean,
+  // so legacy rows without `is_stream` keep matching.
   if (typeof key.isStream === 'boolean') {
     conditions.push(eq(schema.upstreamProviderObservations.isStream, key.isStream));
   }
@@ -380,6 +561,7 @@ export async function findUpstreamProviderObservationForProxyLog(
       candidateCount: 1,
       windowFrom,
       windowTo,
+      matchKind: 'window',
     };
   }
 
@@ -389,6 +571,7 @@ export async function findUpstreamProviderObservationForProxyLog(
     candidateCount: candidates.length,
     windowFrom,
     windowTo,
+    matchKind: 'window',
   };
 }
 

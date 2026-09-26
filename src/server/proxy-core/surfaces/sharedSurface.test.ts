@@ -927,7 +927,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       estimatedCost: 0.42,
       billingDetails: { source: 'pricing-test' },
     });
-    const logSuccess = vi.fn().mockResolvedValue(undefined);
+    const logSuccess = vi.fn().mockResolvedValue({ written: true, proxyLogId: 77 });
     const recordDownstreamCost = vi.fn();
 
     const { recordSurfaceSuccess } = await import('./sharedSurface.js');
@@ -1029,6 +1029,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       },
       estimatedCost: 0.42,
       billingDetails: { source: 'pricing-test' },
+      proxyLogWrite: { written: true, proxyLogId: 77 },
     });
   });
 
@@ -1138,7 +1139,7 @@ describe('selectSurfaceChannelForAttempt', () => {
 
   it('treats success metrics as best-effort when requested', async () => {
     resolveProxyUsageWithSelfLogFallbackMock.mockRejectedValueOnce(new Error('billing failed'));
-    const logSuccess = vi.fn().mockResolvedValue(undefined);
+    const logSuccess = vi.fn().mockResolvedValue({ written: true, proxyLogId: 77 });
     const recordDownstreamCost = vi.fn();
 
     const { recordSurfaceSuccess } = await import('./sharedSurface.js');
@@ -1194,6 +1195,147 @@ describe('selectSurfaceChannelForAttempt', () => {
       },
       estimatedCost: 0,
       billingDetails: null,
+      proxyLogWrite: { written: true, proxyLogId: 77 },
     });
+  });
+
+  it('carries a resolved `{ written: false }` through as the three-state contract (no throw)', async () => {
+    resolveProxyUsageWithSelfLogFallbackMock.mockResolvedValue({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      recoveredFromSelfLog: false,
+      estimatedCostFromQuota: 0,
+      selfLogBillingMeta: null,
+      usageSource: 'unknown',
+    });
+    resolveProxyLogBillingMock.mockResolvedValue({ estimatedCost: 0, billingDetails: null });
+    const logSuccess = vi.fn().mockResolvedValue({ written: false });
+
+    const { recordSurfaceSuccess } = await import('./sharedSurface.js');
+    const result = await recordSurfaceSuccess({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { id: 44, url: 'https://upstream.example.com', platform: 'new-api', name: 'Upstream' },
+        tokenValue: 'live-token',
+        tokenName: 'default',
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      parsedUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      requestStartedAtMs: 1000,
+      latencyMs: 250,
+      retryCount: 0,
+      upstreamPath: '/v1/chat/completions',
+      logSuccess,
+    });
+
+    expect(result.proxyLogWrite).toEqual({ written: false });
+    expect(logSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes the legacy resolved shape without `written` into `{ written: false }`', async () => {
+    resolveProxyUsageWithSelfLogFallbackMock.mockResolvedValue({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      recoveredFromSelfLog: false,
+      estimatedCostFromQuota: 0,
+      selfLogBillingMeta: null,
+      usageSource: 'unknown',
+    });
+    resolveProxyLogBillingMock.mockResolvedValue({ estimatedCost: 0, billingDetails: null });
+    const logSuccess = vi.fn().mockResolvedValue(undefined);
+
+    const { recordSurfaceSuccess } = await import('./sharedSurface.js');
+    const result = await recordSurfaceSuccess({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { id: 44, url: 'https://upstream.example.com', platform: 'new-api', name: 'Upstream' },
+        tokenValue: 'live-token',
+        tokenName: 'default',
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      parsedUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      requestStartedAtMs: 1000,
+      latencyMs: 250,
+      retryCount: 0,
+      upstreamPath: '/v1/chat/completions',
+      logSuccess,
+    });
+
+    expect(result.proxyLogWrite).toEqual({ written: false });
+  });
+
+  it('still propagates a rejected logSuccess as an exception, not as three-state', async () => {
+    resolveProxyUsageWithSelfLogFallbackMock.mockResolvedValue({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      recoveredFromSelfLog: false,
+      estimatedCostFromQuota: 0,
+      selfLogBillingMeta: null,
+      usageSource: 'unknown',
+    });
+    resolveProxyLogBillingMock.mockResolvedValue({ estimatedCost: 0, billingDetails: null });
+    // Production `failureToolkit.log` never rejects (writeSurfaceProxyLog turns
+    // insert failures into `{ written: false }`); this locks the propagation
+    // contract for arbitrary callbacks. Do not add a catch to recordSurfaceSuccess
+    // to make this pass.
+    const logSuccess = vi.fn().mockRejectedValue(new Error('log chain rejected'));
+
+    const { recordSurfaceSuccess } = await import('./sharedSurface.js');
+    await expect(recordSurfaceSuccess({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { id: 44, url: 'https://upstream.example.com', platform: 'new-api', name: 'Upstream' },
+        tokenValue: 'live-token',
+        tokenName: 'default',
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      parsedUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      requestStartedAtMs: 1000,
+      latencyMs: 250,
+      retryCount: 0,
+      upstreamPath: '/v1/chat/completions',
+      logSuccess,
+    })).rejects.toThrow('log chain rejected');
+  });
+
+  it('resolves `{ written: false }` (warn, no throw) when the proxy-log insert rejects', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockRejectedValueOnce(new Error('insert exploded'));
+
+    const { writeSurfaceProxyLog } = await import('./sharedSurface.js');
+    const result = await writeSurfaceProxyLog({
+      warningScope: 'chat',
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33 },
+        actualModel: 'upstream-model',
+      },
+      modelRequested: 'gpt-5.2',
+      status: 'success',
+      httpStatus: 200,
+      latencyMs: 1200,
+      errorMessage: null,
+      retryCount: 0,
+      downstreamPath: '/v1/chat/completions',
+    });
+
+    expect(result).toEqual({ written: false });
+    expect(consoleWarnMock).toHaveBeenCalledWith(
+      '[proxy/chat] failed to write proxy log',
+      expect.any(Error),
+    );
   });
 });

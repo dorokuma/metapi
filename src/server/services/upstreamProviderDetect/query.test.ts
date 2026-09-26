@@ -285,6 +285,249 @@ describe('upstreamProviderDetect query', () => {
         misses: 1,
       });
     });
+
+    it('skips the hard lookup for a non-success log even when the id matches', async () => {
+      await persistUpstreamProviderObservation({
+        observation: buildObservation(),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS,
+        proxyLogId: 999,
+      });
+
+      const match = await query.findUpstreamProviderObservationForProxyLog(
+        { ...matchKey, status: 'failed', proxyLogId: 999 },
+        BASE_MS,
+      );
+
+      expect(match.observation).toBeNull();
+      expect(match.candidateCount).toBe(0);
+      expect(match.matchKind).toBe('skipped');
+      expect(query.getUpstreamProviderObservationMatchMetrics()).toMatchObject({
+        evaluated: 0,
+        hardHits: 0,
+        hardAnomaly: 0,
+        hardAmbiguous: 0,
+      });
+    });
+
+    it('returns a hard hit by id without a window and without complete keys', async () => {
+      await persistUpstreamProviderObservation({
+        observation: buildObservation(),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS,
+        proxyLogId: 999,
+      });
+
+      // createdAt is an hour away from the row and the account key is missing on
+      // the log side: neither blocks a hard id hit.
+      const match = await query.findUpstreamProviderObservationForProxyLog(
+        {
+          ...matchKey,
+          accountId: null,
+          createdAt: formatUtcSqlDateTime(new Date(BASE_MS + 60 * 60 * 1000)),
+          proxyLogId: 999,
+        },
+        BASE_MS,
+      );
+
+      expect(match.matchKind).toBe('hard');
+      expect(match.candidateCount).toBe(1);
+      expect(match.windowFrom).toBeNull();
+      expect(match.windowTo).toBeNull();
+      expect(match.observation?.finalProvider).toBe('deepseek');
+      expect(match.observation?.proxyLogId).toBe(999);
+      const metrics = query.getUpstreamProviderObservationMatchMetrics();
+      expect(metrics).toMatchObject({
+        hardHits: 1,
+        hardAnomaly: 0,
+        hardAmbiguous: 0,
+        evaluated: 0,
+        uniqueHits: 0,
+        ambiguous: 0,
+        misses: 0,
+      });
+      expect(metrics.ambiguousRate).toBe(0);
+    });
+
+    it('withholds a hard hit when a present key column disagrees (account, channel, model, stream)', async () => {
+      const cases = [
+        { rowPatch: { accountId: 9 } },
+        { rowPatch: { channelId: 12 } },
+        { rowPatch: { requestedModel: 'other/model' } },
+        { rowPatch: { isStream: true } },
+      ] as const;
+
+      for (const { rowPatch } of cases) {
+        await db.delete(schema.upstreamProviderObservations).run();
+        query.resetUpstreamProviderObservationMatchMetrics(BASE_MS);
+
+        await persistUpstreamProviderObservation({
+          observation: buildObservation({ cacheMissTokens: 77 }),
+          accountId: 8,
+          channelId: 11,
+          requestedModel: 'deepseek/deepseek-v4.1-flash',
+          isStream: false,
+          createdAtMs: BASE_MS,
+          proxyLogId: 999,
+          ...rowPatch,
+        });
+        // A NULL-pinned row sits in the same window: an anomaly must not fall
+        // back to it, so this row must never be surfaced either.
+        await persistUpstreamProviderObservation({
+          observation: buildObservation({ cacheMissTokens: 88 }),
+          accountId: 8,
+          channelId: 11,
+          requestedModel: 'deepseek/deepseek-v4.1-flash',
+          isStream: false,
+          createdAtMs: BASE_MS - 500,
+        });
+
+        const match = await query.findUpstreamProviderObservationForProxyLog(
+          { ...matchKey, proxyLogId: 999 },
+          BASE_MS,
+        );
+
+        expect(match.observation, JSON.stringify(rowPatch)).toBeNull();
+        expect(match.candidateCount).toBe(1);
+        expect(match.matchKind).toBe('hardAnomaly');
+        expect(query.getUpstreamProviderObservationMatchMetrics()).toMatchObject({
+          hardAnomaly: 1,
+          hardHits: 0,
+          evaluated: 0,
+        });
+      }
+    });
+
+    it('keeps a hard hit clean when a key column is missing on one side only', async () => {
+      await persistUpstreamProviderObservation({
+        observation: buildObservation(),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS,
+        proxyLogId: 999,
+      });
+
+      // One side missing is not a conflict: no account key on the log, no
+      // stream flag on this call, no requested model on the log.
+      const match = await query.findUpstreamProviderObservationForProxyLog(
+        { ...matchKey, accountId: null, requestedModel: null, isStream: null, proxyLogId: 999 },
+        BASE_MS,
+      );
+
+      expect(match.matchKind).toBe('hard');
+      expect(match.observation?.cacheMissTokens).toBe(34);
+      expect(query.getUpstreamProviderObservationMatchMetrics()).toMatchObject({
+        hardHits: 1,
+        hardAnomaly: 0,
+        evaluated: 0,
+      });
+    });
+
+    it('withholds (never guesses) when two observations carry the same proxy_log_id', async () => {
+      for (const cacheMissTokens of [11, 22]) {
+        await persistUpstreamProviderObservation({
+          observation: buildObservation({ cacheMissTokens }),
+          accountId: 8,
+          channelId: 11,
+          requestedModel: 'deepseek/deepseek-v4.1-flash',
+          isStream: false,
+          createdAtMs: BASE_MS,
+          proxyLogId: 999,
+        });
+      }
+      // A NULL row in the window must not be used as a fallback.
+      await persistUpstreamProviderObservation({
+        observation: buildObservation({ cacheMissTokens: 33 }),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS - 500,
+      });
+
+      const match = await query.findUpstreamProviderObservationForProxyLog(
+        { ...matchKey, proxyLogId: 999 },
+        BASE_MS,
+      );
+
+      expect(match.observation).toBeNull();
+      expect(match.candidateCount).toBeGreaterThanOrEqual(2);
+      expect(match.matchKind).toBe('hardAmbiguous');
+      expect(query.getUpstreamProviderObservationMatchMetrics()).toMatchObject({
+        hardAmbiguous: 1,
+        hardHits: 0,
+        evaluated: 0,
+      });
+    });
+
+    it('does not borrow a row already pinned to another proxy log (miss, not a fake unique hit)', async () => {
+      await persistUpstreamProviderObservation({
+        observation: buildObservation(),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS,
+        proxyLogId: 12345,
+      });
+
+      const match = await query.findUpstreamProviderObservationForProxyLog(
+        { ...matchKey, proxyLogId: 999 },
+        BASE_MS,
+      );
+
+      expect(match.observation).toBeNull();
+      expect(match.candidateCount).toBe(0);
+      expect(match.matchKind).toBe('window');
+      expect(query.getUpstreamProviderObservationMatchMetrics()).toMatchObject({
+        evaluated: 1,
+        misses: 1,
+        uniqueHits: 0,
+        hardHits: 0,
+      });
+    });
+
+    it('matches the remaining NULL row when a window neighbour is pinned to another log', async () => {
+      await persistUpstreamProviderObservation({
+        observation: buildObservation({ cacheMissTokens: 11 }),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS - 500,
+        proxyLogId: 12345,
+      });
+      await persistUpstreamProviderObservation({
+        observation: buildObservation({ cacheMissTokens: 22 }),
+        accountId: 8,
+        channelId: 11,
+        requestedModel: 'deepseek/deepseek-v4.1-flash',
+        isStream: false,
+        createdAtMs: BASE_MS,
+      });
+
+      const match = await query.findUpstreamProviderObservationForProxyLog(
+        { ...matchKey, proxyLogId: 999 },
+        BASE_MS,
+      );
+
+      expect(match.candidateCount).toBe(1);
+      expect(match.matchKind).toBe('window');
+      expect(match.observation?.cacheMissTokens).toBe(22);
+      expect(query.getUpstreamProviderObservationMatchMetrics()).toMatchObject({
+        uniqueHits: 1,
+        ambiguous: 0,
+        hardHits: 0,
+      });
+    });
   });
 
   describe('query windows (F3)', () => {

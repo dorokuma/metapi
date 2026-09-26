@@ -10,7 +10,7 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { resolveProxyLogBilling } from '../../services/proxyBilling.js';
 import type { DownstreamClientContext } from '../downstreamClientContext.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLog, type ProxyLogWriteResult } from '../../services/proxyLogStore.js';
 import { dispatchRuntimeRequest } from '../../services/runtimeDispatch.js';
 import type { BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
 import { buildUpstreamUrl } from '../orchestration/upstreamRequest.js';
@@ -261,7 +261,7 @@ export async function writeSurfaceProxyLog(input: {
   usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
-}): Promise<void> {
+}): Promise<ProxyLogWriteResult> {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
     const normalizedErrorMessage = composeProxyLogMessage({
@@ -275,7 +275,7 @@ export async function writeSurfaceProxyLog(input: {
       usageSource: input.usageSource || null,
       errorMessage: input.errorMessage,
     });
-    await insertProxyLog({
+    const proxyLogId = await insertProxyLog({
       routeId: input.selected.channel.routeId,
       channelId: input.selected.channel.id,
       accountId: input.selected.account.id,
@@ -300,8 +300,15 @@ export async function writeSurfaceProxyLog(input: {
       retryCount: input.retryCount,
       createdAt,
     });
+    // written: true even when the dialect could not report a positive id —
+    // "log written, id unavailable" must still persist the observation with a
+    // NULL proxy_log_id. Only an actual insert failure is `written: false`.
+    return proxyLogId != null && Number.isInteger(proxyLogId) && proxyLogId > 0
+      ? { written: true, proxyLogId }
+      : { written: true, proxyLogId: null };
   } catch (error) {
     console.warn(`[proxy/${input.warningScope}] failed to write proxy log`, error);
+    return { written: false };
   }
 }
 
@@ -410,7 +417,7 @@ export async function recordSurfaceSuccess(input: {
     estimatedCost?: number;
     billingDetails?: unknown;
     upstreamPath?: string | null;
-  }) => Promise<void>;
+  }) => Promise<ProxyLogWriteResult>;
   recordDownstreamCost?: (estimatedCost: number) => void;
   bestEffortMetrics?: {
     errorLabel: string;
@@ -419,6 +426,7 @@ export async function recordSurfaceSuccess(input: {
   resolvedUsage: SurfaceResolvedUsageSummary;
   estimatedCost: number;
   billingDetails: unknown;
+  proxyLogWrite: ProxyLogWriteResult;
 }> {
   const hasUpstreamUsage = input.upstreamUsagePresent ?? (
     input.parsedUsage.totalTokens > 0
@@ -488,7 +496,12 @@ export async function recordSurfaceSuccess(input: {
       completionTokens: resolvedUsage.completionTokens,
       totalTokens: resolvedUsage.totalTokens,
     };
-  await input.logSuccess({
+  // The success write result is part of the accounting contract: callers use
+  // `proxyLogWrite` to decide whether an upstream observation may be persisted.
+  // Do NOT wrap this await in a try/catch: a rejected `logSuccess` must keep
+  // propagating to the outer request handler (that is an exception, not the
+  // three-state contract).
+  const rawProxyLogWrite = await input.logSuccess({
     selected: input.selected,
     modelRequested: input.requestedModel,
     status: 'success',
@@ -506,6 +519,15 @@ export async function recordSurfaceSuccess(input: {
     billingDetails,
     upstreamPath: input.upstreamPath,
   });
+  // Fail closed on malformed resolved shapes (e.g. an outdated test stub that
+  // still resolves `undefined`): treat it as "not written". This does not
+  // catch rejections and does not turn a legit `{ written: true, proxyLogId: null }`
+  // into a failure.
+  const proxyLogWrite: ProxyLogWriteResult = (
+    rawProxyLogWrite && typeof rawProxyLogWrite.written === 'boolean'
+  )
+    ? rawProxyLogWrite
+    : { written: false };
 
   if (input.upstreamHeaders) {
     void recordOauthQuotaHeadersSnapshot({
@@ -520,6 +542,7 @@ export async function recordSurfaceSuccess(input: {
     resolvedUsage,
     estimatedCost,
     billingDetails,
+    proxyLogWrite,
   };
 }
 
@@ -547,8 +570,8 @@ export function createSurfaceFailureToolkit(input: {
     estimatedCost?: number;
     billingDetails?: unknown;
     upstreamPath?: string | null;
-  }) => {
-    await writeSurfaceProxyLog({
+  }): Promise<ProxyLogWriteResult> => {
+    return await writeSurfaceProxyLog({
       warningScope: input.warningScope,
       selected: args.selected,
       modelRequested: args.modelRequested,

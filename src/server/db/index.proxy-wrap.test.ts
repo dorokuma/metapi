@@ -2,6 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getInsertedRowId } from './insertHelpers.js';
 
 type DbModule = typeof import('./index.js');
 
@@ -101,6 +102,56 @@ describe('db proxy query wrapper', () => {
     });
     expect(result).toEqual({
       rows: [{ changes: 1, lastInsertRowid: 7 }],
+    });
+  });
+
+  it('normalizes mysql insertId into lastInsertRowid through the run shim', async () => {
+    const execute = vi.fn(async () => [{ insertId: 42, affectedRows: 1 }]);
+    const queryLike = {
+      execute,
+      then(onFulfilled: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) {
+        return Promise.resolve(execute()).then(onFulfilled, onRejected);
+      },
+    };
+
+    const wrapped = testUtils.wrapQueryLike(queryLike as any);
+    const runResult = await wrapped.run();
+
+    expect(runResult).toEqual({ changes: 1, lastInsertRowid: 42 });
+    expect(getInsertedRowId(runResult)).toBe(42);
+
+    const zeroExecute = vi.fn(async () => [{ insertId: 0, affectedRows: 1 }]);
+    const zeroQueryLike = {
+      execute: zeroExecute,
+      then(onFulfilled: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) {
+        return Promise.resolve(zeroExecute()).then(onFulfilled, onRejected);
+      },
+    };
+    const zeroResult = await testUtils.wrapQueryLike(zeroQueryLike as any).run();
+
+    expect(zeroResult).toEqual({ changes: 1, lastInsertRowid: 0 });
+    expect(getInsertedRowId(zeroResult)).toBeNull();
+  });
+
+  it('appends returning id for proxy_logs inserts on the postgres path', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ id: 99 }],
+      rowCount: 1,
+    }));
+
+    const result = await testUtils.pgProxyQuery(
+      { query } as any,
+      'insert into "proxy_logs" ("status") values ($1)',
+      ['success'],
+      'execute',
+    );
+
+    expect(query).toHaveBeenCalledWith({
+      text: 'insert into "proxy_logs" ("status") values ($1) returning id',
+      values: ['success'],
+    });
+    expect(result).toEqual({
+      rows: [{ changes: 1, lastInsertRowid: 99 }],
     });
   });
 

@@ -446,6 +446,7 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       const text = collectText(root.root);
       expect(text).toContain('实际上游');
       expect(text).toContain('未记录上游观测，可能超出保留期');
+      expect(text).toContain('撞窗无法唯一关联');
     } finally {
       await act(async () => {
         root.unmount();

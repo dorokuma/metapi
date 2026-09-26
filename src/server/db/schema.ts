@@ -282,7 +282,7 @@ export const proxyLogs = sqliteTable('proxy_logs', {
 // 不含 header、prompt/completion 正文，provider request id 与 planningReasoning 不落库。
 export const upstreamProviderObservations = sqliteTable('upstream_provider_observations', {
   id: integer('id').primaryKey({ autoIncrement: true }),
-  proxyLogId: integer('proxy_log_id'), // v1 可空：详情按时间窗匹配，不回填 proxy_logs.id
+  proxyLogId: integer('proxy_log_id'), // 成功日志写入后钉上该次 proxy_logs.id；写入失败、拿不到正整数 id 或存量行保持 NULL，详情回退时间窗
   siteId: integer('site_id'),
   accountId: integer('account_id'),
   routeId: integer('route_id'),

@@ -256,6 +256,9 @@ describe('upstream observations api', () => {
       fallbacks: ['alibaba', 'baseten'],
       usageCost: 0.0000135,
     });
+    // matchKind / candidateCount stay internal: the API only exposes the observation.
+    expect(detailBody as Record<string, unknown>).not.toHaveProperty('matchKind');
+    expect(detailBody as Record<string, unknown>).not.toHaveProperty('candidateCount');
 
     // A failed log never matches, even with the same unique observation in the
     // window (status gate in query.ts, wired through the stats detail route).
@@ -287,6 +290,34 @@ describe('upstream observations api', () => {
     const ambiguous = await app.inject({ method: 'GET', url: `/api/stats/proxy-logs/${log.id}` });
     expect(ambiguous.statusCode).toBe(200);
     expect((ambiguous.json() as { upstreamObservation: unknown }).upstreamObservation).toBeNull();
+
+    // Hard-pinned row wins: the same window also holds a NULL row, but the row
+    // pinned to this log's id is the authority (and the window excludes pinned
+    // rows now, so the neighbour can never turn this into ambiguity).
+    await db.delete(schema.upstreamProviderObservations).run();
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 77 }),
+      siteId: 7,
+      accountId: 8,
+      channelId: 11,
+      requestedModel: 'deepseek/deepseek-v4.1-flash',
+      isStream: false,
+      createdAtMs: BASE_MS,
+      proxyLogId: log.id,
+    });
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 88 }),
+      siteId: 7,
+      accountId: 8,
+      channelId: 11,
+      requestedModel: 'deepseek/deepseek-v4.1-flash',
+      isStream: false,
+      createdAtMs: BASE_MS - 1_000,
+    });
+    const hardPinned = await app.inject({ method: 'GET', url: `/api/stats/proxy-logs/${log.id}` });
+    expect(hardPinned.statusCode, hardPinned.body).toBe(200);
+    expect((hardPinned.json() as { upstreamObservation?: { cacheMissTokens?: number | null } }).upstreamObservation)
+      .toMatchObject({ cacheMissTokens: 77 });
 
     // No observation at all -> null (F4 copy is a UI concern).
     await db.delete(schema.upstreamProviderObservations).run();

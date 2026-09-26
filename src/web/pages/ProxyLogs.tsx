@@ -655,7 +655,7 @@ function renderUpstreamObservationBody(
   if (!observation) {
     return (
       <span style={{ color: "var(--color-text-muted)" }}>
-        未记录上游观测，可能超出保留期（观测默认保留 14 天，短于日志 30 天）
+        未记录上游观测，可能超出保留期，或与相邻请求撞窗无法唯一关联（观测默认保留 14 天，短于日志 30 天）
       </span>
     );
   }

@@ -6,6 +6,23 @@ import {
   hasProxyLogDownstreamApiKeyIdColumn,
   hasProxyLogStreamTimingColumns,
 } from '../db/index.js';
+import { getInsertedRowId } from '../db/insertHelpers.js';
+
+/**
+ * Three-state result of one proxy-log write attempt (v2.1 hard linkage).
+ *
+ * - `{ written: true, proxyLogId }` — the insert succeeded. `proxyLogId` is the
+ *   id of that very insert when the dialect handed back a positive integer,
+ *   otherwise `null` (dialect could not report it): the observation may still
+ *   be persisted, `proxy_log_id` stays NULL and the detail read side falls back
+ *   to the ±2s window.
+ * - `{ written: false }` — the insert failed and was swallowed with a warning.
+ *   Callers must NOT persist an observation; `proxyLogId == null` is not a
+ *   failure signal.
+ */
+export type ProxyLogWriteResult =
+  | { written: true; proxyLogId: number | null }
+  | { written: false };
 
 export type ProxyLogInsertInput = {
   routeId?: number | null;
@@ -256,7 +273,7 @@ export function isMissingProxyLogStreamTimingColumnsError(error: unknown): boole
     );
 }
 
-export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> {
+export async function insertProxyLog(input: ProxyLogInsertInput): Promise<number | null> {
   const baseValues = {
     routeId: input.routeId ?? null,
     channelId: input.channelId ?? null,
@@ -320,8 +337,10 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
     };
 
     try {
-      await db.insert(schema.proxyLogs).values(values).run();
-      return;
+      const inserted = await db.insert(schema.proxyLogs).values(values).run();
+      // The id comes from this run only. Never re-query MAX(id) / last_insert_rowid():
+      // the SQLite connection-level function can hand back a concurrent insert's id.
+      return getInsertedRowId(inserted);
     } catch (error) {
       if (allowBillingDetails && isMissingBillingDetailsColumnError(error)) {
         allowBillingDetails = false;

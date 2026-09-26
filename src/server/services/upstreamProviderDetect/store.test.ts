@@ -61,6 +61,7 @@ describe('upstreamProviderDetect store', () => {
   let persistUpstreamProviderObservation: StoreModule['persistUpstreamProviderObservation'];
   let pruneUpstreamProviderObservations: StoreModule['pruneUpstreamProviderObservations'];
   let serializeModelAttemptsForStorage: StoreModule['serializeModelAttemptsForStorage'];
+  let shouldPersistUpstreamObservation: StoreModule['shouldPersistUpstreamObservation'];
 
   beforeAll(async () => {
     await import('../../db/migrate.js');
@@ -72,6 +73,7 @@ describe('upstreamProviderDetect store', () => {
     persistUpstreamProviderObservation = storeModule.persistUpstreamProviderObservation;
     pruneUpstreamProviderObservations = storeModule.pruneUpstreamProviderObservations;
     serializeModelAttemptsForStorage = storeModule.serializeModelAttemptsForStorage;
+    shouldPersistUpstreamObservation = storeModule.shouldPersistUpstreamObservation;
   });
 
   beforeEach(async () => {
@@ -231,6 +233,44 @@ describe('upstreamProviderDetect store', () => {
     const rows = await db.select().from(schema.upstreamProviderObservations).all();
     expect(rows).toHaveLength(1);
     expect(rows[0].clientSessionId).toBe('s'.repeat(256));
+  });
+
+  it('pins a positive proxy log id and stores null for missing, zero, negative and non-integer ids', async () => {
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 1 }),
+      proxyLogId: 1234,
+    });
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 2 }),
+      proxyLogId: 0,
+    });
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 3 }),
+      proxyLogId: -5,
+    });
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 4 }),
+      proxyLogId: 1.5,
+    });
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 5 }),
+      proxyLogId: null,
+    });
+    await persistUpstreamProviderObservation({
+      observation: buildObservation({ cacheMissTokens: 6 }),
+    });
+
+    const rows = await db.select().from(schema.upstreamProviderObservations).all();
+    expect(rows).toHaveLength(6);
+    expect(rows.map((row) => row.proxyLogId)).toEqual([1234, null, null, null, null, null]);
+  });
+
+  it('derives the persist decision from the three-state write result only', () => {
+    // `proxyLogId == null` must never be treated as a failed write: a written
+    // log without a positive id still persists a NULL-pinned observation.
+    expect(shouldPersistUpstreamObservation({ written: false })).toBe(false);
+    expect(shouldPersistUpstreamObservation({ written: true, proxyLogId: null })).toBe(true);
+    expect(shouldPersistUpstreamObservation({ written: true, proxyLogId: 77 })).toBe(true);
   });
 
   it('prunes rows older than the retention window and keeps fresh rows', async () => {

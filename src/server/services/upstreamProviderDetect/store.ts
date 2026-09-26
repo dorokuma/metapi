@@ -1,16 +1,21 @@
 /**
  * Persistence for upstream-provider observations.
  *
- * Writes are strictly additive and never touch `proxy_logs`:
- * `insertProxyLog` keeps its signature, `proxy_log_id` stays null in v1, and
- * the observation is written after the success log has been recorded. Insert
- * failures are warned once and never propagate to the proxy request.
+ * Writes are strictly additive and never touch `proxy_logs`: callers pass the
+ * id of the success log they just wrote (`proxyLogId`), and the observation is
+ * inserted after that log. Only a positive integer is pinned; anything else
+ * (missing, `0`, negative, `NaN`, string) is stored as `NULL` and the read side
+ * falls back to the ±2s window. When the log write itself failed the caller
+ * must not call this function at all (three-state `written: false`).
+ *
+ * Insert failures are warned once and never propagate to the proxy request.
  */
 
 import { lt } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { formatUtcSqlDateTime } from '../localTimeService.js';
+import type { ProxyLogWriteResult } from '../proxyLogStore.js';
 import type { UpstreamProviderObservation, UpstreamProviderModelAttemptSummary } from './parse.js';
 
 const MODEL_ATTEMPTS_JSON_MAX_BYTES = 8 * 1024;
@@ -31,7 +36,19 @@ export type UpstreamProviderObservationContext = {
   upstreamPath?: string | null;
   isStream?: boolean | null;
   createdAtMs?: number;
+  /** Id of the success proxy log written before this observation; pinned only when a positive integer. */
+  proxyLogId?: number | null;
 };
+
+/**
+ * Single gate for the write side: an observation may only be persisted when the
+ * success proxy log was actually written. Callers must branch on this pure
+ * function (never on `proxyLogId == null`): `{ written: true, proxyLogId: null }`
+ * still persists a NULL-pinned row for the time-window fallback.
+ */
+export function shouldPersistUpstreamObservation(write: ProxyLogWriteResult): boolean {
+  return write.written === true;
+}
 
 function byteLength(value: string): number {
   return Buffer.byteLength(value, 'utf8');
@@ -79,9 +96,16 @@ export async function persistUpstreamProviderObservation(
   try {
     const fallbacksAvailable = observation.fallbacksAvailable;
     const attempts = serializeModelAttemptsForStorage(observation.modelAttemptsSummary);
+    const proxyLogId = (
+      typeof input.proxyLogId === 'number'
+      && Number.isInteger(input.proxyLogId)
+      && input.proxyLogId > 0
+    )
+      ? input.proxyLogId
+      : null;
 
     await db.insert(schema.upstreamProviderObservations).values({
-      proxyLogId: null,
+      proxyLogId,
       siteId: input.siteId ?? null,
       accountId: input.accountId ?? null,
       routeId: input.routeId ?? null,

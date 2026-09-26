@@ -827,7 +827,7 @@ export const zhToEnSupplemental: Record<string, string> = {
   '上游分布': 'Upstream Distribution',
   '上游自报，非 metapi 计费': 'Upstream-reported, not metapi billing',
   '上游自报，非 metapi 计费；按当前筛选（站点/模型/时间）查询，默认最近 7 天（数值为观测数，非全量请求数）。开关、采样率与参与站点在「设置 → 上游探测」中配置。': 'Upstream-reported, not metapi billing; queried with the current filters (site/model/time), default last 7 days (values are observation counts, not total request counts). The switch, sample rate and participating sites are configured in "Settings → Upstream Detection".',
-  '未记录上游观测，可能超出保留期（观测默认保留 14 天，短于日志 30 天）': 'No upstream observation recorded; it may be past the retention window (observations are kept 14 days by default, shorter than the 30-day logs).',
+  '未记录上游观测，可能超出保留期，或与相邻请求撞窗无法唯一关联（观测默认保留 14 天，短于日志 30 天）': 'No upstream observation recorded; it may be past the retention window, or could not be uniquely matched against a neighboring request (observations are kept 14 days by default, shorter than the 30-day logs).',
   '提供方': 'Provider',
   '规范模型': 'Canonical Model',
   '会话亲和': 'Session Affinity',

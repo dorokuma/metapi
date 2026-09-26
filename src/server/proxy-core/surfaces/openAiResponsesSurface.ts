@@ -28,7 +28,8 @@ import {
   createUpstreamProviderObservationCollector,
   observeUpstreamProviderObservationSseText,
 } from '../../services/upstreamProviderDetect/collect.js';
-import { persistUpstreamProviderObservation } from '../../services/upstreamProviderDetect/store.js';
+import { persistUpstreamProviderObservation, shouldPersistUpstreamObservation } from '../../services/upstreamProviderDetect/store.js';
+import type { ProxyLogWriteResult } from '../../services/proxyLogStore.js';
 import { getProxyAuthContext, getProxyResourceOwner } from '../../middleware/auth.js';
 import { normalizeInputFileBlock } from '../../transformers/shared/inputFile.js';
 import { promoteRequiredEndpointCandidateAfterProtocolError } from '../../transformers/shared/endpointCompatibility.js';
@@ -407,13 +408,20 @@ export async function handleOpenAiResponsesSurfaceRequest(
       const modelName = selected.actualModel || requestedModel;
       // 上游探测旁路：只在主开关 + 参与站点 + 采样都命中时收集；
       // 收集器随重试 attempt 作用域创建（B2），attempt 内的观测不会泄漏到下一次成功的日志；
-      // 写入发生在成功日志之后，成功日志写失败则不写观测（C4 同生共死，与 chat 面一致）；
-      // persist 自身不抛，不影响转发字节与状态码。
+      // C4 三态：成功日志写入失败（written: false）则不调用 persist，观测 0 行；
+      // 写入成功才钉 id（拿不到正整数 id 时列保持 NULL，读侧回退时间窗）；
+      // `logSuccess` 的 rejection 仍由外层处理，不是这条三态；persist 自身不抛，不影响转发字节与状态码。
       const upstreamObservationCollector = createUpstreamProviderObservationCollector({
         requestId: String(request.id ?? ''),
         siteId: selected.site.id,
       });
-      const persistUpstreamObservation = async (streamRequest: boolean, upstreamPath: string | null) => {
+      const persistUpstreamObservation = async (
+        streamRequest: boolean,
+        upstreamPath: string | null,
+        write: ProxyLogWriteResult,
+      ) => {
+        // 只看三态，不得用 proxyLogId == null 判失败（written: true 且 id 为 null 仍要落库）。
+        if (!shouldPersistUpstreamObservation(write)) return;
         await persistUpstreamProviderObservation({
           observation: upstreamObservationCollector.snapshot(),
           siteId: selected.site.id,
@@ -425,6 +433,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           actualModel: modelName,
           upstreamPath,
           isStream: streamRequest,
+          proxyLogId: write.written ? write.proxyLogId : null,
         });
       };
       const oauth = getOauthInfoFromAccount(selected.account);
@@ -899,7 +908,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           upstreamUsagePresent: boolean,
         ) => {
           try {
-            await recordSurfaceSuccess({
+            const { proxyLogWrite } = await recordSurfaceSuccess({
               selected,
               requestedModel,
               modelName,
@@ -920,7 +929,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 errorLabel: '[responses] post-stream bookkeeping failed:',
               },
             });
-            await persistUpstreamObservation(true, successfulUpstreamPath);
+            await persistUpstreamObservation(true, successfulUpstreamPath, proxyLogWrite);
           } catch (error) {
             console.error('[responses] post-stream success logging failed:', error);
           }
@@ -1361,7 +1370,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           serializationMode: isCompactRequest ? 'compact' : 'response',
         });
         try {
-          await recordSurfaceSuccess({
+          const { proxyLogWrite } = await recordSurfaceSuccess({
             selected,
             requestedModel,
             modelName,
@@ -1382,7 +1391,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               errorLabel: '[responses] post-response bookkeeping failed:',
             },
           });
-            await persistUpstreamObservation(false, successfulUpstreamPath);
+            await persistUpstreamObservation(false, successfulUpstreamPath, proxyLogWrite);
 	        } catch (error) {
 	          console.error('[responses] post-response success logging failed:', error);
 	        }

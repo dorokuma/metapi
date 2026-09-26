@@ -28,7 +28,8 @@ import {
   createUpstreamProviderObservationCollector,
   observeUpstreamProviderObservationSseText,
 } from '../../services/upstreamProviderDetect/collect.js';
-import { persistUpstreamProviderObservation } from '../../services/upstreamProviderDetect/store.js';
+import { persistUpstreamProviderObservation, shouldPersistUpstreamObservation } from '../../services/upstreamProviderDetect/store.js';
+import type { ProxyLogWriteResult } from '../../services/proxyLogStore.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
 import { shouldPreferResponsesForAnthropicContinuation } from '../../transformers/anthropic/messages/compatibility.js';
@@ -453,12 +454,20 @@ export async function handleChatSurfaceRequest(
     const oauth = getOauthInfoFromAccount(selected.account);
     // 上游探测旁路：只在主开关 + 参与站点 + 采样都命中时收集；
     // 收集器随重试 attempt 作用域创建（B2），attempt 内的观测不会泄漏到下一次成功的日志；
-    // 写入发生在成功日志之后，失败只 warn，不影响转发字节与状态码。
+    // 三态：成功日志写入失败（written: false）则不调用 persist，观测 0 行；
+    // 写入成功但方言拿不到正整数 id 时仍写观测，proxy_log_id 为 NULL，读侧回退时间窗；
+    // persist 自身不抛，不影响转发字节与状态码。
     const upstreamObservationCollector = createUpstreamProviderObservationCollector({
       requestId: String(request.id ?? ''),
       siteId: selected.site.id,
     });
-    const persistUpstreamObservation = async (streamRequest: boolean, upstreamPath: string | null) => {
+    const persistUpstreamObservation = async (
+      streamRequest: boolean,
+      upstreamPath: string | null,
+      write: ProxyLogWriteResult,
+    ) => {
+      // 只看三态，不得用 proxyLogId == null 判失败（written: true 且 id 为 null 仍要落库）。
+      if (!shouldPersistUpstreamObservation(write)) return;
       await persistUpstreamProviderObservation({
         observation: upstreamObservationCollector.snapshot(),
         siteId: selected.site.id,
@@ -470,6 +479,7 @@ export async function handleChatSurfaceRequest(
         actualModel: modelName,
         upstreamPath,
         isStream: streamRequest,
+        proxyLogId: write.written ? write.proxyLogId : null,
       });
     };
     const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
@@ -780,7 +790,7 @@ export async function handleChatSurfaceRequest(
         };
         let upstreamUsagePresent = false;
         const recordStreamSuccess = async (latencyMs: number) => {
-          await recordSurfaceSuccess({
+          const { proxyLogWrite } = await recordSurfaceSuccess({
             selected,
             requestedModel,
             modelName,
@@ -801,7 +811,7 @@ export async function handleChatSurfaceRequest(
               errorLabel: '[proxy/chat] failed to record success metrics',
             },
           });
-          await persistUpstreamObservation(true, successfulUpstreamPath);
+          await persistUpstreamObservation(true, successfulUpstreamPath, proxyLogWrite);
         };
 
         const writeLines = (lines: string[]) => {
@@ -1262,7 +1272,7 @@ export async function handleChatSurfaceRequest(
         : downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
       const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
 
-      await recordSurfaceSuccess({
+      const { proxyLogWrite } = await recordSurfaceSuccess({
         selected,
         requestedModel,
         modelName,
@@ -1283,7 +1293,7 @@ export async function handleChatSurfaceRequest(
           errorLabel: '[proxy/chat] failed to record success metrics',
         },
       });
-      await persistUpstreamObservation(false, successfulUpstreamPath);
+      await persistUpstreamObservation(false, successfulUpstreamPath, proxyLogWrite);
       await finalizeDebugSuccess(
         upstream.status,
         successfulUpstreamPath,

@@ -132,8 +132,17 @@ describe('translateText', () => {
     }
   });
 
+  it('translates the hard-link empty-state copy including the window-collision clause', () => {
+    const copy = '未记录上游观测，可能超出保留期，或与相邻请求撞窗无法唯一关联（观测默认保留 14 天，短于日志 30 天）';
+    const translated = translateText(copy, 'en');
+    expect(translated).not.toBe('Untranslated');
+    expect(translated).not.toMatch(/[\u3400-\u9fff]/);
+    expect(translated).toContain('or could not be uniquely matched against a neighboring request');
+  });
+
   it('keeps upstream-observation copy free of chinese in en mode', () => {
     const samples = [
+      '未记录上游观测，可能超出保留期，或与相邻请求撞窗无法唯一关联（观测默认保留 14 天，短于日志 30 天）',
       '上游自报，非 metapi 计费',
       '当前回退清单（每个站点/模型/规范模型取窗口内最新一条，不跨行并集）',
       '暂无回退清单（观测未携带回退数据）。',

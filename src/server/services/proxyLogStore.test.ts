@@ -145,6 +145,40 @@ describe('proxyLogStore', () => {
     expect(dbInsertValuesMock.mock.calls[1][0].billingDetails).toBeUndefined();
   });
 
+  it('returns the inserted row id from the successful run', async () => {
+    dbInsertRunMock.mockResolvedValueOnce({ changes: 1, lastInsertRowid: 42 });
+
+    await expect(insertProxyLog({ modelRequested: 'gpt-5' })).resolves.toBe(42);
+    expect(dbInsertRunMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the id of the retried insert only, never the failed attempt', async () => {
+    hasProxyLogBillingDetailsColumnMock.mockResolvedValue(true);
+    dbInsertRunMock
+      .mockRejectedValueOnce(new Error('column proxy_logs.billing_details does not exist'))
+      .mockResolvedValueOnce({ changes: 1, lastInsertRowid: 77 });
+
+    await expect(insertProxyLog({
+      modelRequested: 'gpt-5',
+      billingDetails: { total: 1 },
+    })).resolves.toBe(77);
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(2);
+    expect(dbInsertRunMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns null when the dialect reports no positive insert id', async () => {
+    dbInsertRunMock.mockResolvedValueOnce({ changes: 1, lastInsertRowid: 0 });
+    await expect(insertProxyLog({ modelRequested: 'gpt-5' })).resolves.toBeNull();
+
+    dbInsertRunMock.mockReset();
+    dbInsertRunMock.mockResolvedValueOnce({ changes: 1 });
+    await expect(insertProxyLog({ modelRequested: 'gpt-5' })).resolves.toBeNull();
+
+    dbInsertRunMock.mockReset();
+    dbInsertRunMock.mockResolvedValueOnce(undefined);
+    await expect(insertProxyLog({ modelRequested: 'gpt-5' })).resolves.toBeNull();
+  });
+
   it('falls back to base values when both billing details and downstream key columns are missing', async () => {
     hasProxyLogBillingDetailsColumnMock.mockResolvedValue(true);
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(true);

@@ -1031,9 +1031,12 @@ export async function statsRoutes(app: FastifyInstance) {
 
       const detail = mapProxyLogRow(row, { includeBillingDetails: true });
       // 上游探测（阶段 3）：详情末尾追加一条可空观测。仅 success 日志参与匹配
-      // （观测只随成功日志产生（C4），失败日志不得借展示邻居上游）；±2s 唯一命中才返回，
-      // 0 条 / 多条都返回 null（不猜），metrics 埋点在 query 模块内。
+      // （观测只随成功日志产生（C4），失败日志不得借展示邻居上游）；先按路由 id 硬查
+      // proxy_log_id（四键冲突或多行都返回 null，不回退），未钉上（IS NULL）再 ±2s 窗，
+      // 窗内已钉给别人的行不参与；0 条 / 多条都返回 null（不猜），metrics 埋点在 query 模块内。
+      // 响应只暴露 observation，不暴露 matchKind / candidateCount。
       const upstreamObservationMatch = await findUpstreamProviderObservationForProxyLog({
+        proxyLogId: id,
         accountId:
           typeof row.proxy_logs.accountId === "number"
             ? row.proxy_logs.accountId

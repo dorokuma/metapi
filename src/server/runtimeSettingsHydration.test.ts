@@ -3,10 +3,28 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { config } from './config.js';
 import { applyRuntimeSettings } from './runtimeSettingsHydration.js';
 
-const originalConfig = structuredClone(config);
+// 不能 structuredClone(config)：设置 UPSTREAM_PROVIDER_PIN_RULES_JSON 后 config.upstreamProviderPinRules
+// 含编译 matcher（函数），structuredClone 会抛 DataCloneError。这里只快照本测试会改动、且 JSON 安全的字段
+// （数组按值复制，其余为原始值/引用保持原语义：测试只整体赋值、不改写原对象）。
+const originalConfig = {
+  disableCrossProtocolFallback: config.disableCrossProtocolFallback,
+  responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
+  webhookEnabled: config.webhookEnabled,
+  barkEnabled: config.barkEnabled,
+  serverChanEnabled: config.serverChanEnabled,
+  globalAllowedModels: [...config.globalAllowedModels],
+  smtpPort: config.smtpPort,
+  upstreamProviderDetectSiteIds: [...config.upstreamProviderDetectSiteIds],
+  upstreamProviderPinEnabled: config.upstreamProviderPinEnabled,
+  upstreamProviderPinRules: config.upstreamProviderPinRules,
+};
 
 afterEach(() => {
-  Object.assign(config, structuredClone(originalConfig));
+  Object.assign(config, {
+    ...originalConfig,
+    globalAllowedModels: [...originalConfig.globalAllowedModels],
+    upstreamProviderDetectSiteIds: [...originalConfig.upstreamProviderDetectSiteIds],
+  });
 });
 
 describe('applyRuntimeSettings', () => {
@@ -63,6 +81,31 @@ describe('applyRuntimeSettings', () => {
     ]));
 
     expect(config.upstreamProviderDetectSiteIds).toEqual([9, 12]);
+  });
+
+  it('hydrates the upstream provider pin settings from the stored raw rule shape', () => {
+    config.upstreamProviderPinEnabled = false;
+    config.upstreamProviderPinRules = [];
+
+    applyRuntimeSettings(new Map([
+      ['upstream_provider_pin_enabled', JSON.stringify(true)],
+      ['upstream_provider_pin_rules', JSON.stringify([
+        { siteId: 49, model: 'cline-pass/*', providers: ['deepseek', ' deepseek '], mode: 'order' },
+        // 非法项在宽松归一时丢弃，不阻断其余规则
+        { siteId: 'bad', model: 'm', providers: ['a'], mode: 'only' },
+      ])],
+    ]));
+
+    expect(config.upstreamProviderPinEnabled).toBe(true);
+    // 双形态约定：hydration 从存储原始形态编译一次，config 持有编译产物（带 matcher）。
+    expect(config.upstreamProviderPinRules).toHaveLength(1);
+    expect(config.upstreamProviderPinRules[0]).toMatchObject({
+      siteId: 49,
+      model: 'cline-pass/*',
+      providers: ['deepseek'],
+      mode: 'order',
+    });
+    expect(config.upstreamProviderPinRules[0].match('cline-pass/deepseek-v4.1-flash')).toBe(true);
   });
 
   it('ignores the removed legacy host-suffix key during hydration', () => {

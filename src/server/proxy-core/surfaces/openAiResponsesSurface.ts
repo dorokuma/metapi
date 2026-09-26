@@ -586,6 +586,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             oauthProjectId: oauth?.projectId,
             sitePlatform: selected.site.platform,
             siteUrl: siteApiBaseUrl,
+            siteId: selected.site.id,
             openaiBody: openAiBody,
             downstreamFormat: 'responses',
             responsesOriginalBody,

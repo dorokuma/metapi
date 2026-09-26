@@ -564,6 +564,7 @@ export async function handleChatSurfaceRequest(
           oauthProjectId: oauth?.projectId,
           sitePlatform: selected.site.platform,
           siteUrl: siteApiBaseUrl,
+          siteId: selected.site.id,
           openaiBody: bodyForEndpoint,
           downstreamFormat,
           claudeOriginalBody,

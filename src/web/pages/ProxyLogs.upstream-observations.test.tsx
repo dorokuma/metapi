@@ -536,6 +536,9 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       expect(savedPayload).not.toHaveProperty('upstreamProviderDetectRetentionDays');
       expect(savedPayload).not.toHaveProperty('upstreamProviderDetectSiteIds');
       expect(savedPayload).not.toHaveProperty('upstreamProviderDetectPlatforms');
+      // W-5：「上游钉选」两键同样归位到系统设置页，/logs 保存路径不得混入
+      expect(savedPayload).not.toHaveProperty('upstreamProviderPinEnabled');
+      expect(savedPayload).not.toHaveProperty('upstreamProviderPinRules');
     } finally {
       await act(async () => {
         root.unmount();

@@ -20,6 +20,8 @@ import {
   getInputHeader,
   headerValueToString,
 } from '../proxy-core/providers/headerUtils.js';
+import { injectUpstreamProviderPin } from './upstreamProviderPin/inject.js';
+import { resolveUpstreamProviderPin } from './upstreamProviderPin/rules.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -410,6 +412,8 @@ export function buildUpstreamEndpointRequest(input: {
   oauthProjectId?: string;
   sitePlatform?: string;
   siteUrl?: string;
+  // 上游站点 id：用于「上游供应商钉选注入」门禁；不传 = 该调用点不注入（测活/WS 等）。
+  siteId?: number;
   openaiBody: Record<string, unknown>;
   downstreamFormat: DownstreamFormat | 'responses';
   claudeOriginalBody?: Record<string, unknown>;
@@ -766,6 +770,16 @@ export function buildUpstreamEndpointRequest(input: {
       });
     }
 
+    // 供应商钉选注入：只作用于 responses 默认路径（codex 分支已被上面隔离，见 W-1）。
+    // 匹配键复用预计算的 requestedModelForPayloadRules（含 fallback 链与 trim，见 W-2）。
+    const responsesPin = resolveUpstreamProviderPin({
+      siteId: input.siteId ?? null,
+      requestedModel: requestedModelForPayloadRules,
+    });
+    const finalResponsesBody = responsesPin
+      ? injectUpstreamProviderPin(configuredResponsesBody, responsesPin)
+      : configuredResponsesBody;
+
     const headers = ensureResponsesAcceptHeader({
       ...commonHeaders,
       ...responsesHeaders,
@@ -776,7 +790,7 @@ export function buildUpstreamEndpointRequest(input: {
     return {
       path: resolveEndpointPath('responses'),
       headers,
-      body: configuredResponsesBody,
+      body: finalResponsesBody,
       runtime,
     };
   }
@@ -792,10 +806,18 @@ export function buildUpstreamEndpointRequest(input: {
       ? sanitizeResponsesFallbackChatBody(chatBody)
       : chatBody,
   );
+  // 供应商钉选注入：payloadRules 之后（钉选胜出用户规则）、sanitize 之后（不会被剥）。
+  const chatPin = resolveUpstreamProviderPin({
+    siteId: input.siteId ?? null,
+    requestedModel: requestedModelForPayloadRules,
+  });
+  const finalChatBody = chatPin
+    ? injectUpstreamProviderPin(configuredChatBody, chatPin)
+    : configuredChatBody;
   return {
     path: resolveEndpointPath('chat'),
     headers,
-    body: configuredChatBody,
+    body: finalChatBody,
     runtime,
   };
 }

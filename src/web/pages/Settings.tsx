@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api } from '../api.js';
+import type { UpstreamProviderDistributionItem, UpstreamProviderPinRule } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import ChangeKeyModal from '../components/ChangeKeyModal.js';
@@ -66,6 +67,7 @@ type SettingsSiteOption = {
 };
 
 const UPSTREAM_DETECT_SECTION_ID = 'upstream-detect';
+const UPSTREAM_PIN_SECTION_ID = 'upstream-pin';
 
 function normalizeUpstreamDetectSampleRate(value: unknown): number {
   const numeric = Number(value);
@@ -88,6 +90,41 @@ function normalizeUpstreamDetectSiteIds(value: unknown): number[] {
     if (!Number.isInteger(numeric) || numeric <= 0 || seen.has(numeric)) continue;
     seen.add(numeric);
     result.push(numeric);
+  }
+  return result;
+}
+
+/** 供应商多值：trim、去空、去重（前端输入框与保存 payload 共用）。 */
+function normalizeUpstreamPinProviders(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+/** 从服务端回显（四字段原始形状）还原为可编辑行，保留数组顺序。 */
+function normalizeUpstreamPinRulesFromSettings(value: unknown): UpstreamProviderPinRule[] {
+  if (!Array.isArray(value)) return [];
+  const result: UpstreamProviderPinRule[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const siteId = Math.trunc(Number(record.siteId));
+    if (!Number.isInteger(siteId) || siteId <= 0) continue;
+    const model = typeof record.model === 'string' ? record.model.trim() : '';
+    if (!model) continue;
+    const providers = normalizeUpstreamPinProviders(record.providers);
+    if (providers.length === 0) continue;
+    const mode = record.mode === 'only' || record.mode === 'order' ? record.mode : null;
+    if (!mode) continue;
+    result.push({ siteId, model, providers, mode });
   }
   return result;
 }
@@ -137,6 +174,8 @@ type RuntimeSettings = {
   upstreamProviderDetectSampleRate: number;
   upstreamProviderDetectRetentionDays: number;
   upstreamProviderDetectSiteIds: number[];
+  upstreamProviderPinEnabled: boolean;
+  upstreamProviderPinRules: UpstreamProviderPinRule[];
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
@@ -429,6 +468,8 @@ export default function Settings() {
     upstreamProviderDetectSampleRate: 1,
     upstreamProviderDetectRetentionDays: 14,
     upstreamProviderDetectSiteIds: [],
+    upstreamProviderPinEnabled: false,
+    upstreamProviderPinRules: [],
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
   const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
@@ -452,6 +493,13 @@ export default function Settings() {
   const [savingUpstreamDetect, setSavingUpstreamDetect] = useState(false);
   const [upstreamDetectSites, setUpstreamDetectSites] = useState<SettingsSiteOption[] | null>(null);
   const [upstreamDetectSitesFailed, setUpstreamDetectSitesFailed] = useState(false);
+  const [savingUpstreamPin, setSavingUpstreamPin] = useState(false);
+  const [pinProviderDrafts, setPinProviderDrafts] = useState<Record<number, string>>({});
+  const [pinObservation, setPinObservation] = useState<Record<number, {
+    loading: boolean;
+    items?: UpstreamProviderDistributionItem[];
+    error?: string;
+  }>>({});
   const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
   const [allBrandNames, setAllBrandNames] = useState<string[] | null>(null);
   const [blockedBrands, setBlockedBrands] = useState<string[]>([]);
@@ -780,6 +828,10 @@ export default function Settings() {
         ),
         upstreamProviderDetectSiteIds: normalizeUpstreamDetectSiteIds(
           runtimeInfo.upstreamProviderDetectSiteIds,
+        ),
+        upstreamProviderPinEnabled: !!runtimeInfo.upstreamProviderPinEnabled,
+        upstreamProviderPinRules: normalizeUpstreamPinRulesFromSettings(
+          runtimeInfo.upstreamProviderPinRules,
         ),
         proxyTokenMasked: runtimeInfo.proxyTokenMasked || '',
         adminIpAllowlist: Array.isArray(runtimeInfo.adminIpAllowlist)
@@ -1238,6 +1290,193 @@ export default function Settings() {
   };
   const clearUpstreamDetectSites = () => {
     setRuntime((prev) => ({ ...prev, upstreamProviderDetectSiteIds: [] }));
+  };
+
+  const upstreamPinStatusLabel = runtime.upstreamProviderPinEnabled ? '已开启' : '未开启';
+  const upstreamPinRuleCountLabel = runtime.upstreamProviderPinRules.length > 0
+    ? `${runtime.upstreamProviderPinRules.length} 条规则`
+    : '未配置规则';
+  // 同 site+model 重复：行内警告（不阻塞保存，服务端 400 为最终裁决）
+  const duplicatedPinRuleIndexes = new Set<number>();
+  runtime.upstreamProviderPinRules.forEach((rule, index) => {
+    const key = `${rule.siteId}\u0000${rule.model.trim()}`;
+    if (!rule.siteId || !rule.model.trim()) return;
+    const duplicated = runtime.upstreamProviderPinRules.some((other, otherIndex) => (
+      otherIndex !== index && `${other.siteId}\u0000${other.model.trim()}` === key
+    ));
+    if (duplicated) duplicatedPinRuleIndexes.add(index);
+  });
+
+  const updatePinRule = (
+    index: number,
+    updater: (rule: UpstreamProviderPinRule) => UpstreamProviderPinRule,
+  ) => {
+    setRuntime((prev) => ({
+      ...prev,
+      upstreamProviderPinRules: prev.upstreamProviderPinRules.map((rule, ruleIndex) => (
+        ruleIndex === index ? updater(rule) : rule
+      )),
+    }));
+  };
+
+  const addUpstreamPinRule = () => {
+    setPinObservation({});
+    setPinProviderDrafts({});
+    setRuntime((prev) => ({
+      ...prev,
+      upstreamProviderPinRules: [
+        ...prev.upstreamProviderPinRules,
+        { siteId: 0, model: '', providers: [], mode: 'only' },
+      ],
+    }));
+  };
+
+  const removeUpstreamPinRule = (index: number) => {
+    setPinObservation({});
+    setPinProviderDrafts({});
+    setRuntime((prev) => ({
+      ...prev,
+      upstreamProviderPinRules: prev.upstreamProviderPinRules.filter((_rule, ruleIndex) => ruleIndex !== index),
+    }));
+  };
+
+  const moveUpstreamPinRule = (index: number, direction: -1 | 1) => {
+    setPinObservation({});
+    setPinProviderDrafts({});
+    setRuntime((prev) => {
+      const rules = prev.upstreamProviderPinRules;
+      const target = index + direction;
+      if (target < 0 || target >= rules.length) return prev;
+      const next = [...rules];
+      const [moved] = next.splice(index, 1);
+      next.splice(target, 0, moved);
+      return { ...prev, upstreamProviderPinRules: next };
+    });
+  };
+
+  const commitPinProviders = (index: number, raw: string) => {
+    const parts = raw.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+    if (parts.length === 0) return;
+    updatePinRule(index, (rule) => ({
+      ...rule,
+      providers: normalizeUpstreamPinProviders([...rule.providers, ...parts]),
+    }));
+  };
+
+  const handlePinProviderInputChange = (index: number, value: string) => {
+    if (!/[,，]/.test(value)) {
+      setPinProviderDrafts((prev) => ({ ...prev, [index]: value }));
+      return;
+    }
+    const parts = value.split(/[,，]/);
+    const trailing = parts.pop() ?? '';
+    const committed = parts.join(',');
+    if (committed.trim()) commitPinProviders(index, committed);
+    setPinProviderDrafts((prev) => ({ ...prev, [index]: trailing.trimStart() }));
+  };
+
+  const removePinProvider = (index: number, provider: string) => {
+    updatePinRule(index, (rule) => ({
+      ...rule,
+      providers: rule.providers.filter((item) => item !== provider),
+    }));
+  };
+
+  // Q3：最近实际上游——点击时才发起请求，禁止页面加载期预取。
+  const togglePinObservation = async (index: number, rule: UpstreamProviderPinRule) => {
+    const current = pinObservation[index];
+    if (current) {
+      setPinObservation((prev) => {
+        const next = { ...prev };
+        delete next[index];
+        return next;
+      });
+      return;
+    }
+    // 降级：探测关闭时不发无谓请求，直接显示口径统一的提示。
+    if (!runtime.upstreamProviderDetectEnabled) {
+      setPinObservation((prev) => ({
+        ...prev,
+        [index]: { loading: false, error: '暂无观测数据（需开启上游探测且有命中流量）' },
+      }));
+      return;
+    }
+    if (!rule.siteId || !rule.model.trim()) {
+      setPinObservation((prev) => ({
+        ...prev,
+        [index]: { loading: false, error: '需要先填写站点与模型才能查询' },
+      }));
+      return;
+    }
+    setPinObservation((prev) => ({ ...prev, [index]: { loading: true } }));
+    try {
+      const items = await api.getUpstreamObservationDistribution({
+        siteId: rule.siteId,
+        model: rule.model.trim(),
+      });
+      setPinObservation((prev) => ({ ...prev, [index]: { loading: false, items } }));
+    } catch (err: any) {
+      setPinObservation((prev) => ({
+        ...prev,
+        [index]: { loading: false, error: err?.message || '加载观测数据失败' },
+      }));
+    }
+  };
+
+  // Q4：从观测填充——候选来自上游探测词表、仅适用同一网关（点击时才请求）。
+  const fillPinProvidersFromObservation = async (index: number, rule: UpstreamProviderPinRule) => {
+    if (!rule.siteId) {
+      toast.error('请先选择站点');
+      return;
+    }
+    try {
+      const res = await api.getUpstreamObservationFallbacks({ siteId: rule.siteId });
+      const candidates = normalizeUpstreamPinProviders(
+        (Array.isArray(res?.items) ? res.items : [])
+          .flatMap((group) => (Array.isArray(group?.fallbacks) ? group.fallbacks : [])),
+      );
+      if (candidates.length === 0) {
+        toast.error('暂无观测数据可填充（需开启上游探测且有命中流量）');
+        return;
+      }
+      updatePinRule(index, (current) => ({
+        ...current,
+        providers: normalizeUpstreamPinProviders([...current.providers, ...candidates]),
+      }));
+    } catch (err: any) {
+      toast.error(err?.message || '读取观测数据失败');
+    }
+  };
+
+  const saveUpstreamPin = async () => {
+    setSavingUpstreamPin(true);
+    try {
+      const submittedRules: UpstreamProviderPinRule[] = runtime.upstreamProviderPinRules.map((rule) => ({
+        siteId: rule.siteId,
+        model: rule.model.trim(),
+        providers: normalizeUpstreamPinProviders(rule.providers),
+        mode: rule.mode,
+      }));
+      const res = await api.updateRuntimeSettings({
+        upstreamProviderPinEnabled: runtime.upstreamProviderPinEnabled,
+        upstreamProviderPinRules: submittedRules,
+      });
+      setRuntime((prev) => ({
+        ...prev,
+        upstreamProviderPinEnabled: res?.upstreamProviderPinEnabled === undefined
+          ? prev.upstreamProviderPinEnabled
+          : !!res.upstreamProviderPinEnabled,
+        upstreamProviderPinRules: res?.upstreamProviderPinRules === undefined
+          ? submittedRules
+          : normalizeUpstreamPinRulesFromSettings(res.upstreamProviderPinRules),
+      }));
+      setPinProviderDrafts({});
+      toast.success('上游钉选设置已保存，已热生效');
+    } catch (err: any) {
+      toast.error(err?.message || '保存上游钉选设置失败');
+    } finally {
+      setSavingUpstreamPin(false);
+    }
   };
 
   const handleSaveBrandFilter = async () => {
@@ -2583,6 +2822,282 @@ export default function Settings() {
               className="btn btn-primary"
             >
               {savingUpstreamDetect ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存上游探测设置'}
+            </button>
+          </div>
+        </div>
+
+        {/* Upstream Provider Pin Injection */}
+        <div
+          className="card animate-slide-up stagger-5"
+          style={settingsModernCardStyle}
+          id={`settings-section-${UPSTREAM_PIN_SECTION_ID}`}
+          data-settings-card={UPSTREAM_PIN_SECTION_ID}
+        >
+          <div style={settingsModernHeaderStyle}>
+            <div style={settingsModernTitleBlockStyle}>
+              <div style={settingsModernTitleStyle}>上游供应商钉选</div>
+              <div style={settingsModernDescriptionStyle}>
+                按站点 + 下游请求模型向上游 JSON 请求体注入供应商钉选字段（嵌套 providerOptions.gateway 与顶层 provider 两种姿势）。当前 Cline 网关暂不读取这些字段（注入无害）；本功能为上游恢复支持或其他聚合商（OpenRouter、New API 等）预埋。上游一旦恢复解释，已配置规则将立即改变实际路由，无需 metapi 变更。
+              </div>
+            </div>
+            <div style={settingsModernPillRowStyle}>
+              <span style={getSettingsPillStyle(runtime.upstreamProviderPinEnabled ? 'primary' : 'neutral')}>
+                {upstreamPinStatusLabel}
+              </span>
+              <span style={getSettingsPillStyle(runtime.upstreamProviderPinRules.length > 0 ? 'primary' : 'neutral')}>
+                {upstreamPinRuleCountLabel}
+              </span>
+            </div>
+          </div>
+          <label style={settingsModernToggleStyle}>
+            <div style={settingsModernToggleCopyStyle}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>开启钉选注入</span>
+              <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
+                总开关关闭或规则为空 = 完全不注入，无配置零行为变化；保存后立即生效。注入只作用于 chat / responses 的 JSON 请求体，且在 payload 规则与字段清理之后写入。
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={runtime.upstreamProviderPinEnabled}
+              data-upstream-pin-field="enabled"
+              onChange={(e) => setRuntime((prev) => ({ ...prev, upstreamProviderPinEnabled: e.target.checked }))}
+              style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
+            />
+          </label>
+          {runtime.upstreamProviderPinRules.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--color-warning)' }}>
+              未配置规则 = 不注入任何字段
+            </div>
+          ) : (
+            <div style={settingsModernFieldHintStyle}>
+              按自上而下顺序，首个命中的规则生效；model 匹配的是下游请求模型（非上游实际模型），支持精确或 * 通配、区分大小写。
+            </div>
+          )}
+          {runtime.upstreamProviderPinRules.map((rule, index) => {
+            const observation = pinObservation[index];
+            const isDuplicated = duplicatedPinRuleIndexes.has(index);
+            return (
+              <div
+                key={index}
+                data-upstream-pin-rule={index}
+                style={{ ...settingsModernFieldCardStyle, display: 'flex', flexDirection: 'column', gap: 10 }}
+              >
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end' }}>
+                  <div style={{ flex: '1 1 160px', minWidth: 140 }}>
+                    <div style={settingsModernFieldLabelStyle}>站点</div>
+                    <select
+                      value={rule.siteId > 0 ? String(rule.siteId) : ''}
+                      data-upstream-pin-field={`site-${index}`}
+                      onChange={(e) => {
+                        const nextSiteId = Math.trunc(Number(e.target.value));
+                        updatePinRule(index, (current) => ({
+                          ...current,
+                          siteId: Number.isInteger(nextSiteId) && nextSiteId > 0 ? nextSiteId : 0,
+                        }));
+                      }}
+                      style={inputStyle}
+                    >
+                      <option value="">选择站点</option>
+                      {(upstreamDetectSites || []).map((site) => (
+                        <option key={site.id} value={String(site.id)}>{site.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ flex: '2 1 260px', minWidth: 200 }}>
+                    <div style={settingsModernFieldLabelStyle}>模型</div>
+                    <input
+                      value={rule.model}
+                      data-upstream-pin-field={`model-${index}`}
+                      placeholder="精确或 * 通配，例：cline-pass/deepseek-v4.1-flash；匹配的是下游请求模型"
+                      onChange={(e) => updatePinRule(index, (current) => ({ ...current, model: e.target.value }))}
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div style={{ flex: '2 1 240px', minWidth: 200 }}>
+                    <div style={settingsModernFieldLabelStyle}>供应商（逗号或回车分隔）</div>
+                    <div
+                      data-upstream-pin-providers={index}
+                      style={{
+                        display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
+                        padding: '6px 8px', borderRadius: 'var(--radius-sm)',
+                        border: '1px solid var(--color-border-light)', background: 'var(--color-bg)',
+                      }}
+                    >
+                      {rule.providers.map((provider) => (
+                        <span
+                          key={provider}
+                          data-upstream-pin-provider={provider}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            padding: '2px 6px', fontSize: 12, borderRadius: 'var(--radius-sm)',
+                            background: 'var(--color-surface-hover, rgba(127,127,127,0.12))',
+                            color: 'var(--color-text-secondary)',
+                          }}
+                        >
+                          {provider}
+                          <button
+                            type="button"
+                            aria-label={`移除 ${provider}`}
+                            onClick={() => removePinProvider(index, provider)}
+                            style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, color: 'inherit', lineHeight: 1 }}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                      <input
+                        value={pinProviderDrafts[index] ?? ''}
+                        data-upstream-pin-provider-input={index}
+                        placeholder="例如 deepseek"
+                        onChange={(e) => handlePinProviderInputChange(index, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Enter') return;
+                          e.preventDefault();
+                          commitPinProviders(index, pinProviderDrafts[index] ?? '');
+                          setPinProviderDrafts((prev) => ({ ...prev, [index]: '' }));
+                        }}
+                        onBlur={() => {
+                          commitPinProviders(index, pinProviderDrafts[index] ?? '');
+                          setPinProviderDrafts((prev) => ({ ...prev, [index]: '' }));
+                        }}
+                        style={{ flex: '1 1 100px', minWidth: 90, border: 'none', outline: 'none', background: 'transparent', color: 'var(--color-text-primary)' }}
+                      />
+                    </div>
+                  </div>
+                  <div style={{ flex: '1 1 150px', minWidth: 130 }}>
+                    <div style={settingsModernFieldLabelStyle}>模式</div>
+                    <select
+                      value={rule.mode}
+                      data-upstream-pin-field={`mode-${index}`}
+                      onChange={(e) => updatePinRule(index, (current) => ({
+                        ...current,
+                        mode: e.target.value === 'order' ? 'order' : 'only',
+                      }))}
+                      style={inputStyle}
+                    >
+                      <option value="only">only（严格）</option>
+                      <option value="order">order（优先+回退）</option>
+                    </select>
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
+                  严格 only：目标提供方不可用时请求直接失败，不会回退（OpenRouter 口径：无满足者返回 404）；order：按顺序优先，不满足时回退到其他提供方。
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    data-upstream-pin-action={`move-up-${index}`}
+                    style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => moveUpstreamPinRule(index, -1)}
+                    disabled={index === 0}
+                  >
+                    上移
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    data-upstream-pin-action={`move-down-${index}`}
+                    style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => moveUpstreamPinRule(index, 1)}
+                    disabled={index === runtime.upstreamProviderPinRules.length - 1}
+                  >
+                    下移
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    data-upstream-pin-action={`observe-${index}`}
+                    style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => void togglePinObservation(index, rule)}
+                  >
+                    最近实际上游
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    data-upstream-pin-action={`fill-${index}`}
+                    style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => void fillPinProvidersFromObservation(index, rule)}
+                    disabled={!runtime.upstreamProviderDetectEnabled || !rule.siteId}
+                    title={!runtime.upstreamProviderDetectEnabled ? '需先开启上游探测' : undefined}
+                  >
+                    从观测填充
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    data-upstream-pin-action={`remove-${index}`}
+                    style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px', color: 'var(--color-danger, #d33)' }}
+                    onClick={() => removeUpstreamPinRule(index)}
+                  >
+                    删除
+                  </button>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    「从观测填充」候选来自上游探测词表、仅适用同一网关；数据默认取最近 7 天窗口。
+                  </span>
+                </div>
+                {isDuplicated ? (
+                  <div data-upstream-pin-duplicate={index} style={{ fontSize: 12, color: 'var(--color-warning)' }}>
+                    与同站点 + 同模型的规则重复，服务端将拒绝保存；请删除后重建以调整顺序。
+                  </div>
+                ) : null}
+                {observation ? (
+                  <div
+                    data-upstream-pin-observation={index}
+                    style={{
+                      padding: '8px 10px', borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--color-border-light)', background: 'var(--color-bg)',
+                      fontSize: 12, lineHeight: 1.8, color: 'var(--color-text-secondary)',
+                    }}
+                  >
+                    {observation.loading ? (
+                      '加载观测数据中...'
+                    ) : observation.error ? (
+                      observation.error
+                    ) : observation.items && observation.items.length > 0 ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                        {observation.items.slice(0, 8).map((item) => (
+                          <span key={item.provider} data-upstream-pin-observation-item={item.provider}>
+                            {item.provider} · {item.requests} 次
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      '暂无观测数据（需开启上游探测且有命中流量）'
+                    )}
+                    {rule.model.includes('*') ? (
+                      <div style={{ color: 'var(--color-text-muted)' }}>
+                        通配模式下按字面模型名查询，可能无结果。
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+          {runtime.upstreamProviderPinRules.length > 0 ? (
+            <div style={settingsModernFieldHintStyle}>
+              回退路径说明：downstreamFormat=claude 回退到 messages 端点时不注入（设计预期）；同一站点的多个规则按顺序首个命中生效。
+            </div>
+          ) : null}
+          <div style={settingsModernActionsStyle}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              data-upstream-pin-action="add-rule"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={addUpstreamPinRule}
+            >
+              添加规则
+            </button>
+            <button
+              onClick={saveUpstreamPin}
+              disabled={savingUpstreamPin}
+              className="btn btn-primary"
+              data-upstream-pin-action="save"
+            >
+              {savingUpstreamPin ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存上游钉选设置'}
             </button>
           </div>
         </div>

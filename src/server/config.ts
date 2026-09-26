@@ -2,6 +2,7 @@ import 'dotenv/config';
 import type { FastifyServerOptions } from 'fastify';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
+import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPin/rules.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -150,6 +151,10 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     upstreamProviderDetectRetentionDays: Math.max(0, Math.trunc(parseNumber(env.UPSTREAM_PROVIDER_DETECT_RETENTION_DAYS, 14))),
     // 参与探测的站点 id（逗号分隔）；默认空 = 不采集，发布环节负责写入等价值。
     upstreamProviderDetectSiteIds: normalizeUpstreamProviderDetectSiteIds(env.UPSTREAM_PROVIDER_DETECT_SITE_IDS),
+    // 上游供应商钉选注入：总开关默认关；规则 env 为四字段 JSON 数组，解析失败/非法项按宽松归一丢弃（= 不注入）。
+    // 双形态约定：config 只存编译形态（带预编译 matcher），落库/回显用四字段原始形状。
+    upstreamProviderPinEnabled: parseBoolean(env.UPSTREAM_PROVIDER_PIN_ENABLED, false),
+    upstreamProviderPinRules: normalizeUpstreamProviderPinRules(env.UPSTREAM_PROVIDER_PIN_RULES_JSON),
     openAiServiceTierRules: parseJsonValue(env.OPENAI_SERVICE_TIER_RULES_JSON || env.OPENAI_SERVICE_TIER_RULES),
     modelAvailabilityProbeEnabled: parseBoolean(env.MODEL_AVAILABILITY_PROBE_ENABLED, false),
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),

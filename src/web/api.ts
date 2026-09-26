@@ -384,6 +384,8 @@ export type RuntimeSettingsPayload = {
   upstreamProviderDetectSampleRate?: number;
   upstreamProviderDetectRetentionDays?: number;
   upstreamProviderDetectSiteIds?: number[];
+  upstreamProviderPinEnabled?: boolean;
+  upstreamProviderPinRules?: UpstreamProviderPinRule[];
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;
@@ -554,6 +556,16 @@ export type UpstreamObservationQueryParams = {
   model?: string;
   from?: string;
   to?: string;
+};
+
+/** 「上游供应商钉选注入」规则（与 settings 表、PUT/GET 一致的四字段原始形状）。 */
+export type UpstreamProviderPinMode = "only" | "order";
+
+export type UpstreamProviderPinRule = {
+  siteId: number;
+  model: string;
+  providers: string[];
+  mode: UpstreamProviderPinMode;
 };
 
 export type UpstreamProviderDistributionItem = {

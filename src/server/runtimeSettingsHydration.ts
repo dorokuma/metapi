@@ -4,6 +4,7 @@ import {
 } from './config.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
+import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPin/rules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -328,5 +329,16 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const upstreamProviderDetectSiteIds = parseSettingFromMap<number[] | string[] | number | string>(settingsMap, 'upstream_provider_detect_site_ids');
   if (upstreamProviderDetectSiteIds !== undefined) {
     config.upstreamProviderDetectSiteIds = normalizeUpstreamProviderDetectSiteIds(upstreamProviderDetectSiteIds);
+  }
+
+  const upstreamProviderPinEnabled = parseSettingFromMap<boolean>(settingsMap, 'upstream_provider_pin_enabled');
+  if (typeof upstreamProviderPinEnabled === 'boolean') {
+    config.upstreamProviderPinEnabled = upstreamProviderPinEnabled;
+  }
+
+  // 双形态约定：从存储原始形态编译一次，写入 config 的是编译形态（带 matcher）。
+  const upstreamProviderPinRules = parseSettingFromMap<unknown>(settingsMap, 'upstream_provider_pin_rules');
+  if (upstreamProviderPinRules !== undefined) {
+    config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules(upstreamProviderPinRules);
   }
 }

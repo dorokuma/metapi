@@ -55,6 +55,12 @@ import {
 } from '../../services/notificationTemplates.js';
 import { DAILY_SUMMARY_TEMPLATE_VARIABLES } from '../../services/dailySummaryService.js';
 import { normalizeUpstreamProviderDetectSiteIds } from '../../services/upstreamProviderDetect/siteIds.js';
+import {
+  normalizeUpstreamProviderPinRules,
+  parseUpstreamProviderPinRules,
+  toUpstreamProviderPinStoredRules,
+  type UpstreamProviderPinStoredRule,
+} from '../../services/upstreamProviderPin/rules.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -82,6 +88,8 @@ interface RuntimeSettingsBody {
   upstreamProviderDetectSampleRate?: number;
   upstreamProviderDetectRetentionDays?: number;
   upstreamProviderDetectSiteIds?: number[] | string[] | number | string;
+  upstreamProviderPinEnabled?: boolean;
+  upstreamProviderPinRules?: unknown;
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
@@ -556,6 +564,15 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.upstreamProviderDetectSiteIds = normalizeUpstreamProviderDetectSiteIds(value);
       return;
     }
+    case 'upstream_provider_pin_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.upstreamProviderPinEnabled = value;
+      return;
+    }
+    case 'upstream_provider_pin_rules': {
+      config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules(value);
+      return;
+    }
     case 'proxy_empty_content_fail_enabled': {
       try {
         config.proxyEmptyContentFailEnabled = parseBooleanFlag(value, '空内容判定失败开关');
@@ -787,6 +804,9 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     upstreamProviderDetectSampleRate: config.upstreamProviderDetectSampleRate,
     upstreamProviderDetectRetentionDays: config.upstreamProviderDetectRetentionDays,
     upstreamProviderDetectSiteIds: config.upstreamProviderDetectSiteIds,
+    upstreamProviderPinEnabled: config.upstreamProviderPinEnabled,
+    // 回显口径：归一后的四字段原始形状，不含 matcher/正则等编译产物。
+    upstreamProviderPinRules: toUpstreamProviderPinStoredRules(config.upstreamProviderPinRules),
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
@@ -1518,6 +1538,46 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.upstreamProviderDetectSiteIds = nextSiteIds;
       upsertSetting('upstream_provider_detect_site_ids', nextSiteIds);
+    }
+
+    // R-A：rules 严格校验前移到 pin 段最前（暂存 pending 模式，仿 pendingPayloadRules），
+    // 确保 rules 非法返回 400 时 upstream_provider_pin_enabled 不被改写、不落库（无部分应用）。
+    let pendingUpstreamProviderPinRules: UpstreamProviderPinStoredRule[] | undefined;
+    if (body.upstreamProviderPinRules !== undefined) {
+      const parseResult = parseUpstreamProviderPinRules(body.upstreamProviderPinRules);
+      if (!parseResult.ok) {
+        return reply.code(400).send({ success: false, message: parseResult.message });
+      }
+      pendingUpstreamProviderPinRules = parseResult.rules;
+    }
+
+    if (body.upstreamProviderPinEnabled !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.upstreamProviderPinEnabled, '上游钉选注入开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '上游钉选注入开关格式无效',
+        });
+      }
+      if (nextValue !== config.upstreamProviderPinEnabled) {
+        changedLabels.push('上游钉选注入');
+      }
+      config.upstreamProviderPinEnabled = nextValue;
+      upsertSetting('upstream_provider_pin_enabled', config.upstreamProviderPinEnabled);
+    }
+
+    if (pendingUpstreamProviderPinRules !== undefined) {
+      // 落库形状 = 四字段原始形状（upsertSetting 内部已 JSON.stringify，禁止手工再编码）。
+      const nextRules = pendingUpstreamProviderPinRules;
+      const currentRules = toUpstreamProviderPinStoredRules(config.upstreamProviderPinRules);
+      if (JSON.stringify(nextRules) !== JSON.stringify(currentRules)) {
+        changedLabels.push('上游钉选注入规则');
+      }
+      // 双形态约定：config 持有编译形态（供热路径），落库与回显保持原始形状。
+      config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules(nextRules);
+      upsertSetting('upstream_provider_pin_rules', nextRules);
     }
 
     if (body.proxyErrorKeywords !== undefined) {

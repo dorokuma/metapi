@@ -101,5 +101,6 @@ export default function ModelAvailabilityProbeConfirmModal({
     </div>
   );
 
-  return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
+  const body = typeof document !== 'undefined' ? document.body : null;
+  return (body && typeof body.appendChild === 'function') ? createPortal(modal, body) : modal;
 }

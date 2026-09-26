@@ -558,7 +558,7 @@ describe('ProxyLogs upstream observations (desktop)', () => {
       });
       await flushMicrotasks();
 
-      expect(collectText(root.root)).toContain('/settings?section=upstream-detect');
+      expect(collectText(root.root)).toContain('/settings/upstream');
     } finally {
       await act(async () => {
         root.unmount();

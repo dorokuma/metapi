@@ -2845,7 +2845,7 @@ export default function ProxyLogs() {
               className="btn btn-ghost"
               style={{ border: "1px solid var(--color-border)" }}
               data-upstream-config-entry
-              onClick={() => navigate("/settings?section=upstream-detect")}
+              onClick={() => navigate('/settings/upstream?section=upstream-detect')}
             >
               配置
             </button>

@@ -97,6 +97,7 @@ const zhToEn: Record<string, string> = {
   '退出登录': 'Sign Out',
   '收起侧边栏': 'Collapse Sidebar',
   '系统设置': 'System Settings',
+  '上游设置': 'Upstream Settings',
   '站点管理': 'Site Management',
   '账号管理': 'Connection Management',
   '导入 / 导出': 'Import / Export',

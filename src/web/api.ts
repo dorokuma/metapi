@@ -575,7 +575,7 @@ export type UpstreamProviderPinRule = {
 export type UpstreamParamCompatEndpoint = "chat" | "responses" | "messages";
 
 export type UpstreamParamCompatRule = {
-  siteId: number;
+  siteId: number | null;
   model: string;
   params: string[];
   /** 省略 = ["chat","responses"]；messages 必须显式写入才生效。 */

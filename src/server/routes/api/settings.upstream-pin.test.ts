@@ -8,6 +8,7 @@ type ConfigModule = typeof import('../../config.js');
 type DbModule = typeof import('../../db/index.js');
 type HydrationModule = typeof import('../../runtimeSettingsHydration.js');
 type RulesModule = typeof import('../../services/upstreamProviderPin/rules.js');
+type AdapterMapModule = typeof import('../../services/upstreamProviderPin/adapterMap.js');
 
 // 必须在静态 import（config）之前把 DATA_DIR 指向独立目录，避免写工作树 data/。
 const { testDataDir } = vi.hoisted(() => {
@@ -30,6 +31,8 @@ describe('settings upstream provider pin runtime settings', () => {
   let schema: DbModule['schema'];
   let applyRuntimeSettings: HydrationModule['applyRuntimeSettings'];
   let resolveUpstreamProviderPin: RulesModule['resolveUpstreamProviderPin'];
+  let resolveUpstreamPinAdapter: AdapterMapModule['resolveUpstreamPinAdapter'];
+  let toStoredAdapterMap: AdapterMapModule['toStoredAdapterMap'];
 
   beforeAll(async () => {
     await import('../../db/migrate.js');
@@ -38,12 +41,15 @@ describe('settings upstream provider pin runtime settings', () => {
     const settingsRoutesModule = await import('./settings.js');
     const hydrationModule = await import('../../runtimeSettingsHydration.js');
     const rulesModule = await import('../../services/upstreamProviderPin/rules.js');
+    const adapterMapModule = await import('../../services/upstreamProviderPin/adapterMap.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
     config = configModule.config;
     applyRuntimeSettings = hydrationModule.applyRuntimeSettings;
     resolveUpstreamProviderPin = rulesModule.resolveUpstreamProviderPin;
+    resolveUpstreamPinAdapter = adapterMapModule.resolveUpstreamPinAdapter;
+    toStoredAdapterMap = adapterMapModule.toStoredAdapterMap;
 
     app = Fastify();
     await app.register(settingsRoutesModule.settingsRoutes);
@@ -311,5 +317,153 @@ describe('settings upstream provider pin runtime settings', () => {
     expect(rulesOnly.statusCode).toBe(200);
     expect(config.upstreamProviderPinEnabled).toBe(false);
     expect(config.upstreamProviderPinRules).toHaveLength(1);
+  });
+
+  // ---- Phase 1 适配器映射追加用例（不改动上方既有断言） ----
+
+  const ADAPTER_MAP_PAYLOAD = { '49': 'openrouter', '7': 'vercel-ai-gateway' };
+
+  it('persists the adapter map, hot-applies it and round-trips through storage (S3)', async () => {
+    config.upstreamProviderPinAdapterMap = {};
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        upstreamProviderPinEnabled: true,
+        upstreamProviderPinRules: RAW_RULES,
+        upstreamProviderPinAdapterMap: ADAPTER_MAP_PAYLOAD,
+      },
+    });
+
+    expect(updateResponse.statusCode, updateResponse.body).toBe(200);
+    const updated = updateResponse.json() as Record<string, unknown>;
+    expect(updated.upstreamProviderPinAdapterMap).toEqual(ADAPTER_MAP_PAYLOAD);
+
+    // 热生效：config 持有编译形态（siteId 数字键），无需重启即可解析
+    expect(config.upstreamProviderPinAdapterMap).toEqual({ 49: 'openrouter', 7: 'vercel-ai-gateway' });
+    expect(resolveUpstreamPinAdapter(49).id).toBe('openrouter');
+    expect(resolveUpstreamPinAdapter(7).id).toBe('vercel-ai-gateway');
+    expect(resolveUpstreamPinAdapter(9).id).toBe('generic-dual');
+
+    // 落库形状 = 原始对象（无编译产物、无双重编码）；键集合恰为站点 id 字符串
+    const savedMap = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'upstream_provider_pin_adapter_map'))
+      .get();
+    expect(savedMap?.value).toBe(JSON.stringify({ 49: 'openrouter', 7: 'vercel-ai-gateway' }));
+    expect(Object.keys(JSON.parse(savedMap!.value)).sort()).toEqual(['49', '7']);
+
+    // GET 回显：数字键归一为字符串键，与落库/重启形状一致
+    const getResponse = await app.inject({ method: 'GET', url: '/api/settings/runtime' });
+    expect(getResponse.statusCode).toBe(200);
+    const readBack = getResponse.json() as Record<string, unknown>;
+    expect(readBack.upstreamProviderPinAdapterMap).toEqual(ADAPTER_MAP_PAYLOAD);
+
+    // 往返 = 重启等价：清空运行态后仅用落库字符串重建，解析结果与 GET/落库一致
+    config.upstreamProviderPinAdapterMap = {};
+    const savedEnabled = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'upstream_provider_pin_enabled'))
+      .get();
+    const savedRules = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'upstream_provider_pin_rules'))
+      .get();
+    applyRuntimeSettings(new Map([
+      ['upstream_provider_pin_enabled', savedEnabled!.value],
+      ['upstream_provider_pin_rules', savedRules!.value],
+      ['upstream_provider_pin_adapter_map', savedMap!.value],
+    ]));
+    expect(resolveUpstreamPinAdapter(49).id).toBe('openrouter');
+    expect(toStoredAdapterMap(config.upstreamProviderPinAdapterMap)).toEqual(ADAPTER_MAP_PAYLOAD);
+  });
+
+  it('rejects an invalid adapter map before applying enabled / rules (M1: no partial apply)', async () => {
+    config.upstreamProviderPinEnabled = false;
+    config.upstreamProviderPinRules = [];
+    config.upstreamProviderPinAdapterMap = {};
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        upstreamProviderPinEnabled: true,
+        upstreamProviderPinRules: RAW_RULES,
+        upstreamProviderPinAdapterMap: { '49': 'portkey' },
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(400);
+    expect(response.json().message).toContain('不在支持列表');
+
+    // 三键一次保存：map 非法 → enabled / rules / map 的 config 与落库全部不变
+    expect(config.upstreamProviderPinEnabled).toBe(false);
+    expect(config.upstreamProviderPinRules).toEqual([]);
+    expect(config.upstreamProviderPinAdapterMap).toEqual({});
+    for (const key of [
+      'upstream_provider_pin_enabled',
+      'upstream_provider_pin_rules',
+      'upstream_provider_pin_adapter_map',
+    ]) {
+      const saved = await db.select().from(schema.settings)
+        .where(eq(schema.settings.key, key))
+        .get();
+      expect(saved, key).toBeUndefined();
+    }
+  });
+
+  it('rejects malformed adapter maps with specific Chinese messages without touching runtime state', async () => {
+    config.upstreamProviderPinAdapterMap = {};
+
+    const cases: Array<{ name: string; value: unknown; expected: string }> = [
+      { name: 'malformed string', value: '{not json', expected: '不是合法的 JSON' },
+      { name: 'array payload', value: [1], expected: '必须是对象' },
+      { name: 'fractional key', value: { '49.9': 'openrouter' }, expected: '必须是正整数站点 id' },
+      { name: 'zero key', value: { '0': 'openrouter' }, expected: '必须是正整数站点 id' },
+      { name: 'unregistered id', value: { '49': 'litellm' }, expected: '不在支持列表' },
+      { name: 'non-string value', value: { '49': 42 }, expected: '必须是' },
+      { name: 'duplicate normalized keys', value: { '49 ': 'openrouter', '049': 'none' }, expected: '存在重复' },
+    ];
+
+    for (const testCase of cases) {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/settings/runtime',
+        payload: { upstreamProviderPinAdapterMap: testCase.value },
+      });
+      expect(response.statusCode, `${testCase.name}: ${response.body}`).toBe(400);
+      expect(response.json().message, testCase.name).toContain(testCase.expected);
+    }
+
+    expect(config.upstreamProviderPinAdapterMap).toEqual({});
+    const saved = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'upstream_provider_pin_adapter_map'))
+      .get();
+    expect(saved).toBeUndefined();
+  });
+
+  it('keeps the existing adapter map when a two-key (legacy frontend) PUT omits it (S6②)', async () => {
+    config.upstreamProviderPinAdapterMap = {};
+
+    const mapOnly = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { upstreamProviderPinAdapterMap: { '49': 'openrouter' } },
+    });
+    expect(mapOnly.statusCode, mapOnly.body).toBe(200);
+    expect(config.upstreamProviderPinAdapterMap).toEqual({ 49: 'openrouter' });
+
+    const legacyPut = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { upstreamProviderPinEnabled: false, upstreamProviderPinRules: RAW_RULES },
+    });
+    expect(legacyPut.statusCode, legacyPut.body).toBe(200);
+
+    // 不带 map 键 → 既有 map 不被清空（对照 payloadRules 先例）
+    expect(config.upstreamProviderPinAdapterMap).toEqual({ 49: 'openrouter' });
+    const saved = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'upstream_provider_pin_adapter_map'))
+      .get();
+    expect(JSON.parse(saved!.value)).toEqual({ '49': 'openrouter' });
+    expect(resolveUpstreamPinAdapter(49).id).toBe('openrouter');
   });
 });

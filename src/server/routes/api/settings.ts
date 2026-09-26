@@ -61,6 +61,12 @@ import {
   toUpstreamProviderPinStoredRules,
   type UpstreamProviderPinStoredRule,
 } from '../../services/upstreamProviderPin/rules.js';
+import {
+  normalizeUpstreamPinAdapterMap,
+  parseUpstreamPinAdapterMap,
+  toStoredAdapterMap,
+  type CompiledUpstreamPinAdapterMap,
+} from '../../services/upstreamProviderPin/adapterMap.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -90,6 +96,7 @@ interface RuntimeSettingsBody {
   upstreamProviderDetectSiteIds?: number[] | string[] | number | string;
   upstreamProviderPinEnabled?: boolean;
   upstreamProviderPinRules?: unknown;
+  upstreamProviderPinAdapterMap?: unknown;
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
@@ -573,6 +580,10 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules(value);
       return;
     }
+    case 'upstream_provider_pin_adapter_map': {
+      config.upstreamProviderPinAdapterMap = normalizeUpstreamPinAdapterMap(value);
+      return;
+    }
     case 'proxy_empty_content_fail_enabled': {
       try {
         config.proxyEmptyContentFailEnabled = parseBooleanFlag(value, '空内容判定失败开关');
@@ -807,6 +818,8 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     upstreamProviderPinEnabled: config.upstreamProviderPinEnabled,
     // 回显口径：归一后的四字段原始形状，不含 matcher/正则等编译产物。
     upstreamProviderPinRules: toUpstreamProviderPinStoredRules(config.upstreamProviderPinRules),
+    // 回显口径：数字键归一为字符串键的原始 JSON 对象（含未注册 id，与落库形状一致）。
+    upstreamProviderPinAdapterMap: toStoredAdapterMap(config.upstreamProviderPinAdapterMap),
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
@@ -1551,6 +1564,17 @@ export async function settingsRoutes(app: FastifyInstance) {
       pendingUpstreamProviderPinRules = parseResult.rules;
     }
 
+    // M1：适配器映射严格校验并入 R-A pending 段（与 rules 并列 pre-validate）。
+    // 三键（enabled / rules / map）一次保存：任一项非法 → 400，且三处 config 与落库全部不变。
+    let pendingUpstreamProviderPinAdapterMap: CompiledUpstreamPinAdapterMap | undefined;
+    if (body.upstreamProviderPinAdapterMap !== undefined) {
+      const parseResult = parseUpstreamPinAdapterMap(body.upstreamProviderPinAdapterMap);
+      if (!parseResult.ok) {
+        return reply.code(400).send({ success: false, message: parseResult.message });
+      }
+      pendingUpstreamProviderPinAdapterMap = parseResult.map;
+    }
+
     if (body.upstreamProviderPinEnabled !== undefined) {
       let nextValue = false;
       try {
@@ -1578,6 +1602,17 @@ export async function settingsRoutes(app: FastifyInstance) {
       // 双形态约定：config 持有编译形态（供热路径），落库与回显保持原始形状。
       config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules(nextRules);
       upsertSetting('upstream_provider_pin_rules', nextRules);
+    }
+
+    if (pendingUpstreamProviderPinAdapterMap !== undefined) {
+      const nextMap = pendingUpstreamProviderPinAdapterMap;
+      const currentMap = toStoredAdapterMap(config.upstreamProviderPinAdapterMap);
+      if (JSON.stringify(toStoredAdapterMap(nextMap)) !== JSON.stringify(currentMap)) {
+        changedLabels.push('上游钉选适配器映射');
+      }
+      // 双形态约定：config 持有编译形态（供热路径），落库与回显保持原始对象形状。
+      config.upstreamProviderPinAdapterMap = nextMap;
+      upsertSetting('upstream_provider_pin_adapter_map', nextMap);
     }
 
     if (body.proxyErrorKeywords !== undefined) {

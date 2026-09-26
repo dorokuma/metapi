@@ -5,6 +5,7 @@ import {
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
 import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPin/rules.js';
+import { normalizeUpstreamPinAdapterMap } from './services/upstreamProviderPin/adapterMap.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -340,5 +341,11 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const upstreamProviderPinRules = parseSettingFromMap<unknown>(settingsMap, 'upstream_provider_pin_rules');
   if (upstreamProviderPinRules !== undefined) {
     config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules(upstreamProviderPinRules);
+  }
+
+  // 适配器映射与 rules 同构：存储原始对象 → config 编译形态（siteId → 适配器 id）。
+  const upstreamProviderPinAdapterMap = parseSettingFromMap<unknown>(settingsMap, 'upstream_provider_pin_adapter_map');
+  if (upstreamProviderPinAdapterMap !== undefined) {
+    config.upstreamProviderPinAdapterMap = normalizeUpstreamPinAdapterMap(upstreamProviderPinAdapterMap);
   }
 }

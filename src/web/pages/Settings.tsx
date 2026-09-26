@@ -31,6 +31,12 @@ import { clearAuthSession } from '../authSession.js';
 import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
+import {
+  resolveUpstreamPinAdapterForSite,
+  resolveUpstreamPinRuleAdapterHint,
+} from './helpers/upstreamPinAdapterHints.js';
+import { listUpstreamPinAdapterCatalog } from '../../shared/upstreamPinAdapters.js';
+import type { UpstreamPinAdapterCatalogEntry } from '../../shared/upstreamPinAdapters.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
@@ -129,6 +135,26 @@ function normalizeUpstreamPinRulesFromSettings(value: unknown): UpstreamProvider
   return result;
 }
 
+/**
+ * 从服务端回显（原始对象）还原为可编辑适配器映射：键归一为数字字符串（与后端同口径），
+ * **保留未注册 id**（不静默丢行：服务端热路径会零注入，UI 需展示未知适配器供用户删除/更换）。
+ */
+function normalizeUpstreamPinAdapterMapFromSettings(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const trimmedKey = rawKey.trim();
+    if (!trimmedKey) continue;
+    const numeric = Number(trimmedKey);
+    if (!Number.isInteger(numeric) || numeric <= 0) continue;
+    if (typeof rawValue !== 'string') continue;
+    const adapterId = rawValue.trim();
+    if (!adapterId) continue;
+    result[String(numeric)] = adapterId;
+  }
+  return result;
+}
+
 function normalizeSettingsSiteOptions(value: unknown): SettingsSiteOption[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<number>();
@@ -176,6 +202,7 @@ type RuntimeSettings = {
   upstreamProviderDetectSiteIds: number[];
   upstreamProviderPinEnabled: boolean;
   upstreamProviderPinRules: UpstreamProviderPinRule[];
+  upstreamProviderPinAdapterMap: Record<string, string>;
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
@@ -470,6 +497,7 @@ export default function Settings() {
     upstreamProviderDetectSiteIds: [],
     upstreamProviderPinEnabled: false,
     upstreamProviderPinRules: [],
+    upstreamProviderPinAdapterMap: {},
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
   const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
@@ -832,6 +860,9 @@ export default function Settings() {
         upstreamProviderPinEnabled: !!runtimeInfo.upstreamProviderPinEnabled,
         upstreamProviderPinRules: normalizeUpstreamPinRulesFromSettings(
           runtimeInfo.upstreamProviderPinRules,
+        ),
+        upstreamProviderPinAdapterMap: normalizeUpstreamPinAdapterMapFromSettings(
+          runtimeInfo.upstreamProviderPinAdapterMap,
         ),
         proxyTokenMasked: runtimeInfo.proxyTokenMasked || '',
         adminIpAllowlist: Array.isArray(runtimeInfo.adminIpAllowlist)
@@ -1307,6 +1338,61 @@ export default function Settings() {
     if (duplicated) duplicatedPinRuleIndexes.add(index);
   });
 
+  const upstreamPinAdapterCatalog = useMemo(() => listUpstreamPinAdapterCatalog(), []);
+  const upstreamPinAdapterById = useMemo(
+    () => new Map<string, UpstreamPinAdapterCatalogEntry>(
+      upstreamPinAdapterCatalog.map((entry) => [entry.id, entry]),
+    ),
+    [upstreamPinAdapterCatalog],
+  );
+  const upstreamPinAdapterRows = useMemo(
+    () => Object.entries(runtime.upstreamProviderPinAdapterMap)
+      .map(([siteId, adapterId]) => ({ siteId, adapterId })),
+    [runtime.upstreamProviderPinAdapterMap],
+  );
+
+  const updatePinAdapterRowSite = (currentSiteId: string, nextSiteId: string) => {
+    setRuntime((prev) => {
+      const nextMap = { ...prev.upstreamProviderPinAdapterMap };
+      const adapterId = nextMap[currentSiteId] ?? 'generic-dual';
+      delete nextMap[currentSiteId];
+      const normalizedSiteId = nextSiteId.trim();
+      if (normalizedSiteId) nextMap[normalizedSiteId] = adapterId;
+      return { ...prev, upstreamProviderPinAdapterMap: nextMap };
+    });
+  };
+
+  const updatePinAdapterRowAdapter = (siteId: string, adapterId: string) => {
+    setRuntime((prev) => ({
+      ...prev,
+      upstreamProviderPinAdapterMap: {
+        ...prev.upstreamProviderPinAdapterMap,
+        [siteId]: adapterId,
+      },
+    }));
+  };
+
+  const addPinAdapterRow = () => {
+    setRuntime((prev) => {
+      if ('' in prev.upstreamProviderPinAdapterMap) return prev;
+      return {
+        ...prev,
+        upstreamProviderPinAdapterMap: {
+          ...prev.upstreamProviderPinAdapterMap,
+          '': upstreamPinAdapterCatalog[0]?.id ?? 'generic-dual',
+        },
+      };
+    });
+  };
+
+  const removePinAdapterRow = (siteId: string) => {
+    setRuntime((prev) => {
+      const nextMap = { ...prev.upstreamProviderPinAdapterMap };
+      delete nextMap[siteId];
+      return { ...prev, upstreamProviderPinAdapterMap: nextMap };
+    });
+  };
+
   const updatePinRule = (
     index: number,
     updater: (rule: UpstreamProviderPinRule) => UpstreamProviderPinRule,
@@ -1460,6 +1546,7 @@ export default function Settings() {
       const res = await api.updateRuntimeSettings({
         upstreamProviderPinEnabled: runtime.upstreamProviderPinEnabled,
         upstreamProviderPinRules: submittedRules,
+        upstreamProviderPinAdapterMap: { ...runtime.upstreamProviderPinAdapterMap },
       });
       setRuntime((prev) => ({
         ...prev,
@@ -1469,6 +1556,9 @@ export default function Settings() {
         upstreamProviderPinRules: res?.upstreamProviderPinRules === undefined
           ? submittedRules
           : normalizeUpstreamPinRulesFromSettings(res.upstreamProviderPinRules),
+        upstreamProviderPinAdapterMap: res?.upstreamProviderPinAdapterMap === undefined
+          ? prev.upstreamProviderPinAdapterMap
+          : normalizeUpstreamPinAdapterMapFromSettings(res.upstreamProviderPinAdapterMap),
       }));
       setPinProviderDrafts({});
       toast.success('上游钉选设置已保存，已热生效');
@@ -2837,7 +2927,7 @@ export default function Settings() {
             <div style={settingsModernTitleBlockStyle}>
               <div style={settingsModernTitleStyle}>上游供应商钉选</div>
               <div style={settingsModernDescriptionStyle}>
-                按「站点 + 下游请求模型」向上游 JSON 请求体注入供应商钉选字段（嵌套 providerOptions.gateway 与顶层 provider 两种姿势），适用于所有支持该字段约定的网关与聚合商。支持方会据此改变实际路由；不读取该约定的上游通常会忽略这些字段，个别严格校验者可能拒绝——建议先从实测支持的站点启用；一旦支持即自动生效，无需 metapi 变更。
+                按「站点 + 下游请求模型」向上游 JSON 请求体注入供应商钉选字段（内置双姿势：嵌套 providerOptions.gateway 与顶层 provider 两种，可按站点切换适配器）。适用于所有支持该字段约定的网关与聚合商。支持方会据此改变实际路由；不读取该约定的上游通常会忽略这些字段，个别严格校验者可能拒绝——建议先从实测支持的站点启用；一旦支持即自动生效，无需 metapi 变更。注入仅对 chat / responses 的默认路径生效（messages、gemini 原生、codex 站点与 WebSocket、测活等路径不注入）。选择 OpenRouter 适配器后，only / order 直接对应其原生 provider.only / provider.order 契约，语义即时真实生效，请确认规则正确后再开启。
               </div>
             </div>
             <div style={settingsModernPillRowStyle}>
@@ -2873,9 +2963,105 @@ export default function Settings() {
               按自上而下顺序，首个命中的规则生效；model 匹配的是下游请求模型（非上游实际模型），支持精确或 * 通配、区分大小写。
             </div>
           )}
+          {/* 网关适配器：按站点选择注入姿势（Phase 1 四家；未配置 = 默认双姿势） */}
+          <div
+            data-upstream-pin-adapter-section="1"
+            style={{ ...settingsModernFieldCardStyle, display: 'flex', flexDirection: 'column', gap: 10 }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>网关适配器</div>
+            <div style={settingsModernFieldHintStyle}>
+              按站点选择注入姿势，作用于该站点的全部命中规则；未配置的站点使用默认双姿势注入。适配器下拉只列出当前已支持的四家，不会出现未实现选项。
+            </div>
+            {upstreamPinAdapterRows.length === 0 ? (
+              <div data-upstream-pin-adapter-empty style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                未配置 = 全部站点使用默认双姿势注入
+              </div>
+            ) : null}
+            {upstreamPinAdapterRows.map((row) => {
+              const catalogEntry = upstreamPinAdapterById.get(row.adapterId) ?? null;
+              return (
+                <div
+                  key={row.siteId}
+                  data-upstream-pin-adapter-row={row.siteId}
+                  style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+                >
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end' }}>
+                    <div style={{ flex: '1 1 160px', minWidth: 140 }}>
+                      <div style={settingsModernFieldLabelStyle}>站点</div>
+                      <select
+                        value={row.siteId}
+                        data-upstream-pin-adapter-field={`site-${row.siteId}`}
+                        onChange={(e) => updatePinAdapterRowSite(row.siteId, e.target.value)}
+                        style={inputStyle}
+                      >
+                        <option value="">选择站点</option>
+                        {(upstreamDetectSites || []).map((site) => (
+                          <option key={site.id} value={String(site.id)}>{site.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div style={{ flex: '2 1 260px', minWidth: 200 }}>
+                      <div style={settingsModernFieldLabelStyle}>适配器</div>
+                      <select
+                        value={row.adapterId}
+                        data-upstream-pin-adapter-field={`adapter-${row.siteId}`}
+                        onChange={(e) => updatePinAdapterRowAdapter(row.siteId, e.target.value)}
+                        style={inputStyle}
+                      >
+                        {upstreamPinAdapterCatalog.map((entry) => (
+                          <option key={entry.id} value={entry.id}>{entry.label}</option>
+                        ))}
+                        {catalogEntry ? null : (
+                          <option value={row.adapterId}>未知适配器「{row.adapterId}」（不会注入）</option>
+                        )}
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      data-upstream-pin-adapter-action={`remove-${row.siteId}`}
+                      style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '4px 10px', color: 'var(--color-danger, #d33)' }}
+                      onClick={() => removePinAdapterRow(row.siteId)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                  <div
+                    data-upstream-pin-adapter-notes={row.siteId}
+                    style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}
+                  >
+                    {catalogEntry
+                      ? catalogEntry.notes
+                      : '当前版本不支持该适配器 id，注入会被跳过；可更换适配器或删除该行。'}
+                  </div>
+                </div>
+              );
+            })}
+            <div>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                data-upstream-pin-adapter-action="add"
+                style={{ border: '1px solid var(--color-border)' }}
+                onClick={addPinAdapterRow}
+              >
+                添加适配器
+              </button>
+            </div>
+          </div>
           {runtime.upstreamProviderPinRules.map((rule, index) => {
             const observation = pinObservation[index];
             const isDuplicated = duplicatedPinRuleIndexes.has(index);
+            // S2/O1/O5：规则行展示解析出的适配器 label 与能力警告（纯前端判定，不阻塞保存）
+            const pinAdapterResolution = resolveUpstreamPinAdapterForSite({
+              adapterMap: runtime.upstreamProviderPinAdapterMap,
+              siteId: rule.siteId,
+            });
+            const pinAdapterHint = resolveUpstreamPinRuleAdapterHint({
+              adapter: pinAdapterResolution.adapter,
+              unknownAdapterId: pinAdapterResolution.unknownAdapterId,
+              mode: rule.mode,
+            });
             return (
               <div
                 key={index}
@@ -2983,6 +3169,20 @@ export default function Settings() {
                 <div style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
                   严格 only：目标提供方不可用时请求直接失败，不会回退（OpenRouter 口径：无满足者返回 404）；order：按顺序优先，不满足时回退到其他提供方。
                 </div>
+                <div
+                  data-upstream-pin-adapter-hint={index}
+                  style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}
+                >
+                  网关适配器：{pinAdapterHint.label}
+                </div>
+                {pinAdapterHint.warning ? (
+                  <div
+                    data-upstream-pin-adapter-warning={index}
+                    style={{ fontSize: 12, color: 'var(--color-warning)' }}
+                  >
+                    {pinAdapterHint.warning}
+                  </div>
+                ) : null}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                   <button
                     type="button"

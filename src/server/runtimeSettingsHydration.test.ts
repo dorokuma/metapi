@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { config } from './config.js';
 import { applyRuntimeSettings } from './runtimeSettingsHydration.js';
+import { resolveUpstreamPinAdapter } from './services/upstreamProviderPin/adapterMap.js';
 
 // 不能 structuredClone(config)：设置 UPSTREAM_PROVIDER_PIN_RULES_JSON 后 config.upstreamProviderPinRules
 // 含编译 matcher（函数），structuredClone 会抛 DataCloneError。这里只快照本测试会改动、且 JSON 安全的字段
@@ -116,5 +117,31 @@ describe('applyRuntimeSettings', () => {
     ]));
 
     expect(config.upstreamProviderDetectSiteIds).toEqual([3]);
+  });
+
+  it('hydrates the upstream provider pin adapter map and keeps unregistered ids for zero-injection', () => {
+    const originalAdapterMap = config.upstreamProviderPinAdapterMap;
+    try {
+      config.upstreamProviderPinAdapterMap = {};
+
+      applyRuntimeSettings(new Map([
+        ['upstream_provider_pin_adapter_map', JSON.stringify({
+          '49': 'openrouter',
+          '049': 'none',
+          bad: 'openrouter',
+          '50': 'litellm',
+          '7': 42,
+          '8': '',
+        })],
+      ]));
+
+      // 键归一 + 冲突保留先出现者；未注册 id 保留（M2 零注入兜底），值非法丢弃
+      expect(config.upstreamProviderPinAdapterMap).toEqual({ 49: 'openrouter', 50: 'litellm' });
+      expect(resolveUpstreamPinAdapter(49).id).toBe('openrouter');
+      expect(resolveUpstreamPinAdapter(50).id).toBe('none');
+      expect(resolveUpstreamPinAdapter(999).id).toBe('generic-dual');
+    } finally {
+      config.upstreamProviderPinAdapterMap = originalAdapterMap;
+    }
   });
 });

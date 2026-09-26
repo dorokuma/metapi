@@ -242,4 +242,136 @@ describe('upstreamRequestBuilder upstream provider pin injection', () => {
     const emptyRules = buildUpstreamEndpointRequest(buildInput);
     expect(JSON.stringify(emptyRules.body)).toBe(JSON.stringify(disabled.body));
   });
+
+  // ---- Phase 1 适配器分发追加用例（不改动上方既有断言） ----
+
+  function withAdapterMap<T>(map: Record<number, string>, run: () => T): T {
+    const original = config.upstreamProviderPinAdapterMap;
+    config.upstreamProviderPinAdapterMap = map;
+    try {
+      return run();
+    } finally {
+      config.upstreamProviderPinAdapterMap = original;
+    }
+  }
+
+  it('dispatches the openrouter adapter for the only mode (top-level provider.only, no nested write)', () => {
+    withAdapterMap({ 49: 'openrouter' }, () => {
+      const request = buildUpstreamEndpointRequest({
+        endpoint: 'chat',
+        modelName: 'deepseek/deepseek-v4.1-flash',
+        stream: false,
+        tokenValue: 'sk-test',
+        sitePlatform: 'openai',
+        siteId: 49,
+        openaiBody: {
+          model: 'cline-pass/deepseek-v4.1-flash',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+        downstreamFormat: 'openai',
+      });
+
+      expect(request.body.provider).toEqual({ only: ['deepseek'] });
+      expect(request.body.providerOptions).toBeUndefined();
+      expect(JSON.stringify(request.body)).not.toContain('"order"');
+    });
+  });
+
+  it('dispatches the openrouter adapter for the order mode on the responses default path (no allow_fallbacks write)', () => {
+    withAdapterMap({ 7: 'openrouter' }, () => {
+      const request = buildUpstreamEndpointRequest({
+        endpoint: 'responses',
+        modelName: 'upstream-actual',
+        stream: false,
+        tokenValue: 'sk-test',
+        sitePlatform: 'openai',
+        siteId: 7,
+        openaiBody: { model: 'openai-unrelated', messages: [{ role: 'user', content: 'hi' }] },
+        downstreamFormat: 'responses',
+        responsesOriginalBody: {
+          model: 'claude-requested',
+          input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+        },
+      });
+
+      expect(request.body.provider).toEqual({ order: ['alibaba', 'baseten'] });
+      expect(request.body.providerOptions).toBeUndefined();
+      expect(JSON.stringify(request.body)).not.toContain('"only"');
+      expect(JSON.stringify(request.body)).not.toContain('allow_fallbacks');
+    });
+  });
+
+  it('dispatches the vercel-ai-gateway adapter (nested-only, no top-level provider)', () => {
+    withAdapterMap({ 49: 'vercel-ai-gateway' }, () => {
+      const request = buildUpstreamEndpointRequest({
+        endpoint: 'chat',
+        modelName: 'deepseek/deepseek-v4.1-flash',
+        stream: false,
+        tokenValue: 'sk-test',
+        sitePlatform: 'openai',
+        siteId: 49,
+        openaiBody: {
+          model: 'cline-pass/deepseek-v4.1-flash',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+        downstreamFormat: 'openai',
+      });
+
+      expect(request.body.providerOptions).toEqual({ gateway: { only: ['deepseek'] } });
+      expect(request.body.provider).toBeUndefined();
+    });
+  });
+
+  it('zero-injects for the none adapter (byte-identical to the disabled baseline)', () => {
+    const buildInput = {
+      endpoint: 'chat' as const,
+      modelName: 'deepseek/deepseek-v4.1-flash',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteId: 49,
+      openaiBody: {
+        model: 'cline-pass/deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+      downstreamFormat: 'openai' as const,
+    };
+
+    config.upstreamProviderPinEnabled = false;
+    const baseline = buildUpstreamEndpointRequest(buildInput);
+    config.upstreamProviderPinEnabled = true;
+
+    withAdapterMap({ 49: 'none' }, () => {
+      const zero = buildUpstreamEndpointRequest(buildInput);
+      expect(JSON.stringify(zero.body)).toBe(JSON.stringify(baseline.body));
+      expect(zero.body.provider).toBeUndefined();
+      expect(zero.body.providerOptions).toBeUndefined();
+    });
+  });
+
+  it('zero-injects for unregistered adapter ids left in storage (M2 回滚断言：不是双姿势)', () => {
+    withAdapterMap({ 49: 'litellm' }, () => {
+      const request = buildUpstreamEndpointRequest({
+        endpoint: 'chat',
+        modelName: 'deepseek/deepseek-v4.1-flash',
+        stream: false,
+        tokenValue: 'sk-test',
+        sitePlatform: 'openai',
+        siteId: 49,
+        openaiBody: {
+          model: 'cline-pass/deepseek-v4.1-flash',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+        downstreamFormat: 'openai',
+      });
+
+      expect(request.body.provider).toBeUndefined();
+      expect(request.body.providerOptions).toBeUndefined();
+      expect(request.body).toEqual({
+        model: 'deepseek/deepseek-v4.1-flash',
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+    });
+  });
 });

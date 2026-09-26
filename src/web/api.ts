@@ -386,6 +386,7 @@ export type RuntimeSettingsPayload = {
   upstreamProviderDetectSiteIds?: number[];
   upstreamProviderPinEnabled?: boolean;
   upstreamProviderPinRules?: UpstreamProviderPinRule[];
+  upstreamProviderPinAdapterMap?: Record<string, string>;
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;

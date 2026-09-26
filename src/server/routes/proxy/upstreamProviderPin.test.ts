@@ -368,4 +368,90 @@ describe('upstream provider pin injection end to end', () => {
       messages: [{ role: 'user', content: 'hi' }],
     });
   });
+
+  // ---- Phase 1 适配器分型 E2E（S4：追加用例，不改动上方四态断言） ----
+
+  it('①d routes the openrouter adapter to top-level provider.only only (chat path)', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot', preferredEndpoint: 'chat' });
+    config.upstreamProviderPinEnabled = true;
+    config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules([
+      { siteId: seeded.site.id, model: 'deepseek/deepseek-v4.1-flash', providers: ['deepseek'], mode: 'only' },
+    ]);
+    const originalAdapterMap = config.upstreamProviderPinAdapterMap;
+    config.upstreamProviderPinAdapterMap = { [seeded.site.id]: 'openrouter' };
+    selectSeededChannel(seeded);
+
+    try {
+      const response = await sendChatRequest();
+      expect(response.statusCode, response.body).toBe(200);
+
+      const upstreamBody = getLastUpstreamBody();
+      expect(upstreamBody.messages).toEqual([{ role: 'user', content: 'hi' }]);
+      expect(upstreamBody.provider).toEqual({ only: ['deepseek'] });
+      // OpenRouter 忽略嵌套位：不得写入 providerOptions.gateway
+      expect(upstreamBody.providerOptions).toBeUndefined();
+      const serialized = JSON.stringify(upstreamBody);
+      expect(serialized).not.toContain('"order"');
+      // allow_fallbacks 不写不动（S1 精神：只写原生 only/order 键）
+      expect(serialized).not.toContain('allow_fallbacks');
+    } finally {
+      config.upstreamProviderPinAdapterMap = originalAdapterMap;
+    }
+  });
+
+  it('①e routes the openrouter adapter to top-level provider.order only (chat path)', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot', preferredEndpoint: 'chat' });
+    config.upstreamProviderPinEnabled = true;
+    config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules([
+      { siteId: seeded.site.id, model: 'deepseek/deepseek-v4.1-flash', providers: ['deepseek', 'alibaba'], mode: 'order' },
+    ]);
+    const originalAdapterMap = config.upstreamProviderPinAdapterMap;
+    config.upstreamProviderPinAdapterMap = { [seeded.site.id]: 'openrouter' };
+    selectSeededChannel(seeded);
+
+    try {
+      const response = await sendChatRequest();
+      expect(response.statusCode, response.body).toBe(200);
+
+      const upstreamBody = getLastUpstreamBody();
+      expect(upstreamBody.provider).toEqual({ order: ['deepseek', 'alibaba'] });
+      expect(upstreamBody.providerOptions).toBeUndefined();
+      const serialized = JSON.stringify(upstreamBody);
+      expect(serialized).not.toContain('"only"');
+      expect(serialized).not.toContain('allow_fallbacks');
+    } finally {
+      config.upstreamProviderPinAdapterMap = originalAdapterMap;
+    }
+  });
+
+  it('①f zero-injects for the none adapter on the responses default path (byte-identical to disabled baseline)', async () => {
+    const seeded = await seedSite({ url: 'https://api.cline.bot' });
+    selectSeededChannel(seeded);
+
+    // 关闭态基线（platform=openai 站点首选 responses 面）
+    const baselineResponse = await sendChatRequest();
+    expect(baselineResponse.statusCode, baselineResponse.body).toBe(200);
+    const baselineBody = getLastUpstreamBody();
+
+    fetchMock.mockClear();
+    config.upstreamProviderPinEnabled = true;
+    config.upstreamProviderPinRules = normalizeUpstreamProviderPinRules([
+      { siteId: seeded.site.id, model: 'deepseek/deepseek-v4.1-flash', providers: ['deepseek'], mode: 'only' },
+    ]);
+    const originalAdapterMap = config.upstreamProviderPinAdapterMap;
+    config.upstreamProviderPinAdapterMap = { [seeded.site.id]: 'none' };
+
+    try {
+      const zeroResponse = await sendChatRequest();
+      expect(zeroResponse.statusCode, zeroResponse.body).toBe(200);
+      const zeroBody = getLastUpstreamBody();
+
+      // 能力不匹配/显式 no-op：与关闭态基线逐字节相等
+      expect(JSON.stringify(zeroBody)).toBe(JSON.stringify(baselineBody));
+      expect(zeroBody.provider).toBeUndefined();
+      expect(zeroBody.providerOptions).toBeUndefined();
+    } finally {
+      config.upstreamProviderPinAdapterMap = originalAdapterMap;
+    }
+  });
 });

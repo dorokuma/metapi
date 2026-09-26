@@ -171,7 +171,7 @@ describe('Settings upstream provider pin section', () => {
     }
   });
 
-  it('adds rows, edits fields and saves only the two pin keys with the submitted values', async () => {
+  it('adds rows, edits fields and saves only the three pin keys with the submitted values', async () => {
     const root = await renderSettings();
     try {
       const card = getPinCard(root.root);
@@ -215,9 +215,12 @@ describe('Settings upstream provider pin section', () => {
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledTimes(1);
       const payload = apiMock.updateRuntimeSettings.mock.calls[0][0];
       expect(Object.keys(payload).sort()).toEqual([
+        'upstreamProviderPinAdapterMap',
         'upstreamProviderPinEnabled',
         'upstreamProviderPinRules',
       ]);
+      // 未配置适配器 → 提交空对象（显式清空语义，服务端 PUT 按空映射处理）
+      expect(payload.upstreamProviderPinAdapterMap).toEqual({});
       expect(payload.upstreamProviderPinRules).toEqual([
         { siteId: 9, model: 'cline-pass/*', providers: ['deepseek', 'alibaba'], mode: 'order' },
       ]);
@@ -406,6 +409,171 @@ describe('Settings upstream provider pin section', () => {
     } finally {
       await act(async () => {
         second.unmount();
+      });
+    }
+  });
+
+  it('renders the adapter section with the default-dual empty hint', async () => {
+    const root = await renderSettings();
+    try {
+      const card = getPinCard(root.root);
+      const section = findByData(card, 'data-upstream-pin-adapter-section', '1');
+      const sectionText = collectText(section);
+      expect(sectionText).toContain('网关适配器');
+      expect(sectionText).toContain('未配置 = 全部站点使用默认双姿势注入');
+      expect(sectionText).toContain('未配置的站点使用默认双姿势注入');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('lists only implemented adapters in the adapter select (no fake options)', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue(buildRuntimeSettings({
+      upstreamProviderPinAdapterMap: { '9': 'generic-dual' },
+    }));
+
+    const root = await renderSettings();
+    try {
+      const card = getPinCard(root.root);
+      const row = findByData(card, 'data-upstream-pin-adapter-row', '9');
+      const optionTexts = row.findAll((node) => node.type === 'option').map((node) => collectText(node));
+      expect(optionTexts).toEqual(expect.arrayContaining([
+        '通用双姿势（默认）',
+        'OpenRouter',
+        'Vercel AI Gateway',
+        '不注入（无钉选机制）',
+      ]));
+      // Phase 1 只列出已实现适配器，不提供假选项
+      expect(optionTexts.join('|')).not.toContain('Portkey');
+      expect(optionTexts.join('|')).not.toContain('Helicone');
+      expect(optionTexts.join('|')).not.toContain('LiteLLM');
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('adds an adapter row through the selects and submits the raw site-id keyed map', async () => {
+    const root = await renderSettings();
+    try {
+      const card = getPinCard(root.root);
+
+      await act(async () => {
+        findByData(card, 'data-upstream-pin-adapter-action', 'add').props.onClick();
+      });
+
+      const draftRow = findByData(card, 'data-upstream-pin-adapter-row', '');
+      await act(async () => {
+        findByData(draftRow, 'data-upstream-pin-adapter-field', 'site-').props.onChange({ target: { value: '9' } });
+      });
+
+      const row = findByData(card, 'data-upstream-pin-adapter-row', '9');
+      await act(async () => {
+        findByData(row, 'data-upstream-pin-adapter-field', 'adapter-9').props.onChange({ target: { value: 'openrouter' } });
+      });
+      expect(collectText(row)).toContain('原生契约');
+
+      await act(async () => {
+        findPinAction(card, 'save').props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.updateRuntimeSettings.mock.calls[0][0];
+      expect(payload.upstreamProviderPinAdapterMap).toEqual({ '9': 'openrouter' });
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('removes an adapter row and submits an explicit empty map (clearing semantics)', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue(buildRuntimeSettings({
+      upstreamProviderPinEnabled: true,
+      upstreamProviderPinAdapterMap: { '9': 'openrouter' },
+    }));
+
+    const root = await renderSettings();
+    try {
+      const card = getPinCard(root.root);
+      const row = findByData(card, 'data-upstream-pin-adapter-row', '9');
+      expect(collectText(row)).toContain('OpenRouter');
+
+      await act(async () => {
+        findByData(row, 'data-upstream-pin-adapter-action', 'remove-9').props.onClick();
+      });
+      await act(async () => {
+        findPinAction(card, 'save').props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.updateRuntimeSettings.mock.calls[0][0];
+      expect(payload.upstreamProviderPinAdapterMap).toEqual({});
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('shows the resolved adapter label per rule and warns inline (S2/O5) without blocking save', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue(buildRuntimeSettings({
+      upstreamProviderPinEnabled: true,
+      upstreamProviderPinRules: [RULE_A, RULE_B],
+      upstreamProviderPinAdapterMap: { '9': 'none', '12': 'openrouter' },
+    }));
+
+    const root = await renderSettings();
+    try {
+      const card = getPinCard(root.root);
+
+      // 规则 0（site 9, only）+ none：展示 none label + 无机制提示（不阻塞保存）
+      const row0 = findByData(card, 'data-upstream-pin-rule', 0);
+      expect(collectText(findByData(row0, 'data-upstream-pin-adapter-hint', 0))).toContain('不注入（无钉选机制）');
+      expect(collectText(findByData(row0, 'data-upstream-pin-adapter-warning', 0)))
+        .toContain('该网关无请求体钉选机制，规则不会注入');
+
+      // 规则 1（site 12, order）+ openrouter：展示 label、无警告
+      const row1 = findByData(card, 'data-upstream-pin-rule', 1);
+      expect(collectText(findByData(row1, 'data-upstream-pin-adapter-hint', 1))).toContain('OpenRouter');
+      expect(row1.findAll((node) => node.props['data-upstream-pin-adapter-warning'] !== undefined)).toHaveLength(0);
+
+      await act(async () => {
+        findPinAction(card, 'save').props.onClick();
+      });
+      await flushMicrotasks();
+      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it('warns about unregistered adapter ids in rule rows (服务端零注入的 UI 镜像)', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue(buildRuntimeSettings({
+      upstreamProviderPinRules: [RULE_A],
+      upstreamProviderPinAdapterMap: { '9': 'portkey' },
+    }));
+
+    const root = await renderSettings();
+    try {
+      const card = getPinCard(root.root);
+      const row0 = findByData(card, 'data-upstream-pin-rule', 0);
+      expect(collectText(findByData(row0, 'data-upstream-pin-adapter-hint', 0))).toContain('未知适配器「portkey」');
+      expect(collectText(findByData(row0, 'data-upstream-pin-adapter-warning', 0)))
+        .toContain('该请求不会受本规则约束');
+
+      // 未知 id 不下拉丢失：适配器行保留原值并提示不会注入
+      const adapterRow = findByData(card, 'data-upstream-pin-adapter-row', '9');
+      expect(collectText(adapterRow)).toContain('未知适配器「portkey」（不会注入）');
+      expect(collectText(adapterRow)).toContain('当前版本不支持该适配器 id');
+    } finally {
+      await act(async () => {
+        root.unmount();
       });
     }
   });

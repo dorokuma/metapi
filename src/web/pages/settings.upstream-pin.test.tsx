@@ -154,9 +154,10 @@ describe('Settings upstream provider pin section', () => {
       const cardText = collectText(card);
 
       expect(cardText).toContain('上游供应商钉选');
-      // R2 预埋语义文案
-      expect(cardText).toContain('当前 Cline 网关暂不读取这些字段（注入无害）');
-      expect(cardText).toContain('已配置规则将立即改变实际路由，无需 metapi 变更');
+      // 通用定位文案
+      expect(cardText).toContain('适用于所有支持该字段约定的网关与聚合商');
+      expect(cardText).toContain('不读取该约定的上游通常会忽略这些字段');
+      expect(cardText).toContain('建议先从实测支持的站点启用');
       // 空列表提示
       expect(cardText).toContain('未配置规则 = 不注入任何字段');
       expect(cardText).toContain('未开启');

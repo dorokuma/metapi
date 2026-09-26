@@ -2837,7 +2837,7 @@ export default function Settings() {
             <div style={settingsModernTitleBlockStyle}>
               <div style={settingsModernTitleStyle}>上游供应商钉选</div>
               <div style={settingsModernDescriptionStyle}>
-                按站点 + 下游请求模型向上游 JSON 请求体注入供应商钉选字段（嵌套 providerOptions.gateway 与顶层 provider 两种姿势）。当前 Cline 网关暂不读取这些字段（注入无害）；本功能为上游恢复支持或其他聚合商（OpenRouter、New API 等）预埋。上游一旦恢复解释，已配置规则将立即改变实际路由，无需 metapi 变更。
+                按「站点 + 下游请求模型」向上游 JSON 请求体注入供应商钉选字段（嵌套 providerOptions.gateway 与顶层 provider 两种姿势），适用于所有支持该字段约定的网关与聚合商。支持方会据此改变实际路由；不读取该约定的上游通常会忽略这些字段，个别严格校验者可能拒绝——建议先从实测支持的站点启用；一旦支持即自动生效，无需 metapi 变更。
               </div>
             </div>
             <div style={settingsModernPillRowStyle}>

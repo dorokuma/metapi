@@ -12,9 +12,10 @@ supersedes: ""
 新增「上游供应商钉选注入」能力：用户在系统设置页配置「站点 + 下游请求模型（精确或 `*` 全串通配）→
 供应商列表 + only/order 模式」规则后，代理链路在构造上游 JSON 请求体时将规则翻译为两类字段——
 嵌套 `providerOptions.gateway.{only|order}` 与顶层 `provider.{only|order}`——同时写入 chat 面与
-responses 默认路径；默认关闭、无配置零行为变化。**当前 Cline 网关对这两类字段静默丢弃（注入无害）；
-本功能首先是「预埋语义」**：为 Cline 恢复读取参数（或 OpenRouter、New API 等聚合商）时零代码激活做准备。
-上游一旦恢复解释，已配置规则将**立即改变实际路由、无需 metapi 变更**（R2 休眠激活风险已写入 UI 文案）。
+responses 默认路径；默认关闭、无配置零行为变化。**本能力面向通用场景——适用于任何支持该字段
+约定的网关/聚合商（OpenRouter、Vercel AI Gateway 等）；Cline 仅为当前实测环境，非功能限定**：Cline 对这两类
+字段暂静默丢弃（注入无害），支持方一旦读取，已配置规则将**立即改变实际路由、无需 metapi 变更**
+（R2 休眠激活风险已写入 UI 文案）。
 
 ## 背景
 
@@ -24,6 +25,11 @@ responses 默认路径；默认关闭、无配置零行为变化。**当前 Clin
   OpenRouter 读 `provider.order`、New API 走 `X-Channel-Id`（非本功能范围）。
 - 注入点必须覆盖 chat 面与 responses 面：两面共用构造器 `buildUpstreamEndpointRequest`，
   在构造器内注入即可全覆盖，且天然只作用于 JSON 请求体。
+- 支持面核实（2026-09-26 外部调研）：顶层 `provider` = OpenRouter 契约（官方 provider routing 文档支持
+  `provider.only`（白名单，不满足者 404）与 `provider.order`（顺序优先，`allow_fallbacks` 控制回退）；
+  本功能 only/order 两模式分别直接对应；`providerOptions.gateway` 被其忽略）；嵌套 `providerOptions.gateway` =
+  Vercel AI Gateway 契约（only/order 均支持）；New API/One API、Portkey、Helicone 等为 Header/别名族（不覆盖，
+  若需另议 Header 注入）；Cloudflare AI Gateway 与单一厂商直连无请求体钉选。
 
 ## 决策
 

@@ -18,6 +18,9 @@ const originalConfig = {
   upstreamProviderDetectSiteIds: [...config.upstreamProviderDetectSiteIds],
   upstreamProviderPinEnabled: config.upstreamProviderPinEnabled,
   upstreamProviderPinRules: config.upstreamProviderPinRules,
+  upstreamParamCompatEnabled: config.upstreamParamCompatEnabled,
+  upstreamParamCompatSelfHealEnabled: config.upstreamParamCompatSelfHealEnabled,
+  upstreamParamCompatRules: config.upstreamParamCompatRules,
 };
 
 afterEach(() => {
@@ -117,6 +120,62 @@ describe('applyRuntimeSettings', () => {
     ]));
 
     expect(config.upstreamProviderDetectSiteIds).toEqual([3]);
+  });
+
+  it('hydrates the upstream param compat switches and compiles the stored raw rules once', () => {
+    config.upstreamParamCompatEnabled = false;
+    config.upstreamParamCompatSelfHealEnabled = false;
+    config.upstreamParamCompatRules = [];
+
+    applyRuntimeSettings(new Map([
+      ['upstream_param_compat_enabled', JSON.stringify(true)],
+      ['upstream_param_compat_self_heal_enabled', JSON.stringify(true)],
+      ['upstream_param_compat_rules', JSON.stringify([
+        { siteId: 9, model: '*', params: ['prompt_cache_key', ' prompt_cache_key '] },
+        { siteId: 10, model: 'GLM-5.3', params: ['some_param'], endpoints: ['messages'] },
+        // 非法项（结构键）在宽松归一时整条丢弃，不阻断其余规则
+        { siteId: 11, model: '*', params: ['prompt_cache_key', 'model'] },
+      ])],
+    ]));
+
+    expect(config.upstreamParamCompatEnabled).toBe(true);
+    expect(config.upstreamParamCompatSelfHealEnabled).toBe(true);
+    // 双形态约定：hydration 从存储原始形状编译一次，config 持有编译产物（带 matcher）。
+    expect(config.upstreamParamCompatRules).toHaveLength(2);
+    expect(config.upstreamParamCompatRules[0]).toMatchObject({
+      siteId: 9,
+      model: '*',
+      params: ['prompt_cache_key'],
+    });
+    expect(config.upstreamParamCompatRules[0].match('GLM-5.3')).toBe(true);
+    expect(config.upstreamParamCompatRules[1]).toMatchObject({
+      siteId: 10,
+      model: 'GLM-5.3',
+      params: ['some_param'],
+      endpoints: ['messages'],
+    });
+    // 大小写敏感
+    expect(config.upstreamParamCompatRules[1].match('glm-5.3')).toBe(false);
+  });
+
+  it('drops over-sized param lists and only compiles the first 64 param compat rules', () => {
+    config.upstreamParamCompatRules = [];
+
+    applyRuntimeSettings(new Map([
+      ['upstream_param_compat_rules', JSON.stringify([
+        { siteId: 1, model: '*', params: Array.from({ length: 33 }, (_, i) => `p_${i}`) },
+        ...Array.from({ length: 65 }, (_, i) => ({
+          siteId: i + 2,
+          model: '*',
+          params: ['prompt_cache_key'],
+        })),
+      ])],
+    ]));
+
+    expect(config.upstreamParamCompatRules).toHaveLength(63);
+    // 33 个 params 的那条被整条丢弃；数组超过 64 条，从第 65 条起丢弃
+    expect(config.upstreamParamCompatRules[0].siteId).toBe(2);
+    expect(config.upstreamParamCompatRules[62].siteId).toBe(64);
   });
 
   it('hydrates the upstream provider pin adapter map and keeps unregistered ids for zero-injection', () => {

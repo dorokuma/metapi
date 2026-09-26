@@ -2,6 +2,7 @@ import { fetch } from 'undici';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
+import { resolveUpstreamParamCompatSelfHealPlan } from '../../services/upstreamParamCompat/selfHeal.js';
 import {
   buildUpstreamUrl,
   summarizeUpstreamError,
@@ -112,16 +113,22 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   let finalErrText = 'unknown error';
   let finalRawErrText: string | undefined;
 
-  for (let endpointIndex = 0; endpointIndex < endpointCount; endpointIndex += 1) {
-    const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
-    const request = input.buildRequest(endpoint, endpointIndex);
-    const defaultTarget = buildUpstreamUrl(input.siteUrl, request.path);
-    const targetUrl = input.proxyUrl
-      ? buildUpstreamUrl(input.proxyUrl, request.path)
-      : defaultTarget;
+  /** 上游目标 URL：首次尝试与自愈重发共用同一口径（含 proxyUrl 场景）。 */
+  const resolveTargetUrl = (path: string): string => (
+    input.proxyUrl
+      ? buildUpstreamUrl(input.proxyUrl, path)
+      : buildUpstreamUrl(input.siteUrl, path)
+  );
 
-    const attemptStartedAtMs = Date.now();
-    let response = await fetchWithObservedFirstByte(
+  /**
+   * 出站统一入口：首次尝试与 (b) 自愈重发都走这里，保证两者都带首字节超时保护，
+   * 且都经同一个 `dispatchRequest` 拿到 timeout signal（保留站点代理与 codex 请求头 / 会话字段）。
+   */
+  const dispatchAttempt = (
+    request: BuiltEndpointRequest,
+    targetUrl: string,
+  ): Promise<Awaited<ReturnType<typeof fetch>>> => (
+    fetchWithObservedFirstByte(
       async (signal) => (
         input.dispatchRequest
           ? await input.dispatchRequest(request, targetUrl, signal)
@@ -134,24 +141,41 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       ),
       {
         firstByteTimeoutMs: input.firstByteTimeoutMs,
-        startedAtMs: attemptStartedAtMs,
+        startedAtMs: Date.now(),
       },
-    );
+    )
+  );
+
+  /** 三条成功路径共用（首次 2xx / 既有 tryRecover 成功 / 自愈成功），禁止复制粘贴。 */
+  const returnAttemptSuccess = async (
+    ctx: EndpointAttemptSuccessContext,
+  ): Promise<EndpointFlowResult> => {
+    await runEndpointFlowHook(input.onAttemptSuccess, ctx, 'onAttemptSuccess');
+    return {
+      ok: true,
+      upstream: ctx.response,
+      upstreamPath: ctx.request.path,
+    };
+  };
+
+  for (let endpointIndex = 0; endpointIndex < endpointCount; endpointIndex += 1) {
+    const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
+    const request = input.buildRequest(endpoint, endpointIndex);
+    const targetUrl = resolveTargetUrl(request.path);
+    // 每个端点尝试最多一次自愈（标志在这次 flow 的局部变量上，不进 retryCount）。
+    let selfHealConsumed = false;
+
+    let response = await dispatchAttempt(request, targetUrl);
 
     if (response.ok) {
-      await runEndpointFlowHook(input.onAttemptSuccess, {
+      return returnAttemptSuccess({
         endpointIndex,
         endpointCount,
         request,
         targetUrl,
         response,
         recoverApplied: false,
-      }, 'onAttemptSuccess');
-      return {
-        ok: true,
-        upstream: response,
-        upstreamPath: request.path,
-      };
+      });
     }
 
     let rawErrText = await readRuntimeResponseText(response).catch(() => 'unknown error');
@@ -190,24 +214,60 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
         || baseContext.rawErrText !== rawErrText;
       if (recovered?.upstream?.ok) {
         const recoveredRequest = recovered.request ?? baseContext.request;
-        const recoveredTargetUrl = recovered.targetUrl ?? (
-          input.proxyUrl
-            ? buildUpstreamUrl(input.proxyUrl, recovered.upstreamPath)
-            : buildUpstreamUrl(input.siteUrl, recovered.upstreamPath)
-        );
-        await runEndpointFlowHook(input.onAttemptSuccess, {
+        const recoveredTargetUrl = recovered.targetUrl ?? resolveTargetUrl(recovered.upstreamPath);
+        return returnAttemptSuccess({
           endpointIndex,
           endpointCount,
           request: recoveredRequest,
           targetUrl: recoveredTargetUrl,
           response: recovered.upstream,
           recoverApplied: true,
-        }, 'onAttemptSuccess');
-        return {
-          ok: true,
-          upstream: recovered.upstream,
-          upstreamPath: recovered.upstreamPath,
+        });
+      }
+
+      // (b) 自愈：仍在 `if (input.tryRecover)` 内、surface recover 之后、onAttemptFailure 之前。
+      // 没有 tryRecover 的调用方（rerank）整段跳过，包括自愈。
+      // 门禁（总开关 + 自愈开关）、400、每端点一次、解析 / 结构键拒绝 / present 判定都在 selfHeal 内。
+      const selfHealPlan = resolveUpstreamParamCompatSelfHealPlan({
+        status: baseContext.response.status,
+        rawErrText: baseContext.rawErrText,
+        body: baseContext.request.body,
+        alreadySelfHealed: selfHealConsumed,
+      });
+      if (selfHealPlan) {
+        selfHealConsumed = true;
+        const healedRequest: BuiltEndpointRequest = {
+          ...baseContext.request,
+          body: selfHealPlan.body,
         };
+        const healedTargetUrl = resolveTargetUrl(healedRequest.path);
+        const healedResponse = await dispatchAttempt(healedRequest, healedTargetUrl);
+        // 一行 info：只含端点、被删键名与两次状态码；不打 body / header / token。
+        console.info('[upstream-param-compat] self-heal', {
+          endpoint: healedRequest.endpoint,
+          path: healedRequest.path,
+          removed: selfHealPlan.params,
+          firstStatus: baseContext.response.status,
+          secondStatus: healedResponse.status,
+          outcome: healedResponse.ok ? 'success' : 'failed',
+        });
+        if (healedResponse.ok) {
+          // 成功：显式构造成功上下文走同一 helper；本端点不再有第三次 dispatch。
+          return returnAttemptSuccess({
+            endpointIndex,
+            endpointCount,
+            request: healedRequest,
+            targetUrl: healedTargetUrl,
+            response: healedResponse,
+            recoverApplied: true,
+          });
+        }
+        // 失败：先更新 baseContext，再 fall through，让通道重试 / 降级 / oauth hint /
+        // 失败日志全部看到第二次的实际响应（有意行为变更）。
+        baseContext.request = healedRequest;
+        baseContext.response = healedResponse;
+        baseContext.rawErrText = await readRuntimeResponseText(healedResponse).catch(() => 'unknown error');
+        baseContext.recoverApplied = true;
       }
     }
 

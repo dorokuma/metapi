@@ -4,6 +4,7 @@ import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
 import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPin/rules.js';
 import { normalizeUpstreamPinAdapterMap } from './services/upstreamProviderPin/adapterMap.js';
+import { normalizeUpstreamParamCompatRules } from './services/upstreamParamCompat/rules.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -159,6 +160,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // 上游钉选适配器映射：站点 id → 适配器 id（env 为原始 JSON 对象，默认 '{}'）。
     // 默认空 = 全站点 generic-dual（逐字节回基线）；未注册 id 保留到热路径零注入兜底（M2）。
     upstreamProviderPinAdapterMap: normalizeUpstreamPinAdapterMap(env.UPSTREAM_PROVIDER_PIN_ADAPTER_MAP_JSON),
+    // 严格校验上游参数兼容层：总开关与自愈开关默认关；规则 env 为原始 JSON 数组，
+    // 解析失败 / 非法项按宽松归一「整条丢弃」（= 不剥离）。
+    // 双形态约定：config 只存编译形态（带预编译 matcher），落库/回显用原始形状。
+    upstreamParamCompatEnabled: parseBoolean(env.UPSTREAM_PARAM_COMPAT_ENABLED, false),
+    upstreamParamCompatRules: normalizeUpstreamParamCompatRules(env.UPSTREAM_PARAM_COMPAT_RULES_JSON),
+    upstreamParamCompatSelfHealEnabled: parseBoolean(env.UPSTREAM_PARAM_COMPAT_SELF_HEAL_ENABLED, false),
     openAiServiceTierRules: parseJsonValue(env.OPENAI_SERVICE_TIER_RULES_JSON || env.OPENAI_SERVICE_TIER_RULES),
     modelAvailabilityProbeEnabled: parseBoolean(env.MODEL_AVAILABILITY_PROBE_ENABLED, false),
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),

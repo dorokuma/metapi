@@ -64,4 +64,23 @@ describe('proxyRetryPolicy', () => {
       shouldAbortSameSiteEndpointFallback(429, '{"error":{"message":"too many requests"}}'),
     ).toBe(true);
   });
+
+  // 参数兼容层（参数剥离 + NIM 400 自愈）锁定：分类函数不改。
+  it('keeps the NIM unsupported-parameter 400 non-retryable on the shared channel-retry classifier', () => {
+    expect(shouldRetryProxyRequest(
+      400,
+      'Validation: Unsupported parameter(s): prompt_cache_key, prompt_cache_retention',
+    )).toBe(false);
+    expect(shouldRetryProxyRequest(
+      400,
+      'Validation: Unsupported parameter(s): prompt_cache_key, prompt_cache_retention.',
+    )).toBe(false);
+    expect(shouldRetryProxyRequest(400, 'unsupported parameter: prompt_cache_key')).toBe(false);
+  });
+
+  it('classifies a first-byte timeout 408 as retryable and as a same-site endpoint abort', () => {
+    // 自愈失败后的第二次首字节超时按普通 408 失败分类（不走首次超时的 continue 分支）。
+    expect(shouldRetryProxyRequest(408, 'first byte timeout (1s)')).toBe(true);
+    expect(shouldAbortSameSiteEndpointFallback(408, 'first byte timeout (1s)')).toBe(true);
+  });
 });

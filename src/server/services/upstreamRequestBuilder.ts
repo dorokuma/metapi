@@ -21,6 +21,7 @@ import {
   headerValueToString,
 } from '../proxy-core/providers/headerUtils.js';
 import { applyUpstreamProviderPin } from './upstreamProviderPin/apply.js';
+import { stripUnsupportedUpstreamParams } from './upstreamParamCompat/strip.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -583,6 +584,17 @@ export function buildUpstreamEndpointRequest(input: {
       protocol: sitePlatform,
     }) as T
   );
+  // 站点级参数剥离：payload 规则之后、钉选之前，作用于最终出站体。
+  // 未命中 / 无可删键时返回原引用（零改动路径逐字节不变）。
+  const stripSiteUnsupportedParams = <T extends Record<string, unknown>>(
+    body: T,
+    endpoint: 'chat' | 'responses' | 'messages',
+  ): T => stripUnsupportedUpstreamParams(body, {
+    siteId: input.siteId ?? null,
+    requestedModel: requestedModelForPayloadRules,
+    actualModel: input.modelName,
+    endpoint,
+  });
 
   if (isInternalGeminiUpstream) {
     const instructions = (
@@ -676,6 +688,9 @@ export function buildUpstreamEndpointRequest(input: {
         convertOpenAiBodyToAnthropicMessagesBody(openaiBody, input.modelName, input.stream),
       );
     const configuredClaudeBody = applyConfiguredPayloadRules(sanitizedBody);
+    // messages 端点：默认规则不含 messages（默认 endpoints = chat + responses），
+    // 只有显式写入 endpoints:['messages'] 才生效。两处 return 共用剥过的 body。
+    const strippedClaudeBody = stripSiteUnsupportedParams(configuredClaudeBody, 'messages');
 
     if (providerProfile?.id === 'claude') {
       return providerProfile.prepareRequest({
@@ -688,7 +703,7 @@ export function buildUpstreamEndpointRequest(input: {
         sitePlatform,
         baseHeaders: commonHeaders,
         claudeHeaders,
-        body: configuredClaudeBody,
+        body: strippedClaudeBody,
       });
     }
 
@@ -705,7 +720,7 @@ export function buildUpstreamEndpointRequest(input: {
     return {
       path: resolveEndpointPath('messages'),
       headers,
-      body: configuredClaudeBody,
+      body: strippedClaudeBody,
       runtime,
     };
   }
@@ -744,6 +759,8 @@ export function buildUpstreamEndpointRequest(input: {
       ),
       sitePlatform,
     );
+    // responses 端点：payload 规则之后、钉选之前；codex 分支与默认路径共用这份剥过的 body。
+    const strippedResponsesBody = stripSiteUnsupportedParams(configuredResponsesBody, 'responses');
 
     if (sitePlatform === 'codex') {
       if (providerProfile?.id !== 'codex') {
@@ -765,7 +782,7 @@ export function buildUpstreamEndpointRequest(input: {
         codexSessionCacheKey: input.codexSessionCacheKey,
         codexExplicitSessionId: input.codexExplicitSessionId,
         responsesWebsocketTransport,
-        body: configuredResponsesBody,
+        body: strippedResponsesBody,
       });
     }
 
@@ -780,7 +797,7 @@ export function buildUpstreamEndpointRequest(input: {
     // 匹配键复用预计算的 requestedModelForPayloadRules（含 fallback 链与 trim，见 W-2）；
     // 适配器分发 / 能力协商 / header 挂点集中在 applyUpstreamProviderPin（Phase 1 无 header 族 = 空操作）。
     const pinApplication = applyUpstreamProviderPin({
-      body: configuredResponsesBody,
+      body: strippedResponsesBody,
       headers,
       siteId: input.siteId ?? null,
       requestedModel: requestedModelForPayloadRules,
@@ -804,10 +821,12 @@ export function buildUpstreamEndpointRequest(input: {
       ? sanitizeResponsesFallbackChatBody(chatBody)
       : chatBody,
   );
-  // 供应商钉选注入：payloadRules 之后（钉选胜出用户规则）、sanitize 之后（不会被剥）；
+  // 站点级参数剥离：payload 规则之后（override 加不回被禁键）、钉选之前（pin 字段在拒绝表里）。
+  const strippedChatBody = stripSiteUnsupportedParams(configuredChatBody, 'chat');
+  // 供应商钉选注入：payloadRules → strip 之后（钉选胜出用户规则）、sanitize 之后（不会被剥）；
   // 适配器分发 / 能力协商 / header 挂点集中在 applyUpstreamProviderPin（Phase 1 无 header 族 = 空操作）。
   const pinApplication = applyUpstreamProviderPin({
-    body: configuredChatBody,
+    body: strippedChatBody,
     headers,
     siteId: input.siteId ?? null,
     requestedModel: requestedModelForPayloadRules,

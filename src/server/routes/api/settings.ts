@@ -67,6 +67,12 @@ import {
   toStoredAdapterMap,
   type CompiledUpstreamPinAdapterMap,
 } from '../../services/upstreamProviderPin/adapterMap.js';
+import {
+  normalizeUpstreamParamCompatRules,
+  parseUpstreamParamCompatRules,
+  toUpstreamParamCompatStoredRules,
+  type UpstreamParamCompatStoredRule,
+} from '../../services/upstreamParamCompat/rules.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -97,6 +103,9 @@ interface RuntimeSettingsBody {
   upstreamProviderPinEnabled?: boolean;
   upstreamProviderPinRules?: unknown;
   upstreamProviderPinAdapterMap?: unknown;
+  upstreamParamCompatEnabled?: boolean;
+  upstreamParamCompatRules?: unknown;
+  upstreamParamCompatSelfHealEnabled?: boolean;
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
@@ -584,6 +593,21 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.upstreamProviderPinAdapterMap = normalizeUpstreamPinAdapterMap(value);
       return;
     }
+    case 'upstream_param_compat_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.upstreamParamCompatEnabled = value;
+      return;
+    }
+    case 'upstream_param_compat_self_heal_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.upstreamParamCompatSelfHealEnabled = value;
+      return;
+    }
+    case 'upstream_param_compat_rules': {
+      // 宽松归一：非法规则整条丢弃（与 hydration / env 同一入口）。
+      config.upstreamParamCompatRules = normalizeUpstreamParamCompatRules(value);
+      return;
+    }
     case 'proxy_empty_content_fail_enabled': {
       try {
         config.proxyEmptyContentFailEnabled = parseBooleanFlag(value, '空内容判定失败开关');
@@ -820,6 +844,10 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     upstreamProviderPinRules: toUpstreamProviderPinStoredRules(config.upstreamProviderPinRules),
     // 回显口径：数字键归一为字符串键的原始 JSON 对象（含未注册 id，与落库形状一致）。
     upstreamProviderPinAdapterMap: toStoredAdapterMap(config.upstreamProviderPinAdapterMap),
+    upstreamParamCompatEnabled: config.upstreamParamCompatEnabled,
+    // 回显口径：归一后的原始形状（siteId/model/params，可选 endpoints），不含 matcher。
+    upstreamParamCompatRules: toUpstreamParamCompatStoredRules(config.upstreamParamCompatRules),
+    upstreamParamCompatSelfHealEnabled: config.upstreamParamCompatSelfHealEnabled,
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
@@ -1575,6 +1603,44 @@ export async function settingsRoutes(app: FastifyInstance) {
       pendingUpstreamProviderPinAdapterMap = parseResult.map;
     }
 
+    // 参数兼容层三键（enabled / selfHealEnabled / rules）一次预校验：任一非法即 400，
+    // 且这三键的 config 与落库一个都不写（三键原子、不半应用；不是整个 PUT 请求的事务）。
+    let pendingUpstreamParamCompatRules: UpstreamParamCompatStoredRule[] | undefined;
+    if (body.upstreamParamCompatRules !== undefined) {
+      const parseResult = parseUpstreamParamCompatRules(body.upstreamParamCompatRules);
+      if (!parseResult.ok) {
+        return reply.code(400).send({ success: false, message: parseResult.message });
+      }
+      pendingUpstreamParamCompatRules = parseResult.rules;
+    }
+
+    let pendingUpstreamParamCompatEnabled: boolean | undefined;
+    if (body.upstreamParamCompatEnabled !== undefined) {
+      try {
+        pendingUpstreamParamCompatEnabled = parseBooleanFlag(body.upstreamParamCompatEnabled, '上游参数兼容层开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '上游参数兼容层开关格式无效',
+        });
+      }
+    }
+
+    let pendingUpstreamParamCompatSelfHealEnabled: boolean | undefined;
+    if (body.upstreamParamCompatSelfHealEnabled !== undefined) {
+      try {
+        pendingUpstreamParamCompatSelfHealEnabled = parseBooleanFlag(
+          body.upstreamParamCompatSelfHealEnabled,
+          '上游参数兼容层自愈开关',
+        );
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '上游参数兼容层自愈开关格式无效',
+        });
+      }
+    }
+
     if (body.upstreamProviderPinEnabled !== undefined) {
       let nextValue = false;
       try {
@@ -1613,6 +1679,35 @@ export async function settingsRoutes(app: FastifyInstance) {
       // 双形态约定：config 持有编译形态（供热路径），落库与回显保持原始对象形状。
       config.upstreamProviderPinAdapterMap = nextMap;
       upsertSetting('upstream_provider_pin_adapter_map', nextMap);
+    }
+
+    // 参数兼容层三键应用：预校验（上方）已全部通过，这里才按「本次 body 里出现的键」一并写入。
+    if (pendingUpstreamParamCompatEnabled !== undefined) {
+      if (pendingUpstreamParamCompatEnabled !== config.upstreamParamCompatEnabled) {
+        changedLabels.push('上游参数兼容层');
+      }
+      config.upstreamParamCompatEnabled = pendingUpstreamParamCompatEnabled;
+      upsertSetting('upstream_param_compat_enabled', config.upstreamParamCompatEnabled);
+    }
+
+    if (pendingUpstreamParamCompatSelfHealEnabled !== undefined) {
+      if (pendingUpstreamParamCompatSelfHealEnabled !== config.upstreamParamCompatSelfHealEnabled) {
+        changedLabels.push('上游参数兼容层自愈');
+      }
+      config.upstreamParamCompatSelfHealEnabled = pendingUpstreamParamCompatSelfHealEnabled;
+      upsertSetting('upstream_param_compat_self_heal_enabled', config.upstreamParamCompatSelfHealEnabled);
+    }
+
+    if (pendingUpstreamParamCompatRules !== undefined) {
+      // 落库形状 = 原始形状（siteId/model/params，可选 endpoints）；upsertSetting 内部已 JSON.stringify。
+      const nextRules = pendingUpstreamParamCompatRules;
+      const currentRules = toUpstreamParamCompatStoredRules(config.upstreamParamCompatRules);
+      if (JSON.stringify(nextRules) !== JSON.stringify(currentRules)) {
+        changedLabels.push('上游参数兼容层规则');
+      }
+      // 双形态约定：config 持有编译形态（供热路径），落库与回显保持原始形状。
+      config.upstreamParamCompatRules = normalizeUpstreamParamCompatRules(nextRules);
+      upsertSetting('upstream_param_compat_rules', nextRules);
     }
 
     if (body.proxyErrorKeywords !== undefined) {

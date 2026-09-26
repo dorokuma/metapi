@@ -6,6 +6,7 @@ import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProviderDetect/siteIds.js';
 import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPin/rules.js';
 import { normalizeUpstreamPinAdapterMap } from './services/upstreamProviderPin/adapterMap.js';
+import { normalizeUpstreamParamCompatRules } from './services/upstreamParamCompat/rules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -347,5 +348,22 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const upstreamProviderPinAdapterMap = parseSettingFromMap<unknown>(settingsMap, 'upstream_provider_pin_adapter_map');
   if (upstreamProviderPinAdapterMap !== undefined) {
     config.upstreamProviderPinAdapterMap = normalizeUpstreamPinAdapterMap(upstreamProviderPinAdapterMap);
+  }
+
+  const upstreamParamCompatEnabled = parseSettingFromMap<boolean>(settingsMap, 'upstream_param_compat_enabled');
+  if (typeof upstreamParamCompatEnabled === 'boolean') {
+    config.upstreamParamCompatEnabled = upstreamParamCompatEnabled;
+  }
+
+  const upstreamParamCompatSelfHealEnabled = parseSettingFromMap<boolean>(settingsMap, 'upstream_param_compat_self_heal_enabled');
+  if (typeof upstreamParamCompatSelfHealEnabled === 'boolean') {
+    config.upstreamParamCompatSelfHealEnabled = upstreamParamCompatSelfHealEnabled;
+  }
+
+  // 双形态约定：从存储原始形态编译一次，写入 config 的是编译形态（带 matcher）。
+  // 宽松归一：一条规则里只要有一个非法 param（含结构键）或该条超过 32 个 → 整条丢弃。
+  const upstreamParamCompatRules = parseSettingFromMap<unknown>(settingsMap, 'upstream_param_compat_rules');
+  if (upstreamParamCompatRules !== undefined) {
+    config.upstreamParamCompatRules = normalizeUpstreamParamCompatRules(upstreamParamCompatRules);
   }
 }

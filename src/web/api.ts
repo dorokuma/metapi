@@ -387,6 +387,9 @@ export type RuntimeSettingsPayload = {
   upstreamProviderPinEnabled?: boolean;
   upstreamProviderPinRules?: UpstreamProviderPinRule[];
   upstreamProviderPinAdapterMap?: Record<string, string>;
+  upstreamParamCompatEnabled?: boolean;
+  upstreamParamCompatRules?: UpstreamParamCompatRule[];
+  upstreamParamCompatSelfHealEnabled?: boolean;
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;
@@ -567,6 +570,16 @@ export type UpstreamProviderPinRule = {
   model: string;
   providers: string[];
   mode: UpstreamProviderPinMode;
+};
+
+export type UpstreamParamCompatEndpoint = "chat" | "responses" | "messages";
+
+export type UpstreamParamCompatRule = {
+  siteId: number;
+  model: string;
+  params: string[];
+  /** 省略 = ["chat","responses"]；messages 必须显式写入才生效。 */
+  endpoints?: UpstreamParamCompatEndpoint[];
 };
 
 export type UpstreamProviderDistributionItem = {

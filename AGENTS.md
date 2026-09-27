@@ -21,44 +21,26 @@ make small, consistent changes without re-learning the codebase each time.
 
 ## 发版与无痛上线 / Release And Painless Deploy
 
-用户说「发版」即按本节执行（上线 → 验收 → 发布收尾）。前置：改动在分支上经双审（reviewer + oracle）通过后方可提交；commit message 须过 commit-msg hook。
+用户说「发版」即按本节执行（上线 → 验收 → 发布收尾）。前置：改动在分支上经双审（reviewer + oracle）通过后方可提交；commit message 须过 commit-msg hook；对生产的写操作须先经用户批准。
 
-**事实基线**：生产容器由 compose 管理（`/var/lib/metapi/docker-compose.yml`，project `metapi`），**切换动作只有一种：改该文件的 `image:` 行 + `docker compose up -d`**。手工 `docker stop/rm` 生产容器再手搓 `docker run` 重建是禁止动作（2026-09-27 曾因此停机 17 分钟，见 `.agents/notes/`）。
+**唯一路径**：`scripts/deploy-painless.sh --version <版本号> --yes`（`--yes` 只是非交互确认）。脚本按固定顺序执行，无跳过开关，任一步失败自动回滚（恢复 compose 备份 + `docker compose up -d`）：
 
-- **无痛上线（旧容器运行到切换前一刻）**：
-  1. **定版本**：先 bump `package.json` 版本号并提交（连同 CHANGELOG、`.agents/notes/`）——版本号按语义化递增（或按用户指定），镜像 tag 与版本对齐（`metapi:<版本号>`）。
-  2. **旁路构建**：`docker build -t metapi:<版本号> -f docker/Dockerfile .`（旧容器照跑），记下新旧 IMAGE ID（`docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'`）。构建必须在切换**之前完整结束**，不得把构建与切换混在一个未完成的动作里。
-  3. **数据快照（切换前置条件，不做不得切换）**：
-     ```
-     sqlite3 "file:/var/lib/metapi/data/hub.db?mode=ro" ".backup '/var/lib/metapi/data.bak-<ts>-pre-<slug>.db'"
-     sqlite3 /var/lib/metapi/data.bak-<ts>-pre-<slug>.db 'PRAGMA quick_check;'   # 必须 ok
-     ```
-     快照与现役数据同目录（与既往 `data.bak-*` 惯例一致），回滚时可直接覆盖回去。
-  4. **切换（单条命令窗口）**：
-     - 编辑 `/var/lib/metapi/docker-compose.yml`：**只改 `image:` 行**，并按文件现有格式在该行上方补一行 switch 注释（`# <日期> switched to ...; prev ...; rollback: ...`）。
-     - `cd /var/lib/metapi && docker compose config -q`（语法与变量校验，缺 env 会在此报错）→ `docker compose config --images`（确认只认到新 tag）。
-     - `docker compose up -d`（compose 自行 stop → remove → create，秒级完成）。
-     - 禁止在 compose 之外动生产容器：不 `docker stop/rm metapi`、不手搓 `docker run` 替换它、不把 rm 与 run 拆成两步手工操作。
-  5. **健康检查 + 验收**（全通过才算上线成功）：`docker compose ps` 为 `running`；`ss -ltn | grep 127.0.0.1:4000`；`docker logs --tail 50 metapi` 必须出现 `Migration complete.` 与 `Server listening at http://127.0.0.1:4000`；HTTP 探测 `/api/stats/dashboard`（带 `AUTH_TOKEN`）与 `/v1/models`（带 `PROXY_TOKEN`）均 200；再按本次改动做真实流量验证（复现触发 / 查调试库与日志核对）。
-  6. **失败回滚（同样只有一条命令路径）**：容器没起来或验收不过 → 把 `image:` 改回注释里的 `prev` tag → `docker compose up -d`。若新版本已跑过 schema 迁移且数据被污染 → 停容器后用第 3 步快照覆盖 `/var/lib/metapi/data/hub.db`，再回滚 image 并 `up -d`。
-- **可选：切换前旁路验证新镜像**（涉及数据迁移的改动强烈建议）：用**新 tag + 数据副本 + 另一个端口**起一次性容器，验证 migrate 与接口后再执行第 4 步：
-  ```
-  mkdir -p /var/lib/metapi/data-canary && cp /var/lib/metapi/data/hub.db /var/lib/metapi/data-canary/hub.db
-  docker run --rm --name metapi-canary --network host --env-file /var/lib/metapi/.env \
-    -e HOST=127.0.0.1 -e PORT=4100 -e DATA_DIR=/app/data \
-    -e CHECKIN_CRON='0 0 31 2 *' -e BALANCE_REFRESH_CRON='0 0 31 2 *' \
-    -v /var/lib/metapi/data-canary:/app/data metapi:<版本号>
-  ```
-  （`-e` 覆盖 `--env-file`；cron 改成永不触发，避免副本上跑定时任务。）验证完 `docker rm -f metapi-canary`，副本目录可留作对比，不进生产。
-- **发布收尾**：**显式** `git push origin <branch>` → `git merge --ff-only` 进 main → `git push origin main`。
+1. 旁路构建 `metapi:<版本号>`（旧容器继续服务）
+2. `hub.db` 只读一致快照 + `PRAGMA quick_check`（不过即终止）
+3. canary：快照副本 + `PORT=4100` 起一次性容器验证 migrate 与接口（不过即终止，生产未动）
+4. 切换：改 `/var/lib/metapi/docker-compose.yml` 的 `image:` 行（附 switch 注释）→ `docker compose config -q` → `docker compose up -d`
+5. 验收：容器 running、`127.0.0.1:4000` 监听、日志含 `Migration complete.`、`/api/stats/dashboard` 与 `/v1/models` 均 200
+6. 收尾：打印快照路径、镜像级/数据级回滚命令
+
+- **脚本跑完还要做的**：① 按本次改动做真实流量验证（复现触发 / 查调试库与日志核对）；② 发布收尾：**显式** `git push origin <branch>` → `git merge --ff-only` 进 main → `git push origin main`。
 - **红线**：
+  - **生产容器只由 compose 管**：不 `docker stop/rm metapi`、不手搓 `docker run` 替换它、不把切换拆成「先删后建」两步——任何时刻都不得让生产容器处于「已删除且无替代」状态。
+  - **切换中途被打断时，第一优先级是「容器在不在」**（`docker ps -a --filter name=metapi`）：不在就立刻 `cd /var/lib/metapi && docker compose up -d` 恢复，之后才排查原因。
+  - **单一操作者**：切换窗口内只允许一个 agent/会话操作生产容器，不并发派发会动容器的 worker。
+  - **不手工重建 Env**：环境变量唯一真相是 `/var/lib/metapi/docker-compose.yml` + `/var/lib/metapi/.env`；不要从 `docker inspect` 抄 Env 拼 `docker run`。
+  - **日志里的密钥不外传**：启动横幅会把 `AUTH_TOKEN`/`PROXY_TOKEN` 明文写进 `docker logs`，日志内容不得落盘、回传或粘贴到别处。
+  - **不擅自改运行时事实**：数据路径 `/var/lib/metapi/data`、host 网络、端口 `4000`、`container_name: metapi`。
   - main 的 tracking 指向 upstream——裸 `git push` 会指向 upstream，一律显式写 `origin`；不推 upstream、不 force、不打 tag、不删分支（除用户明说）。
-  - **任何时刻都不得让生产容器处于「已删除且无替代」状态**：切换是可回退的单步动作，不是「先删再建」的流程。
-  - **切换中途被打断时，第一优先级是「`metapi` 容器在不在」**（`docker ps -a --filter name=metapi`）：不在就立刻用旧 tag `docker compose up -d` 恢复服务，之后再排查原因；禁止先排查、后恢复。
-  - **禁止执行 `/root/deploy-prep/deploy-painless.sh` 一类"草案脚本"**：它按手工 `docker run` 设计，与 compose 事实冲突；未获用户明确批准，不得运行任何 `deploy-prep` 脚本。
-  - **单一操作者**：同一时间只允许一个 agent/会话操作生产容器；切换窗口内不并发派发其他会动容器的 worker，切换动作要一次做完。
-  - **Env 不手工重建**：环境变量唯一真相是 `/var/lib/metapi/docker-compose.yml` + `/var/lib/metapi/.env`；不要从 `docker inspect` 抄 Env 拼 `docker run`。启动横幅会把 `AUTH_TOKEN`/`PROXY_TOKEN` 明文写进 `docker logs`，日志内容不得落盘、回传或粘贴到别处。
-  - 不擅自改动 `/var/lib/metapi/docker-compose.yml` 之外的运行时事实：数据路径 `/var/lib/metapi/data`、host 网络、端口 `4000`、`container_name: metapi`。
 
 ## Index & Documentation / 索引与现状文档
 

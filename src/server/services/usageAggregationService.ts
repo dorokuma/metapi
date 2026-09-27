@@ -19,6 +19,22 @@ const PROJECTION_MAX_BATCHES_PER_PASS = 120;
 const PROJECTION_INTERVAL_MS = 5_000;
 const PROJECTION_LEASE_MS = 10 * 60_000;
 
+export class ProjectionCheckpointResetError extends Error {
+  readonly code = 'checkpoint_reset';
+  constructor() {
+    super('usage projection checkpoint reset: row was deleted externally, pass rolled back');
+    this.name = 'ProjectionCheckpointResetError';
+  }
+}
+
+export class ProjectionLeaseLostError extends Error {
+  readonly code = 'lease_lost';
+  constructor() {
+    super('usage projection lease lost: lease token no longer matches, pass rolled back');
+    this.name = 'ProjectionLeaseLostError';
+  }
+}
+
 type ProjectionCheckpointRow = typeof schema.analyticsProjectionCheckpoints.$inferSelect;
 type ProjectionLease = {
   owner: string;
@@ -218,13 +234,28 @@ function normalizeProjectionError(error: unknown) {
   return String(error || 'unknown projection error');
 }
 
-async function readProjectionCheckpoint(): Promise<ProjectionCheckpointRow> {
-  const row = await db
+async function readProjectionCheckpointRow(): Promise<ProjectionCheckpointRow | undefined> {
+  return await db
     .select()
     .from(schema.analyticsProjectionCheckpoints)
     .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, USAGE_PROJECTOR_KEY))
     .get();
-  return row || emptyCheckpoint();
+}
+
+async function readProjectionCheckpoint(): Promise<ProjectionCheckpointRow> {
+  return (await readProjectionCheckpointRow()) || emptyCheckpoint();
+}
+
+async function classifyZeroRowAbort(leaseToken: string): Promise<never> {
+  const row = await readProjectionCheckpointRow();
+  if (!row) {
+    throw new ProjectionCheckpointResetError();
+  }
+  if (row.leaseToken !== leaseToken) {
+    throw new ProjectionLeaseLostError();
+  }
+  // Defensive branch: row exists + token matches + 0 rows — conservatively treat as B.
+  throw new ProjectionLeaseLostError();
 }
 
 async function ensureProjectionCheckpointExists() {
@@ -309,79 +340,8 @@ async function releaseProjectionLease(
     .run();
 }
 
-async function writeProjectionCheckpoint(
-  tx: typeof db,
-  checkpoint: Partial<ProjectionCheckpointRow> & { lastProxyLogId: number },
-) {
-  const nowIso = new Date().toISOString();
-  const values = {
-    projectorKey: USAGE_PROJECTOR_KEY,
-    timeZone: checkpoint.timeZone ?? getResolvedTimeZone(),
-    lastProxyLogId: Math.max(0, Math.trunc(checkpoint.lastProxyLogId || 0)),
-    watermarkCreatedAt: checkpoint.watermarkCreatedAt ?? null,
-    recomputeFromId: checkpoint.recomputeFromId ?? null,
-    recomputeRequestedAt: checkpoint.recomputeRequestedAt ?? null,
-    recomputeReason: checkpoint.recomputeReason ?? null,
-    recomputeStartedAt: checkpoint.recomputeStartedAt ?? null,
-    recomputeCompletedAt: checkpoint.recomputeCompletedAt ?? null,
-    leaseOwner: checkpoint.leaseOwner ?? null,
-    leaseToken: checkpoint.leaseToken ?? null,
-    leaseExpiresAt: checkpoint.leaseExpiresAt ?? null,
-    lastProjectedAt: checkpoint.lastProjectedAt ?? nowIso,
-    lastSuccessfulAt: checkpoint.lastSuccessfulAt ?? nowIso,
-    lastError: checkpoint.lastError ?? null,
-    createdAt: checkpoint.createdAt ?? nowIso,
-    updatedAt: nowIso,
-  };
-
-  if (runtimeDbDialect === 'mysql') {
-    await (tx.insert(schema.analyticsProjectionCheckpoints).values(values) as any)
-      .onDuplicateKeyUpdate({
-        set: {
-          timeZone: values.timeZone,
-          lastProxyLogId: values.lastProxyLogId,
-          watermarkCreatedAt: values.watermarkCreatedAt,
-          recomputeFromId: values.recomputeFromId,
-          recomputeRequestedAt: values.recomputeRequestedAt,
-          recomputeReason: values.recomputeReason,
-          recomputeStartedAt: values.recomputeStartedAt,
-          recomputeCompletedAt: values.recomputeCompletedAt,
-          leaseOwner: values.leaseOwner,
-          leaseToken: values.leaseToken,
-          leaseExpiresAt: values.leaseExpiresAt,
-          lastProjectedAt: values.lastProjectedAt,
-          lastSuccessfulAt: values.lastSuccessfulAt,
-          lastError: values.lastError,
-          updatedAt: values.updatedAt,
-        },
-      })
-      .run();
-    return;
-  }
-
-  await (tx.insert(schema.analyticsProjectionCheckpoints).values(values) as any)
-    .onConflictDoUpdate({
-      target: schema.analyticsProjectionCheckpoints.projectorKey,
-      set: {
-        timeZone: values.timeZone,
-        lastProxyLogId: values.lastProxyLogId,
-        watermarkCreatedAt: values.watermarkCreatedAt,
-        recomputeFromId: values.recomputeFromId,
-        recomputeRequestedAt: values.recomputeRequestedAt,
-        recomputeReason: values.recomputeReason,
-        recomputeStartedAt: values.recomputeStartedAt,
-        recomputeCompletedAt: values.recomputeCompletedAt,
-        leaseOwner: values.leaseOwner,
-        leaseToken: values.leaseToken,
-        leaseExpiresAt: values.leaseExpiresAt,
-        lastProjectedAt: values.lastProjectedAt,
-        lastSuccessfulAt: values.lastSuccessfulAt,
-        lastError: values.lastError,
-        updatedAt: values.updatedAt,
-      },
-    })
-    .run();
-}
+// writeProjectionCheckpoint (upsert) removed: all P1/P2/P3 write sites are now
+// guarded UPDATEs with explicit column whitelist and 0-row A/B classification.
 
 async function fetchProjectionBatch(afterId: number, limit: number) {
   const rows = await db
@@ -681,39 +641,59 @@ async function applyProjectionBatch(
 
   const delta = buildProjectionBatchDelta(rows);
   const updatedAt = new Date().toISOString();
-  const nextCheckpoint = {
-    ...checkpoint,
-    lastProxyLogId: lastRow.id,
-    watermarkCreatedAt:
-      typeof lastRow.createdAt === 'string'
-        ? lastRow.createdAt
-        : String(lastRow.createdAt || ''),
-    recomputeFromId: checkpoint.recomputeFromId ?? null,
-    recomputeRequestedAt: checkpoint.recomputeRequestedAt ?? null,
-    leaseExpiresAt: checkpoint.leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
-    lastProjectedAt: updatedAt,
-    lastSuccessfulAt: updatedAt,
-    lastError: null,
-    createdAt: checkpoint.createdAt ?? updatedAt,
-  };
+  const watermarkCreatedAt =
+    typeof lastRow.createdAt === 'string'
+      ? lastRow.createdAt
+      : String(lastRow.createdAt || '');
+  const leaseToken = checkpoint.leaseToken;
+  if (!leaseToken) {
+    throw new Error('usage projection lease token is missing in applyProjectionBatch');
+  }
+  const nextLastProxyLogId = Math.max(0, Math.trunc(lastRow.id));
 
   await db.transaction(async (tx) => {
+    const t = tx as typeof db;
     for (const row of delta.siteDayRows) {
-      await upsertSiteDayUsage(tx as typeof db, row, updatedAt);
+      await upsertSiteDayUsage(t, row, updatedAt);
     }
     for (const row of delta.siteHourRows) {
-      await upsertSiteHourUsage(tx as typeof db, row, updatedAt);
+      await upsertSiteHourUsage(t, row, updatedAt);
     }
     for (const row of delta.modelDayRows) {
-      await upsertModelDayUsage(tx as typeof db, row, updatedAt);
+      await upsertModelDayUsage(t, row, updatedAt);
     }
-    await writeProjectionCheckpoint(tx as typeof db, nextCheckpoint);
+    const result = await t
+      .update(schema.analyticsProjectionCheckpoints)
+      .set({
+        lastProxyLogId: nextLastProxyLogId,
+        watermarkCreatedAt,
+        leaseExpiresAt: leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
+        lastProjectedAt: updatedAt,
+        lastSuccessfulAt: updatedAt,
+        lastError: null,
+        updatedAt,
+      })
+      .where(
+        and(
+          eq(schema.analyticsProjectionCheckpoints.projectorKey, USAGE_PROJECTOR_KEY),
+          eq(schema.analyticsProjectionCheckpoints.leaseToken, leaseToken),
+        ),
+      )
+      .run();
+    if (result.changes === 0) {
+      await classifyZeroRowAbort(leaseToken ?? '');
+    }
   });
 
   clearAnalyticsSnapshots();
   return {
     ...checkpoint,
-    ...nextCheckpoint,
+    lastProxyLogId: nextLastProxyLogId,
+    watermarkCreatedAt,
+    leaseExpiresAt: leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
+    lastProjectedAt: updatedAt,
+    lastSuccessfulAt: updatedAt,
+    lastError: null,
     updatedAt,
   };
 }
@@ -733,17 +713,51 @@ async function applyPendingRecompute(checkpoint: ProjectionCheckpointRow) {
     .get();
 
   if (!affectedRow) {
-    const nextCheckpoint = {
+    const nowIso = new Date().toISOString();
+    const seenFromId = recomputeFromId;
+    const leaseToken = checkpoint.leaseToken;
+    if (!leaseToken) {
+      throw new Error('usage projection lease token is missing in applyPendingRecompute (missing-row)');
+    }
+    const recomputeFromIdColumn = schema.analyticsProjectionCheckpoints.recomputeFromId;
+
+    await db.transaction(async (tx) => {
+      const t = tx as typeof db;
+      const result = await t
+        .update(schema.analyticsProjectionCheckpoints)
+        .set({
+          recomputeFromId: sql<number>`CASE
+            WHEN ${recomputeFromIdColumn} = ${seenFromId} THEN NULL
+            ELSE ${recomputeFromIdColumn}
+          END`,
+          recomputeRequestedAt: sql<string>`CASE
+            WHEN ${recomputeFromIdColumn} IS NULL OR ${recomputeFromIdColumn} = ${seenFromId} THEN NULL
+            ELSE ${schema.analyticsProjectionCheckpoints.recomputeRequestedAt}
+          END`,
+          leaseExpiresAt: leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
+          lastProjectedAt: nowIso,
+          updatedAt: nowIso,
+        })
+        .where(
+          and(
+            eq(schema.analyticsProjectionCheckpoints.projectorKey, USAGE_PROJECTOR_KEY),
+            eq(schema.analyticsProjectionCheckpoints.leaseToken, leaseToken),
+          ),
+        )
+        .run();
+      if (result.changes === 0) {
+        await classifyZeroRowAbort(leaseToken ?? '');
+      }
+    });
+
+    return {
       ...checkpoint,
       recomputeFromId: null,
       recomputeRequestedAt: null,
-      leaseExpiresAt: checkpoint.leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
-      lastProjectedAt: new Date().toISOString(),
+      leaseExpiresAt: leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
+      lastProjectedAt: nowIso,
+      updatedAt: nowIso,
     };
-    await db.transaction(async (tx) => {
-      await writeProjectionCheckpoint(tx as typeof db, nextCheckpoint as any);
-    });
-    return { ...checkpoint, ...nextCheckpoint };
   }
 
   const affectedDay = toLocalDayKeyFromStoredUtc(affectedRow.createdAt);
@@ -763,25 +777,60 @@ async function applyPendingRecompute(checkpoint: ProjectionCheckpointRow) {
     .get();
 
   const restartFromId = restartRow?.id || affectedRow.id;
-  const nextCheckpoint = {
-    ...checkpoint,
-    lastProxyLogId: Math.max(0, restartFromId - 1),
-    watermarkCreatedAt: null,
-    recomputeFromId: null,
-    recomputeRequestedAt: null,
-    leaseExpiresAt: checkpoint.leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
-    lastProjectedAt: new Date().toISOString(),
-  };
+  const nowIso = new Date().toISOString();
+  const seenFromId = recomputeFromId;
+  const leaseToken = checkpoint.leaseToken;
+  if (!leaseToken) {
+    throw new Error('usage projection lease token is missing in applyPendingRecompute (restart)');
+  }
+  const recomputeFromIdColumn = schema.analyticsProjectionCheckpoints.recomputeFromId;
+  const nextLastProxyLogId = Math.max(0, restartFromId - 1);
 
   await db.transaction(async (tx) => {
-    await tx.delete(schema.siteDayUsage).where(gte(schema.siteDayUsage.localDay, affectedDay)).run();
-    await tx.delete(schema.siteHourUsage).where(gte(schema.siteHourUsage.bucketStartUtc, affectedDayStartUtc)).run();
-    await tx.delete(schema.modelDayUsage).where(gte(schema.modelDayUsage.localDay, affectedDay)).run();
-    await writeProjectionCheckpoint(tx as typeof db, nextCheckpoint as any);
+    const t = tx as typeof db;
+    await t.delete(schema.siteDayUsage).where(gte(schema.siteDayUsage.localDay, affectedDay)).run();
+    await t.delete(schema.siteHourUsage).where(gte(schema.siteHourUsage.bucketStartUtc, affectedDayStartUtc)).run();
+    await t.delete(schema.modelDayUsage).where(gte(schema.modelDayUsage.localDay, affectedDay)).run();
+    const result = await t
+      .update(schema.analyticsProjectionCheckpoints)
+      .set({
+        lastProxyLogId: nextLastProxyLogId,
+        watermarkCreatedAt: null,
+        recomputeFromId: sql<number>`CASE
+          WHEN ${recomputeFromIdColumn} = ${seenFromId} THEN NULL
+          ELSE ${recomputeFromIdColumn}
+        END`,
+        recomputeRequestedAt: sql<string>`CASE
+          WHEN ${recomputeFromIdColumn} IS NULL OR ${recomputeFromIdColumn} = ${seenFromId} THEN NULL
+          ELSE ${schema.analyticsProjectionCheckpoints.recomputeRequestedAt}
+        END`,
+        leaseExpiresAt: leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
+        lastProjectedAt: nowIso,
+        updatedAt: nowIso,
+      })
+      .where(
+        and(
+          eq(schema.analyticsProjectionCheckpoints.projectorKey, USAGE_PROJECTOR_KEY),
+          eq(schema.analyticsProjectionCheckpoints.leaseToken, leaseToken),
+        ),
+      )
+      .run();
+    if (result.changes === 0) {
+      await classifyZeroRowAbort(leaseToken ?? '');
+    }
   });
 
   clearAnalyticsSnapshots();
-  return { ...checkpoint, ...nextCheckpoint };
+  return {
+    ...checkpoint,
+    lastProxyLogId: nextLastProxyLogId,
+    watermarkCreatedAt: null,
+    recomputeFromId: null,
+    recomputeRequestedAt: null,
+    leaseExpiresAt: leaseToken ? buildProjectionLeaseExpiry() : checkpoint.leaseExpiresAt,
+    lastProjectedAt: nowIso,
+    updatedAt: nowIso,
+  };
 }
 
 async function runUsageAggregationProjectionPassImpl(
@@ -855,28 +904,49 @@ export async function runUsageAggregationProjectionPass(
 }
 
 export async function requestUsageAggregatesRecompute(fromLogId = 1): Promise<void> {
-  const checkpoint = await readProjectionCheckpoint();
-  const normalizedFromId = Math.max(1, Math.trunc(fromLogId || 1));
-  const nextFromId = checkpoint.recomputeFromId && checkpoint.recomputeFromId > 0
-    ? Math.min(checkpoint.recomputeFromId, normalizedFromId)
-    : normalizedFromId;
+  const raw = Number(fromLogId);
+  const n = Math.trunc(raw);
+  const normalizedFromId = Number.isFinite(n) ? Math.max(1, Math.min(n, 2147483647)) : 1;
+  const nowIso = new Date().toISOString();
+  const recomputeFromIdColumn = schema.analyticsProjectionCheckpoints.recomputeFromId;
 
-  await db.transaction(async (tx) => {
-    await writeProjectionCheckpoint(tx as typeof db, {
-      ...checkpoint,
-      lastProxyLogId: checkpoint.lastProxyLogId,
-      recomputeFromId: nextFromId,
-      recomputeRequestedAt: new Date().toISOString(),
-      lastProjectedAt: checkpoint.lastProjectedAt,
-    } as any);
-  });
+  await db
+    .update(schema.analyticsProjectionCheckpoints)
+    .set({
+      recomputeFromId: sql<number>`CASE
+        WHEN ${recomputeFromIdColumn} IS NULL
+          OR ${recomputeFromIdColumn} <= 0
+          THEN ${normalizedFromId}
+        WHEN ${recomputeFromIdColumn} <= ${normalizedFromId}
+          THEN ${recomputeFromIdColumn}
+        ELSE ${normalizedFromId}
+      END`,
+      recomputeRequestedAt: nowIso,
+      updatedAt: nowIso,
+    })
+    .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, USAGE_PROJECTOR_KEY))
+    .run();
+}
+
+export function handleUsageProjectionPassFailure(error: unknown): void {
+  if (error instanceof ProjectionCheckpointResetError) {
+    console.warn('[UsageProjection] checkpoint has been reset, pass rolled back');
+    return;
+  }
+  if (error instanceof ProjectionLeaseLostError) {
+    console.warn('[UsageProjection] lease has been lost, pass stopped');
+    return;
+  }
+  console.error(
+    `[UsageProjection] unexpected failure: ${error instanceof Error ? error.message : String(error || 'unknown error')}`,
+  );
 }
 
 export function startUsageAggregationProjectorScheduler() {
   if (projectionTimer) return;
-  void runUsageAggregationProjectionPass();
+  void runUsageAggregationProjectionPass().catch(handleUsageProjectionPassFailure);
   projectionTimer = setInterval(() => {
-    void runUsageAggregationProjectionPass();
+    void runUsageAggregationProjectionPass().catch(handleUsageProjectionPassFailure);
   }, PROJECTION_INTERVAL_MS);
 }
 

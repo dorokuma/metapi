@@ -784,9 +784,13 @@ async function syncPostgresSequences(client: SqlClient): Promise<void> {
     'events',
   ];
   for (const table of tables) {
+    if (table === 'sites') {
+      await client.execute(`SELECT setval(pg_get_serial_sequence('sites', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM "sites" WHERE id > 0), 0), 1), TRUE)`);
+    } else {
       await client.execute(`SELECT setval(pg_get_serial_sequence('${table}', 'id'), COALESCE((SELECT MAX(id) FROM "${table}"), 1), TRUE)`);
     }
   }
+}
 
 export async function bootstrapRuntimeDatabaseSchema(input: Pick<NormalizedDatabaseMigrationInput, 'dialect' | 'connectionString' | 'ssl'>): Promise<void> {
   const client = await createClient({

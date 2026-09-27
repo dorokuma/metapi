@@ -5,7 +5,7 @@ import {
   getDashboardSummarySnapshot,
 } from "./dashboardSnapshotService.js";
 import { getSiteStatsSnapshot } from "./siteStatsSnapshotService.js";
-import { runUsageAggregationProjectionPass } from "./usageAggregationService.js";
+import { runUsageAggregationProjectionPass, handleUsageProjectionPassFailure } from "./usageAggregationService.js";
 
 const ADMIN_SNAPSHOT_WARM_INTERVAL_MS = 20_000;
 const ADMIN_SNAPSHOT_PRUNE_EVERY_PASSES = 6;
@@ -78,9 +78,9 @@ export async function warmAdminSnapshotsOnce(): Promise<void> {
 
 export function startAdminSnapshotWarmScheduler() {
   if (adminSnapshotWarmTimer) return;
-  void warmAdminSnapshotsOnce();
+  void warmAdminSnapshotsOnce().catch(handleUsageProjectionPassFailure);
   adminSnapshotWarmTimer = setInterval(() => {
-    void warmAdminSnapshotsOnce();
+    void warmAdminSnapshotsOnce().catch(handleUsageProjectionPassFailure);
   }, ADMIN_SNAPSHOT_WARM_INTERVAL_MS);
 }
 

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
+import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -236,5 +237,272 @@ describe("usageAggregationService", () => {
     expect(checkpoint?.leaseToken).toBeNull();
     expect(checkpoint?.leaseExpiresAt).toBeNull();
     expect(checkpoint?.lastError).toBeNull();
+  });
+
+  it("keeps the smaller recomputeFromId when requesting a recompute with a larger id then a smaller id", async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: "recompute-keep-smaller-site",
+        url: "https://recompute-keep-smaller.example.com",
+        platform: "new-api",
+        status: "active",
+      })
+      .returning()
+      .get();
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: "recompute-keep-smaller-user",
+        accessToken: "recompute-keep-smaller-token",
+        status: "active",
+      })
+      .returning()
+      .get();
+
+    await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      status: "success",
+      modelRequested: "gpt-5",
+      modelActual: "gpt-5",
+      totalTokens: 10,
+      estimatedCost: 0.02,
+      latencyMs: 50,
+      createdAt: formatUtcSqlDateTime(new Date("2026-04-08T04:00:00.000Z")),
+    }).run();
+
+    // Pre-seed checkpoint row so P4 single-UPDATE can match it.
+    await db.insert(schema.analyticsProjectionCheckpoints).values({
+      projectorKey: "usage-aggregates-v1",
+      timeZone: "UTC",
+      lastProxyLogId: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    await requestUsageAggregatesRecompute(10);
+    await requestUsageAggregatesRecompute(5);
+
+    const checkpoint = await db
+      .select()
+      .from(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, "usage-aggregates-v1"))
+      .get();
+    expect(checkpoint?.recomputeFromId).toBe(5);
+  });
+
+  it("preserves earlier day aggregates when recomputing from a later day log id", async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: "partial-recompute-site",
+        url: "https://partial-recompute.example.com",
+        platform: "new-api",
+        status: "active",
+      })
+      .returning()
+      .get();
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: "partial-recompute-user",
+        accessToken: "partial-recompute-token",
+        status: "active",
+      })
+      .returning()
+      .get();
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: account.id,
+        status: "success",
+        modelRequested: "gpt-5",
+        modelActual: "gpt-5",
+        totalTokens: 100,
+        estimatedCost: 0.2,
+        latencyMs: 120,
+        createdAt: formatUtcSqlDateTime(new Date("2026-04-08T02:10:00.000Z")),
+      },
+      {
+        accountId: account.id,
+        status: "failed",
+        modelRequested: "gpt-5-mini",
+        modelActual: "gpt-5-mini",
+        totalTokens: 50,
+        estimatedCost: 0.1,
+        latencyMs: 80,
+        createdAt: formatUtcSqlDateTime(new Date("2026-04-09T02:45:00.000Z")),
+      },
+    ]).run();
+
+    const firstPass = await runUsageAggregationProjectionPass();
+    expect(firstPass.processedLogs).toBe(2);
+
+    const dayRowsAfterFirst = await db.select().from(schema.siteDayUsage).all();
+    expect(dayRowsAfterFirst).toHaveLength(2);
+
+    const laterLog = await db
+      .select({ id: schema.proxyLogs.id })
+      .from(schema.proxyLogs)
+      .where(
+        eq(
+          schema.proxyLogs.createdAt,
+          formatUtcSqlDateTime(new Date("2026-04-09T02:45:00.000Z")),
+        ),
+      )
+      .get();
+    expect(laterLog).toBeDefined();
+
+    await requestUsageAggregatesRecompute(laterLog.id);
+
+    const recomputePass = await runUsageAggregationProjectionPass();
+    expect(recomputePass.recomputed).toBe(true);
+
+    const allDayRows = await db.select().from(schema.siteDayUsage).all();
+    expect(allDayRows).toHaveLength(2);
+
+    const earlierDayRow = allDayRows.find((row) => row.successCalls === 1 && row.totalTokens === 100);
+    const laterDayRow = allDayRows.find((row) => row.failedCalls === 1 && row.totalTokens === 50);
+    expect(earlierDayRow).toBeDefined();
+    expect(laterDayRow).toBeDefined();
+
+    const checkpoint = await db
+      .select()
+      .from(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, "usage-aggregates-v1"))
+      .get();
+    expect(checkpoint?.recomputeFromId).toBeNull();
+    expect(checkpoint?.recomputeRequestedAt).toBeNull();
+  });
+
+  it("clears recomputeFromId and recomputeRequestedAt after projection and recompute complete", async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: "recompute-clear-site",
+        url: "https://recompute-clear.example.com",
+        platform: "new-api",
+        status: "active",
+      })
+      .returning()
+      .get();
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: "recompute-clear-user",
+        accessToken: "recompute-clear-token",
+        status: "active",
+      })
+      .returning()
+      .get();
+
+    await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      status: "success",
+      modelRequested: "gpt-5",
+      modelActual: "gpt-5",
+      totalTokens: 10,
+      estimatedCost: 0.02,
+      latencyMs: 50,
+      createdAt: formatUtcSqlDateTime(new Date("2026-04-08T05:00:00.000Z")),
+    }).run();
+
+    // Pre-seed checkpoint row so P4 single-UPDATE can match it.
+    await db.insert(schema.analyticsProjectionCheckpoints).values({
+      projectorKey: "usage-aggregates-v1",
+      timeZone: "UTC",
+      lastProxyLogId: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    await requestUsageAggregatesRecompute(1);
+
+    const recomputePass = await runUsageAggregationProjectionPass();
+    expect(recomputePass.recomputed).toBe(true);
+
+    const checkpoint = await db
+      .select()
+      .from(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, "usage-aggregates-v1"))
+      .get();
+    expect(checkpoint?.recomputeFromId).toBeNull();
+    expect(checkpoint?.recomputeRequestedAt).toBeNull();
+  });
+
+  it("P4 no-op: requestUsageAggregatesRecompute does not create checkpoint row when missing", async () => {
+    // No checkpoint row pre-seeded — P4 is a single UPDATE, row missing → 0 rows → no-op.
+    await requestUsageAggregatesRecompute(5);
+
+    const checkpoint = await db
+      .select()
+      .from(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, "usage-aggregates-v1"))
+      .get();
+    expect(checkpoint).toBeUndefined();
+  });
+
+  it("release lastError is written when pass fails with unexpected error (trigger-injected fault)", async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: "last-error-site",
+        url: "https://last-error.example.com",
+        platform: "new-api",
+        status: "active",
+      })
+      .returning()
+      .get();
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: "last-error-user",
+        accessToken: "last-error-token",
+        status: "active",
+      })
+      .returning()
+      .get();
+
+    await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      status: "success",
+      modelRequested: "gpt-5",
+      modelActual: "gpt-5",
+      totalTokens: 10,
+      estimatedCost: 0.02,
+      latencyMs: 50,
+      createdAt: formatUtcSqlDateTime(new Date("2026-04-08T06:00:00.000Z")),
+    }).run();
+
+    // Open a raw SQLite connection to inject a trigger that fails P1 upserts.
+    const dbModule = await import("../db/index.js");
+    const sqlitePath = (dbModule as any).__dbProxyTestUtils.resolveSqlitePath();
+    const rawDb = new Database(sqlitePath);
+    rawDb.exec(
+      "CREATE TRIGGER _test_fail_insert BEFORE INSERT ON site_day_usage BEGIN SELECT RAISE(ABORT, 'simulated P1 failure'); END",
+    );
+
+    try {
+      // The trigger causes the P1 upsert to fail; the pass should reject.
+      await expect(runUsageAggregationProjectionPass()).rejects.toThrow();
+    } finally {
+      rawDb.exec("DROP TRIGGER IF EXISTS _test_fail_insert");
+      rawDb.close();
+    }
+
+    // After the pass fails, releaseProjectionLease should have written lastError
+    // (token still matches → changes > 0 → lastError written).
+    const checkpoint = await db
+      .select()
+      .from(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, "usage-aggregates-v1"))
+      .get();
+    expect(checkpoint?.lastError).toBeTruthy();
+    expect(checkpoint?.leaseOwner).toBeNull();
+    expect(checkpoint?.leaseToken).toBeNull();
   });
 });

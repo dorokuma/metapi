@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { buildDelayedResponse } from '../../test-fixtures/delayedResponseTestUtils.js';
 import type { BuiltEndpointRequest } from './endpointFlow.js';
 
 function requestFor(path: string): BuiltEndpointRequest {
@@ -9,32 +10,6 @@ function requestFor(path: string): BuiltEndpointRequest {
     headers: { 'content-type': 'application/json' },
     body: { model: 'gpt-5.2', input: 'hello' },
   };
-}
-
-function buildDelayedResponse(
-  bodyText: string,
-  delayMs: number,
-  status = 200,
-  signal?: AbortSignal,
-): Response {
-  const encoder = new TextEncoder();
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const timer = setTimeout(() => {
-        if (signal?.aborted) return;
-        controller.enqueue(encoder.encode(bodyText));
-        controller.close();
-      }, delayMs);
-
-      signal?.addEventListener('abort', () => {
-        clearTimeout(timer);
-      }, { once: true });
-    },
-  });
-  return new Response(body, {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }
 
 describe('executeEndpointFlow first-byte timeout', () => {
@@ -49,7 +24,7 @@ describe('executeEndpointFlow first-byte timeout', () => {
       request.path === '/v1/responses'
         ? (
           timedOutSignal = signal,
-          buildDelayedResponse(JSON.stringify({ ok: false }), 60, 200, signal)
+          buildDelayedResponse(JSON.stringify({ ok: false }), 60, { signal })
         )
         : new Response(JSON.stringify({ ok: true }), {
           status: 200,
@@ -99,7 +74,7 @@ describe('executeEndpointFlow first-byte timeout', () => {
         attemptedPaths.push(request.path);
         return (
           request.path === '/v1/responses'
-            ? buildDelayedResponse(JSON.stringify({ ok: false }), 60, 200, signal)
+            ? buildDelayedResponse(JSON.stringify({ ok: false }), 60, { signal })
             : new Response(JSON.stringify({ ok: true }), {
               status: 200,
               headers: { 'content-type': 'application/json' },

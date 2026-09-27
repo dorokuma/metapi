@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch } from 'undici';
+import { buildDelayedResponse } from '../../test-fixtures/delayedResponseTestUtils.js';
 import type { BuiltEndpointRequest } from './endpointFlow.js';
 import { config } from '../../config.js';
 import { shouldAbortSameSiteEndpointFallback, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
@@ -448,26 +449,6 @@ describe('executeEndpointFlow upstream param compat self-heal', () => {
     })) as Awaited<ReturnType<typeof fetch>>;
   }
 
-  function buildDelayedResponse(bodyText: string, delayMs: number, signal?: AbortSignal): Response {
-    const encoder = new TextEncoder();
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const timer = setTimeout(() => {
-          if (signal?.aborted) return;
-          controller.enqueue(encoder.encode(bodyText));
-          controller.close();
-        }, delayMs);
-        signal?.addEventListener('abort', () => {
-          clearTimeout(timer);
-        }, { once: true });
-      },
-    });
-    return new Response(body, {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  }
-
   function healableRequest(path: string): BuiltEndpointRequest {
     return {
       endpoint: 'responses',
@@ -584,7 +565,7 @@ describe('executeEndpointFlow upstream param compat self-heal', () => {
     ) => {
       dispatches.push({ path: request.path, headers: request.headers, body: request.body, signal });
       if (dispatches.length === 1) return textResponse(NIM_400, 400);
-      return toUndiciResponse(buildDelayedResponse('{"ok":false}', 60, signal));
+      return toUndiciResponse(buildDelayedResponse('{"ok":false}', 60, { signal }));
     });
 
     const result = await runFlow({

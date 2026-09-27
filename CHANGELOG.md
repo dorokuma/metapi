@@ -10,6 +10,12 @@
 - 通知设置页：全局模板标签由「全局（兜底）」精简为「全局」。
 - 通知设置页：全局模板上下文不再显示「已定制」圆点——该层本无覆盖语义，「已定制」字样会误导；代价是全局层不再逐渠道标注是否已配置，需点开渠道查看。
 
+## [1.4.1] - 2026-09-27
+
+### 修复
+
+- 修复 pi（OpenAI 流）thinking 签名回传：`reasoning_details` 闭环，消除 thinking 模式 `The content[].thinking ... must be passed back` 类 400。上游 Anthropic 流的 `signature_delta` 缓冲后随 thinking 文本以一条流式 `reasoning_details` chunk 下发（先于 `finish_reason`/`[DONE]`），pi 存储并回传，入站还原为 `thinking.signature`；涉及 transformers：`chatFormatsCore` / `openai/chat/proxyStream` / `anthropic/messages/conversion`。
+
 ## [1.4.0] - 2026-09-24
 
 ### 新增

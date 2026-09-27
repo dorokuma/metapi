@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-09-27
+
+### 修复
+
+- new-api 站点 token 级模型发现合并用户级模型列表：token 实际可调用但 `/v1/models` 不暴露的模型（经 `/api/user/models` 用户级列表发现）现会写入 token 可用模型并参与路由，修复此类模型无法被路由选择的问题。
+
+### 变更
+
+- 依赖升级：`better-sqlite3` 13、`electron-builder` 26.15。
+- Node 最低版本要求调整为 22.15（engines >=22.15.0，CI NODE_VERSION 为 22.15）。
+
 ## [1.4.4] - 2026-09-27
 
 ### 修复

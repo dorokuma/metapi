@@ -397,6 +397,11 @@ describe('selectSurfaceChannelForAttempt', () => {
       promptTokens: 10,
       completionTokens: 5,
       totalTokens: 15,
+      cacheReadTokens: null,
+      cacheCreationTokens: null,
+      reasoningTokens: null,
+      promptTokensIncludeCache: null,
+      usageSource: 'self-log',
       estimatedCost: 0.42,
       billingDetails: { source: 'test' },
       clientFamily: 'codex',
@@ -943,9 +948,21 @@ describe('selectSurfaceChannelForAttempt', () => {
       requestedModel: 'gpt-5.2',
       modelName: 'upstream-model',
       parsedUsage: {
-        promptTokens: 10,
-        completionTokens: 5,
-        totalTokens: 15,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        promptTokensIncludeCache: null,
+        presence: {
+          promptTokens: false,
+          completionTokens: false,
+          totalTokens: false,
+          cacheReadTokens: false,
+          cacheCreationTokens: false,
+          reasoningTokens: false,
+        },
       },
       requestStartedAtMs: 1000,
       latencyMs: 250,
@@ -964,30 +981,36 @@ describe('selectSurfaceChannelForAttempt', () => {
       requestStartedAtMs: 1000,
       requestEndedAtMs: 1250,
       localLatencyMs: 250,
-      upstreamUsagePresent: true,
+      upstreamUsagePresent: false,
       usage: {
-        promptTokens: 10,
-        completionTokens: 5,
-        totalTokens: 15,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
       },
     });
     expect(resolveProxyLogBillingMock).toHaveBeenCalledWith({
       site: { id: 44, url: 'https://upstream.example.com', name: 'Codex OAuth' },
       account: { id: 33, username: 'oauth-user' },
       modelName: 'upstream-model',
-      parsedUsage: {
-        promptTokens: 10,
-        completionTokens: 5,
-        totalTokens: 15,
-      },
       resolvedUsage: {
         promptTokens: 20,
         completionTokens: 8,
         totalTokens: 28,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        promptTokensIncludeCache: null,
         recoveredFromSelfLog: true,
         estimatedCostFromQuota: 0.42,
         selfLogBillingMeta: null,
-        usageSource: 'self-log',
+      },
+      resolvedUsageColumns: {
+        promptTokens: 20,
+        completionTokens: 8,
+        totalTokens: 28,
+        cacheReadTokens: null,
+        cacheCreationTokens: null,
+        promptTokensIncludeCache: null,
+        reasoningTokens: null,
       },
     });
     expect(recordSuccessMock).toHaveBeenCalledWith(11, 250, 0.42, 'upstream-model');
@@ -1012,20 +1035,46 @@ describe('selectSurfaceChannelForAttempt', () => {
       promptTokens: 20,
       completionTokens: 8,
       totalTokens: 28,
+      cacheReadTokens: null,
+      cacheCreationTokens: null,
+      reasoningTokens: null,
+      promptTokensIncludeCache: null,
       usageSource: 'self-log',
       estimatedCost: 0.42,
       billingDetails: { source: 'pricing-test' },
       upstreamPath: '/v1/responses',
+      siteId: 44,
     });
     expect(result).toEqual({
       resolvedUsage: {
+        columns: {
+          promptTokens: 20,
+          completionTokens: 8,
+          totalTokens: 28,
+          cacheReadTokens: null,
+          cacheCreationTokens: null,
+          reasoningTokens: null,
+          promptTokensIncludeCache: null,
+        },
+        billing: {
+          promptTokens: 20,
+          completionTokens: 8,
+          totalTokens: 28,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          promptTokensIncludeCache: null,
+        },
+        usageSource: 'self-log',
         promptTokens: 20,
         completionTokens: 8,
         totalTokens: 28,
+        cacheReadTokens: null,
+        cacheCreationTokens: null,
+        reasoningTokens: null,
+        promptTokensIncludeCache: null,
         recoveredFromSelfLog: true,
         estimatedCostFromQuota: 0.42,
         selfLogBillingMeta: null,
-        usageSource: 'self-log',
       },
       estimatedCost: 0.42,
       billingDetails: { source: 'pricing-test' },
@@ -1065,6 +1114,9 @@ describe('selectSurfaceChannelForAttempt', () => {
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        promptTokensIncludeCache: null,
       },
       requestStartedAtMs: 1000,
       latencyMs: 250,
@@ -1082,6 +1134,78 @@ describe('selectSurfaceChannelForAttempt', () => {
       totalTokens: null,
       usageSource: 'unknown',
     }));
+  });
+
+  it('treats explicit all-zero upstream (presence=true) as present: no self-log lookup, upstream label, no quota cost', async () => {
+    // 服务侧契约：upstreamUsagePresent=true 时不应查 self-log，
+    // 这里用「若真回查则会拿到 quota 覆盖」的返回值做陷阱。
+    resolveProxyUsageWithSelfLogFallbackMock.mockResolvedValue({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      recoveredFromSelfLog: false,
+      estimatedCostFromQuota: 0,
+      selfLogBillingMeta: null,
+      usageSource: 'upstream',
+    });
+    resolveProxyLogBillingMock.mockResolvedValue({
+      estimatedCost: 0,
+      billingDetails: null,
+    });
+    const logSuccess = vi.fn().mockResolvedValue({ written: true, proxyLogId: 77 });
+
+    const { recordSurfaceSuccess } = await import('./sharedSurface.js');
+    const result = await recordSurfaceSuccess({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { id: 44, url: 'https://upstream.example.com', platform: 'new-api', name: 'Upstream' },
+        tokenValue: 'live-token',
+        tokenName: 'default',
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      parsedUsage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        promptTokensIncludeCache: null,
+        presence: {
+          promptTokens: true,
+          completionTokens: true,
+          totalTokens: true,
+          cacheReadTokens: true,
+          cacheCreationTokens: true,
+          reasoningTokens: false,
+        },
+      },
+      requestStartedAtMs: 1000,
+      latencyMs: 250,
+      retryCount: 0,
+      upstreamPath: '/v1/chat/completions',
+      logSuccess,
+    });
+
+    // 显式全 0 是「上游在场」，不得被当成「上游缺失」触发 self-log 回查。
+    expect(resolveProxyUsageWithSelfLogFallbackMock).toHaveBeenCalledWith(expect.objectContaining({
+      upstreamUsagePresent: true,
+    }));
+    // 标签保持 'upstream'（不是 'unknown'），token 列写显式 0（不是 null）。
+    expect(logSuccess).toHaveBeenCalledWith(expect.objectContaining({
+      usageSource: 'upstream',
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    }));
+    // estimatedCost 不被 quota 覆盖（计费输入为 0，非 self-log 恢复值）。
+    expect(result.estimatedCost).toBe(0);
+    expect(result.resolvedUsage.recoveredFromSelfLog).toBe(false);
+    expect(result.resolvedUsage.estimatedCostFromQuota).toBe(0);
+    expect(result.resolvedUsage.usageSource).toBe('upstream');
   });
 
   it('captures codex quota headers from successful upstream responses as best-effort bookkeeping', async () => {
@@ -1117,6 +1241,9 @@ describe('selectSurfaceChannelForAttempt', () => {
         promptTokens: 10,
         completionTokens: 5,
         totalTokens: 15,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        promptTokensIncludeCache: null,
       },
       requestStartedAtMs: 1000,
       latencyMs: 250,
@@ -1158,6 +1285,9 @@ describe('selectSurfaceChannelForAttempt', () => {
         promptTokens: 10,
         completionTokens: 5,
         totalTokens: 15,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        promptTokensIncludeCache: null,
       },
       requestStartedAtMs: 1000,
       latencyMs: 250,
@@ -1185,13 +1315,34 @@ describe('selectSurfaceChannelForAttempt', () => {
     }));
     expect(result).toEqual({
       resolvedUsage: {
+        columns: {
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          cacheReadTokens: null,
+          cacheCreationTokens: null,
+          reasoningTokens: null,
+          promptTokensIncludeCache: null,
+        },
+        billing: {
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          promptTokensIncludeCache: null,
+        },
+        usageSource: 'upstream',
         promptTokens: 10,
         completionTokens: 5,
         totalTokens: 15,
+        cacheReadTokens: null,
+        cacheCreationTokens: null,
+        reasoningTokens: null,
+        promptTokensIncludeCache: null,
         recoveredFromSelfLog: false,
         estimatedCostFromQuota: 0,
         selfLogBillingMeta: null,
-        usageSource: 'upstream',
       },
       estimatedCost: 0,
       billingDetails: null,

@@ -7,6 +7,7 @@ import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
+import { resolveFinalUsage } from '../../services/proxyUsageNormalize.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
@@ -79,6 +80,8 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       const upstreamModel = selected.actualModel || requestedModel;
       const forwardBody = { ...body, model: upstreamModel };
       const startTime = Date.now();
+      let estimatedCost = 0;
+      let billingDetails: unknown = null;
       try {
         const { upstream, firstByteLatencyMs } = await runWithSiteApiEndpointPool(selected.site, async (target) => {
           const attemptStartedAtMs = Date.now();
@@ -114,6 +117,8 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         });
 
         if (isStream) {
+          let streamEstimatedCost = 0;
+          let streamBillingDetails: unknown = null;
           reply.raw.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -133,7 +138,16 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             totalTokens: 0,
             cacheReadTokens: 0,
             cacheCreationTokens: 0,
+            reasoningTokens: 0,
             promptTokensIncludeCache: null,
+            presence: {
+              promptTokens: false,
+              completionTokens: false,
+              totalTokens: false,
+              cacheReadTokens: false,
+              cacheCreationTokens: false,
+              reasoningTokens: false,
+            },
           };
           let sseBuffer = '';
           try {
@@ -166,7 +180,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           }
 
           const latency = Date.now() - startTime;
-          const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+          const streamResolvedSelfLog = await resolveProxyUsageWithSelfLogFallback({
             site: selected.site,
             account: selected.account,
             tokenValue: selected.tokenValue,
@@ -175,23 +189,63 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             requestStartedAtMs: startTime,
             requestEndedAtMs: startTime + latency,
             localLatencyMs: latency,
+            upstreamUsagePresent: (
+              parsedUsage.totalTokens > 0
+              || parsedUsage.promptTokens > 0
+              || parsedUsage.completionTokens > 0
+              || (parsedUsage as any).cacheReadTokens > 0
+              || (parsedUsage as any).cacheCreationTokens > 0
+              || (parsedUsage as any).reasoningTokens > 0
+            ),
             usage: {
               promptTokens: parsedUsage.promptTokens,
               completionTokens: parsedUsage.completionTokens,
               totalTokens: parsedUsage.totalTokens,
             },
           });
-          const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
+          const streamFinalUsage = resolveFinalUsage({
+            upstream: {
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              totalTokens: parsedUsage.totalTokens,
+              cacheReadTokens: (parsedUsage as any).cacheReadTokens,
+              cacheCreationTokens: (parsedUsage as any).cacheCreationTokens,
+              reasoningTokens: (parsedUsage as any).reasoningTokens,
+              promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+              presence: (parsedUsage as any).presence,
+            },
+            selfLog: streamResolvedSelfLog?.recoveredFromSelfLog ? {
+              promptTokens: streamResolvedSelfLog.promptTokens,
+              completionTokens: streamResolvedSelfLog.completionTokens,
+              totalTokens: streamResolvedSelfLog.totalTokens,
+              cacheReadTokens: streamResolvedSelfLog.selfLogBillingMeta?.cacheReadTokens ?? 0,
+              cacheCreationTokens: streamResolvedSelfLog.selfLogBillingMeta?.cacheCreationTokens ?? 0,
+              promptTokensIncludeCache: streamResolvedSelfLog.selfLogBillingMeta?.promptTokensIncludeCache ?? null,
+            } : null,
+          });
+          const resolvedBilling = await resolveProxyLogBilling({
             site: selected.site,
             account: selected.account,
             modelName: selected.actualModel || requestedModel,
-            parsedUsage,
-            resolvedUsage,
+            resolvedUsage: {
+              promptTokens: streamFinalUsage.columns.promptTokens ?? 0,
+              completionTokens: streamFinalUsage.columns.completionTokens ?? 0,
+              totalTokens: streamFinalUsage.columns.totalTokens ?? 0,
+              cacheReadTokens: streamFinalUsage.columns.cacheReadTokens ?? 0,
+              cacheCreationTokens: streamFinalUsage.columns.cacheCreationTokens ?? 0,
+              promptTokensIncludeCache: streamFinalUsage.columns.promptTokensIncludeCache,
+              selfLogBillingMeta: streamResolvedSelfLog.selfLogBillingMeta,
+              recoveredFromSelfLog: streamResolvedSelfLog.recoveredFromSelfLog,
+              estimatedCostFromQuota: streamResolvedSelfLog.estimatedCostFromQuota,
+            },
+            resolvedUsageColumns: streamFinalUsage.columns,
           });
+          streamEstimatedCost = resolvedBilling.estimatedCost;
+          streamBillingDetails = resolvedBilling.billingDetails;
           await recordTokenRouterEventBestEffort('record channel success', () => (
-            tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+            tokenRouter.recordSuccess(selected.channel.id, latency, streamEstimatedCost, upstreamModel)
           ));
-          recordDownstreamCostUsage(request, estimatedCost);
+          recordDownstreamCostUsage(request, streamEstimatedCost);
           logProxy(
             selected,
             requestedModel,
@@ -201,14 +255,19 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             null,
             retryCount,
             downstreamApiKeyId,
-            resolvedUsage.promptTokens,
-            resolvedUsage.completionTokens,
-            resolvedUsage.totalTokens,
-            estimatedCost,
-            billingDetails,
+            streamFinalUsage.columns.promptTokens,
+            streamFinalUsage.columns.completionTokens,
+            streamFinalUsage.columns.totalTokens,
+            streamFinalUsage.columns.cacheReadTokens,
+            streamFinalUsage.columns.cacheCreationTokens,
+            streamFinalUsage.columns.reasoningTokens,
+            streamFinalUsage.columns.promptTokensIncludeCache,
+            streamFinalUsage.usageSource,
+            selected?.site?.id ?? null,
+            streamEstimatedCost,
+            streamBillingDetails,
             clientContext,
             downstreamPath,
-            resolvedUsage.usageSource,
             isStream,
             firstByteLatencyMs,
           );
@@ -241,14 +300,19 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             errText,
             retryCount,
             downstreamApiKeyId,
-            0,
-            0,
-            0,
-            0,
             null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            selected?.site?.id ?? null,
+            estimatedCost,
+            billingDetails,
             clientContext,
             downstreamPath,
-            null,
             isStream,
             firstByteLatencyMs,
           );
@@ -268,7 +332,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           });
         }
 
-        const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+        const resolvedSelfLog = await resolveProxyUsageWithSelfLogFallback({
           site: selected.site,
           account: selected.account,
           tokenValue: selected.tokenValue,
@@ -283,13 +347,45 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             totalTokens: parsedUsage.totalTokens,
           },
         });
-        const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
+        const finalUsage = resolveFinalUsage({
+          upstream: {
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+            cacheReadTokens: (parsedUsage as any).cacheReadTokens,
+            cacheCreationTokens: (parsedUsage as any).cacheCreationTokens,
+            reasoningTokens: (parsedUsage as any).reasoningTokens,
+            promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+            presence: (parsedUsage as any).presence,
+          },
+          selfLog: resolvedSelfLog?.recoveredFromSelfLog ? {
+            promptTokens: resolvedSelfLog.promptTokens,
+            completionTokens: resolvedSelfLog.completionTokens,
+            totalTokens: resolvedSelfLog.totalTokens,
+            cacheReadTokens: resolvedSelfLog.selfLogBillingMeta?.cacheReadTokens ?? 0,
+            cacheCreationTokens: resolvedSelfLog.selfLogBillingMeta?.cacheCreationTokens ?? 0,
+            promptTokensIncludeCache: resolvedSelfLog.selfLogBillingMeta?.promptTokensIncludeCache ?? null,
+          } : null,
+        });
+        const resolvedBilling = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,
           modelName: selected.actualModel || requestedModel,
-          parsedUsage,
-          resolvedUsage,
+          resolvedUsage: {
+            promptTokens: finalUsage.columns.promptTokens ?? 0,
+            completionTokens: finalUsage.columns.completionTokens ?? 0,
+            totalTokens: finalUsage.columns.totalTokens ?? 0,
+            cacheReadTokens: finalUsage.columns.cacheReadTokens ?? 0,
+            cacheCreationTokens: finalUsage.columns.cacheCreationTokens ?? 0,
+            promptTokensIncludeCache: finalUsage.columns.promptTokensIncludeCache,
+            selfLogBillingMeta: resolvedSelfLog.selfLogBillingMeta,
+            recoveredFromSelfLog: resolvedSelfLog.recoveredFromSelfLog,
+            estimatedCostFromQuota: resolvedSelfLog.estimatedCostFromQuota,
+          },
+          resolvedUsageColumns: finalUsage.columns,
         });
+        estimatedCost = resolvedBilling.estimatedCost;
+        billingDetails = resolvedBilling.billingDetails;
 
         await recordTokenRouterEventBestEffort('record channel success', () => (
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
@@ -304,14 +400,19 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           null,
           retryCount,
           downstreamApiKeyId,
-          resolvedUsage.promptTokens,
-          resolvedUsage.completionTokens,
-          resolvedUsage.totalTokens,
+          finalUsage.columns.promptTokens,
+          finalUsage.columns.completionTokens,
+          finalUsage.columns.totalTokens,
+          finalUsage.columns.cacheReadTokens,
+          finalUsage.columns.cacheCreationTokens,
+          finalUsage.columns.reasoningTokens,
+          finalUsage.columns.promptTokensIncludeCache,
+          finalUsage.usageSource,
+          selected?.site?.id ?? null,
           estimatedCost,
           billingDetails,
           clientContext,
           downstreamPath,
-          resolvedUsage.usageSource,
           isStream,
           firstByteLatencyMs,
         );
@@ -334,14 +435,19 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           errorText,
           retryCount,
           downstreamApiKeyId,
-          0,
-          0,
-          0,
-          0,
           null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          selected?.site?.id ?? null,
+          estimatedCost,
+          billingDetails,
           clientContext,
           downstreamPath,
-          null,
           isStream,
           firstByteLatencyMs,
         );
@@ -378,14 +484,19 @@ async function logProxy(
   errorMessage: string | null,
   retryCount: number,
   downstreamApiKeyId: number | null = null,
-  promptTokens = 0,
-  completionTokens = 0,
-  totalTokens = 0,
+  promptTokens: number | null = null,
+  completionTokens: number | null = null,
+  totalTokens: number | null = null,
+  cacheReadTokens: number | null = null,
+  cacheCreationTokens: number | null = null,
+  reasoningTokens: number | null = null,
+  promptTokensIncludeCache: boolean | null = null,
+  usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
+  siteId: number | null = null,
   estimatedCost = 0,
   billingDetails: unknown = null,
   clientContext: DownstreamClientContext | null = null,
   downstreamPath = '/v1/completions',
-  usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   isStream: boolean,
   firstByteLatencyMs: number | null,
 ) {
@@ -416,6 +527,12 @@ async function logProxy(
       promptTokens,
       completionTokens,
       totalTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      reasoningTokens,
+      promptTokensIncludeCache,
+      usageSource,
+      siteId,
       estimatedCost,
       billingDetails,
       clientFamily: clientContext?.clientKind || null,

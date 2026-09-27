@@ -3,6 +3,7 @@ import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../se
 import type { SiteProxyConfigLike } from '../../services/siteProxy.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
+import { hasUpstreamUsageObservation, resolveFinalUsage, type ResolveFinalUsageResult } from '../../services/proxyUsageNormalize.js';
 import type { DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
@@ -93,13 +94,19 @@ type SurfaceUsageSummary = {
 };
 
 type SurfaceResolvedUsageSummary = {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
+  columns: ResolveFinalUsageResult['columns'];
+  billing: ResolveFinalUsageResult['billing'];
+  usageSource: ResolveFinalUsageResult['usageSource'];
   recoveredFromSelfLog: boolean;
   estimatedCostFromQuota: number;
   selfLogBillingMeta: import('../../services/proxyUsageFallbackService.js').SelfLogBillingMeta | null;
-  usageSource: 'upstream' | 'self-log' | 'unknown';
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
+  reasoningTokens: number | null;
+  promptTokensIncludeCache: boolean | null;
 };
 
 export async function selectSurfaceChannelForAttempt(input: {
@@ -255,10 +262,14 @@ export async function writeSurfaceProxyLog(input: {
   promptTokens?: number | null;
   completionTokens?: number | null;
   totalTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheCreationTokens?: number | null;
+  reasoningTokens?: number | null;
+  promptTokensIncludeCache?: boolean | null;
+  usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
   estimatedCost?: number;
   billingDetails?: unknown;
   upstreamPath?: string | null;
-  usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
 }): Promise<ProxyLogWriteResult> {
@@ -290,6 +301,11 @@ export async function writeSurfaceProxyLog(input: {
       promptTokens: input.promptTokens ?? null,
       completionTokens: input.completionTokens ?? null,
       totalTokens: input.totalTokens ?? null,
+      cacheReadTokens: input.cacheReadTokens ?? null,
+      cacheCreationTokens: input.cacheCreationTokens ?? null,
+      reasoningTokens: input.reasoningTokens ?? null,
+      promptTokensIncludeCache: input.promptTokensIncludeCache ?? null,
+      usageSource: input.usageSource ?? null,
       estimatedCost: input.estimatedCost ?? 0,
       billingDetails: input.billingDetails ?? null,
       clientFamily: input.clientContext?.clientKind || null,
@@ -413,7 +429,12 @@ export async function recordSurfaceSuccess(input: {
     promptTokens?: number | null;
     completionTokens?: number | null;
     totalTokens?: number | null;
-    usageSource?: 'upstream' | 'self-log' | 'unknown';
+    cacheReadTokens?: number | null;
+    cacheCreationTokens?: number | null;
+    reasoningTokens?: number | null;
+    promptTokensIncludeCache?: boolean | null;
+    usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
+    siteId?: number | null;
     estimatedCost?: number;
     billingDetails?: unknown;
     upstreamPath?: string | null;
@@ -428,25 +449,44 @@ export async function recordSurfaceSuccess(input: {
   billingDetails: unknown;
   proxyLogWrite: ProxyLogWriteResult;
 }> {
-  const hasUpstreamUsage = input.upstreamUsagePresent ?? (
-    input.parsedUsage.totalTokens > 0
-    || input.parsedUsage.promptTokens > 0
-    || input.parsedUsage.completionTokens > 0
-  );
+  // 上游在场判据：presence 化（与 chat/proxy 路径及 resolveFinalUsage 四分支裁决同口径）。
+  // 显式全 0（presence=true）视为上游在场，不得按「上游缺失」进 self-log 回查；
+  // 无 presence 的旧调用面按「值 > 0 视为观测到」推断。
+  const parsedUpstreamHasObservation = hasUpstreamUsageObservation(input.parsedUsage);
+  const hasUpstreamUsage = input.upstreamUsagePresent ?? parsedUpstreamHasObservation;
+  let resolvedSelfLog: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> | null = null;
+  const initialResolve = resolveFinalUsage({
+    upstream: {
+      promptTokens: input.parsedUsage.promptTokens,
+      completionTokens: input.parsedUsage.completionTokens,
+      totalTokens: input.parsedUsage.totalTokens,
+      cacheReadTokens: (input.parsedUsage as any).cacheReadTokens ?? 0,
+      cacheCreationTokens: (input.parsedUsage as any).cacheCreationTokens ?? 0,
+      reasoningTokens: (input.parsedUsage as any).reasoningTokens ?? 0,
+      promptTokensIncludeCache: input.parsedUsage.promptTokensIncludeCache,
+      presence: (input.parsedUsage as any).presence,
+    },
+    selfLog: null,
+  });
   let resolvedUsage: SurfaceResolvedUsageSummary = {
-    promptTokens: input.parsedUsage.promptTokens,
-    completionTokens: input.parsedUsage.completionTokens,
-    totalTokens: input.parsedUsage.totalTokens,
+    columns: initialResolve.columns,
+    billing: initialResolve.billing,
+    usageSource: hasUpstreamUsage ? 'upstream' : 'unknown',
+    promptTokens: initialResolve.columns.promptTokens,
+    completionTokens: initialResolve.columns.completionTokens,
+    totalTokens: initialResolve.columns.totalTokens,
+    cacheReadTokens: initialResolve.columns.cacheReadTokens,
+    cacheCreationTokens: initialResolve.columns.cacheCreationTokens,
+    reasoningTokens: initialResolve.columns.reasoningTokens,
+    promptTokensIncludeCache: initialResolve.columns.promptTokensIncludeCache,
     recoveredFromSelfLog: false,
     estimatedCostFromQuota: 0,
     selfLogBillingMeta: null,
-    usageSource: hasUpstreamUsage ? 'upstream' : 'unknown',
   };
-  let estimatedCost = 0;
-  let billingDetails: unknown = null;
+  let billing: { estimatedCost: number; billingDetails: unknown } = { estimatedCost: 0, billingDetails: null };
 
   try {
-    resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+    resolvedSelfLog = await resolveProxyUsageWithSelfLogFallback({
       site: input.selected.site,
       account: input.selected.account,
       tokenValue: input.selected.tokenValue,
@@ -455,22 +495,67 @@ export async function recordSurfaceSuccess(input: {
       requestStartedAtMs: input.requestStartedAtMs,
       requestEndedAtMs: input.requestStartedAtMs + input.latencyMs,
       localLatencyMs: input.latencyMs,
-      upstreamUsagePresent: hasUpstreamUsage,
+      upstreamUsagePresent: parsedUpstreamHasObservation,
       usage: {
         promptTokens: input.parsedUsage.promptTokens,
         completionTokens: input.parsedUsage.completionTokens,
         totalTokens: input.parsedUsage.totalTokens,
       },
     });
-    const billing = await resolveProxyLogBilling({
+    const selfLogUsage = resolvedSelfLog?.recoveredFromSelfLog ? {
+      promptTokens: resolvedSelfLog.promptTokens,
+      completionTokens: resolvedSelfLog.completionTokens,
+      totalTokens: resolvedSelfLog.totalTokens,
+      cacheReadTokens: resolvedSelfLog.selfLogBillingMeta?.cacheReadTokens ?? null,
+      cacheCreationTokens: resolvedSelfLog.selfLogBillingMeta?.cacheCreationTokens ?? null,
+      reasoningTokens: (resolvedSelfLog as any).reasoningTokens ?? null,
+      promptTokensIncludeCache: resolvedSelfLog.selfLogBillingMeta?.promptTokensIncludeCache ?? null,
+    } : null;
+    const updatedResolve = resolveFinalUsage({
+      upstream: {
+        promptTokens: input.parsedUsage.promptTokens,
+        completionTokens: input.parsedUsage.completionTokens,
+        totalTokens: input.parsedUsage.totalTokens,
+        cacheReadTokens: (input.parsedUsage as any).cacheReadTokens,
+        cacheCreationTokens: (input.parsedUsage as any).cacheCreationTokens,
+        reasoningTokens: (input.parsedUsage as any).reasoningTokens,
+        promptTokensIncludeCache: input.parsedUsage.promptTokensIncludeCache,
+        presence: (input.parsedUsage as any).presence,
+      },
+      selfLog: selfLogUsage,
+    });
+    resolvedUsage = {
+      columns: updatedResolve.columns,
+      billing: updatedResolve.billing,
+      usageSource: updatedResolve.usageSource,
+      promptTokens: updatedResolve.columns.promptTokens,
+      completionTokens: updatedResolve.columns.completionTokens,
+      totalTokens: updatedResolve.columns.totalTokens,
+      cacheReadTokens: updatedResolve.columns.cacheReadTokens,
+      cacheCreationTokens: updatedResolve.columns.cacheCreationTokens,
+      reasoningTokens: updatedResolve.columns.reasoningTokens,
+      promptTokensIncludeCache: updatedResolve.columns.promptTokensIncludeCache,
+      recoveredFromSelfLog: resolvedSelfLog?.recoveredFromSelfLog ?? false,
+      estimatedCostFromQuota: resolvedSelfLog?.estimatedCostFromQuota ?? 0,
+      selfLogBillingMeta: resolvedSelfLog?.selfLogBillingMeta ?? null,
+    };
+    billing = await resolveProxyLogBilling({
       site: input.selected.site,
       account: input.selected.account,
       modelName: input.modelName,
-      parsedUsage: input.parsedUsage,
-      resolvedUsage,
+      resolvedUsage: {
+        promptTokens: resolvedUsage.columns.promptTokens ?? 0,
+        completionTokens: resolvedUsage.columns.completionTokens ?? 0,
+        totalTokens: resolvedUsage.columns.totalTokens ?? 0,
+        cacheReadTokens: resolvedUsage.columns.cacheReadTokens ?? 0,
+        cacheCreationTokens: resolvedUsage.columns.cacheCreationTokens ?? 0,
+        promptTokensIncludeCache: resolvedUsage.columns.promptTokensIncludeCache,
+        selfLogBillingMeta: resolvedUsage.selfLogBillingMeta,
+        recoveredFromSelfLog: resolvedUsage.recoveredFromSelfLog,
+        estimatedCostFromQuota: resolvedUsage.estimatedCostFromQuota,
+      },
+      resolvedUsageColumns: resolvedUsage.columns,
     });
-    estimatedCost = billing.estimatedCost;
-    billingDetails = billing.billingDetails;
   } catch (error) {
     if (!input.bestEffortMetrics) {
       throw error;
@@ -481,26 +566,27 @@ export async function recordSurfaceSuccess(input: {
   tokenRouter.recordSuccess(
     input.selected.channel.id,
     input.latencyMs,
-    estimatedCost,
+    billing.estimatedCost,
     input.modelName,
   );
-  input.recordDownstreamCost?.(estimatedCost);
+  input.recordDownstreamCost?.(billing.estimatedCost);
   const logTokens = resolvedUsage.usageSource === 'unknown'
     ? {
       promptTokens: null,
       completionTokens: null,
       totalTokens: null,
+      cacheReadTokens: null,
+      cacheCreationTokens: null,
+      reasoningTokens: null,
     }
     : {
-      promptTokens: resolvedUsage.promptTokens,
-      completionTokens: resolvedUsage.completionTokens,
-      totalTokens: resolvedUsage.totalTokens,
+      promptTokens: resolvedUsage.columns.promptTokens,
+      completionTokens: resolvedUsage.columns.completionTokens,
+      totalTokens: resolvedUsage.columns.totalTokens,
+      cacheReadTokens: resolvedUsage.columns.cacheReadTokens,
+      cacheCreationTokens: resolvedUsage.columns.cacheCreationTokens,
+      reasoningTokens: resolvedUsage.columns.reasoningTokens,
     };
-  // The success write result is part of the accounting contract: callers use
-  // `proxyLogWrite` to decide whether an upstream observation may be persisted.
-  // Do NOT wrap this await in a try/catch: a rejected `logSuccess` must keep
-  // propagating to the outer request handler (that is an exception, not the
-  // three-state contract).
   const rawProxyLogWrite = await input.logSuccess({
     selected: input.selected,
     modelRequested: input.requestedModel,
@@ -514,9 +600,14 @@ export async function recordSurfaceSuccess(input: {
     promptTokens: logTokens.promptTokens,
     completionTokens: logTokens.completionTokens,
     totalTokens: logTokens.totalTokens,
+    cacheReadTokens: logTokens.cacheReadTokens,
+    cacheCreationTokens: logTokens.cacheCreationTokens,
+    reasoningTokens: logTokens.reasoningTokens,
+    promptTokensIncludeCache: resolvedUsage.columns.promptTokensIncludeCache,
     usageSource: resolvedUsage.usageSource,
-    estimatedCost,
-    billingDetails,
+    siteId: input.selected.site.id ?? null,
+    estimatedCost: billing.estimatedCost,
+    billingDetails: billing.billingDetails,
     upstreamPath: input.upstreamPath,
   });
   // Fail closed on malformed resolved shapes (e.g. an outdated test stub that
@@ -540,8 +631,8 @@ export async function recordSurfaceSuccess(input: {
 
   return {
     resolvedUsage,
-    estimatedCost,
-    billingDetails,
+    estimatedCost: billing.estimatedCost,
+    billingDetails: billing.billingDetails,
     proxyLogWrite,
   };
 }
@@ -558,15 +649,19 @@ export function createSurfaceFailureToolkit(input: {
     modelRequested: string;
     status: string;
     httpStatus: number;
-    isStream?: boolean | null;
-    firstByteLatencyMs?: number | null;
+    isStream?: boolean | null | undefined;
+    firstByteLatencyMs?: number | null | undefined;
     latencyMs: number;
     errorMessage: string | null;
     retryCount: number;
     promptTokens?: number | null;
     completionTokens?: number | null;
     totalTokens?: number | null;
-    usageSource?: 'upstream' | 'self-log' | 'unknown';
+    cacheReadTokens?: number | null;
+    cacheCreationTokens?: number | null;
+    reasoningTokens?: number | null;
+    promptTokensIncludeCache?: boolean | null;
+    usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
     estimatedCost?: number;
     billingDetails?: unknown;
     upstreamPath?: string | null;
@@ -586,6 +681,10 @@ export function createSurfaceFailureToolkit(input: {
       promptTokens: args.promptTokens,
       completionTokens: args.completionTokens,
       totalTokens: args.totalTokens,
+      cacheReadTokens: args.cacheReadTokens,
+      cacheCreationTokens: args.cacheCreationTokens,
+      reasoningTokens: args.reasoningTokens,
+      promptTokensIncludeCache: args.promptTokensIncludeCache,
       usageSource: args.usageSource,
       estimatedCost: args.estimatedCost,
       billingDetails: args.billingDetails,

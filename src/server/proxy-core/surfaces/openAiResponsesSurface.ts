@@ -958,7 +958,16 @@ export async function handleOpenAiResponsesSurfaceRequest(
             totalTokens: 0,
             cacheReadTokens: 0,
             cacheCreationTokens: 0,
+            reasoningTokens: 0,
             promptTokensIncludeCache: null,
+            presence: {
+              promptTokens: false,
+              completionTokens: false,
+              totalTokens: false,
+              cacheReadTokens: false,
+              cacheCreationTokens: false,
+              reasoningTokens: false,
+            },
           };
           let upstreamUsagePresent = false;
           const writeLines = (lines: string[]) => {

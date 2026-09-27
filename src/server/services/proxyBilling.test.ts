@@ -45,18 +45,13 @@ describe('resolveProxyLogBilling', () => {
         id: 2,
       },
       modelName: 'claude-haiku-4-5-20251001',
-      parsedUsage: {
-        promptTokens: 146638,
-        completionTokens: 172,
-        totalTokens: 146810,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        promptTokensIncludeCache: null,
-      },
       resolvedUsage: {
         promptTokens: 146638,
         completionTokens: 172,
         totalTokens: 146810,
+        cacheReadTokens: 145692,
+        cacheCreationTokens: 945,
+        promptTokensIncludeCache: true,
         recoveredFromSelfLog: true,
         estimatedCostFromQuota: 0.083056,
         selfLogBillingMeta: {
@@ -69,6 +64,14 @@ describe('resolveProxyLogBilling', () => {
           cacheCreationTokens: 945,
           promptTokensIncludeCache: true,
         },
+      },
+      resolvedUsageColumns: {
+        promptTokens: 146638,
+        completionTokens: 172,
+        totalTokens: 146810,
+        cacheReadTokens: 145692,
+        cacheCreationTokens: 945,
+        promptTokensIncludeCache: true,
       },
     });
 

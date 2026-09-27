@@ -5,7 +5,8 @@ import { and, eq } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { parseProxyUsage } from '../../services/proxyUsageParser.js';
+import { parseProxyUsage, createEmptyProxyUsage } from '../../services/proxyUsageParser.js';
+import { resolveFinalUsage } from '../../services/proxyUsageNormalize.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
@@ -80,11 +81,7 @@ const GEMINI_CLI_STATIC_MODELS = [
   { name: 'models/gemini-3-flash-preview', displayName: 'Gemini 3 Flash Preview' },
   { name: 'models/gemini-3.1-flash-lite-preview', displayName: 'Gemini 3.1 Flash Lite Preview' },
 ];
-const EMPTY_PROXY_USAGE = {
-  promptTokens: 0,
-  completionTokens: 0,
-  totalTokens: 0,
-};
+const EMPTY_PROXY_USAGE = createEmptyProxyUsage();
 
 function isGeminiCliPlatform(platform: unknown): boolean {
   return String(platform || '').trim().toLowerCase() === 'gemini-cli';
@@ -255,9 +252,14 @@ async function logProxy(
   downstreamPath: string,
   upstreamPath: string | null,
   clientContext: DownstreamClientContext | null = null,
-  promptTokens = 0,
-  completionTokens = 0,
-  totalTokens = 0,
+  promptTokens: number | null = null,
+  completionTokens: number | null = null,
+  totalTokens: number | null = null,
+  cacheReadTokens: number | null = null,
+  cacheCreationTokens: number | null = null,
+  reasoningTokens: number | null = null,
+  promptTokensIncludeCache: boolean | null = null,
+  usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   isStream = false,
   firstByteLatencyMs: number | null = null,
 ) {
@@ -287,6 +289,11 @@ async function logProxy(
       promptTokens,
       completionTokens,
       totalTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      reasoningTokens,
+      promptTokensIncludeCache,
+      usageSource,
       estimatedCost: 0,
       clientFamily: clientContext?.clientKind || null,
       clientAppId: clientContext?.clientAppId || null,
@@ -793,7 +800,6 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             }
             return response;
           });
-          let firstByteLatencyMs = getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null;
           let contentType = upstream.headers.get('content-type') || 'application/json';
           if (!upstream.ok) {
             lastStatus = upstream.status;
@@ -831,11 +837,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               downstreamPath,
               upstreamPath,
               clientContext,
-              0,
-              0,
-              0,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
               isStreamAction,
-              firstByteLatencyMs,
+              getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
             );
             if (canRetryChannelSelection(retryCount, forcedChannelId)) {
               retryCount += 1;
@@ -874,11 +885,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 downstreamPath,
                 upstreamPath,
                 clientContext,
-                0,
-                0,
-                0,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
                 isStreamAction,
-                firstByteLatencyMs,
+                getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -945,6 +961,18 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               }
               const parsedUsage = parseProxyUsage(aggregateState);
               const latency = Date.now() - startTime;
+              const streamResolvedUsage = resolveFinalUsage({
+                upstream: {
+                  promptTokens: parsedUsage.promptTokens,
+                  completionTokens: parsedUsage.completionTokens,
+                  totalTokens: parsedUsage.totalTokens,
+                  cacheReadTokens: parsedUsage.cacheReadTokens,
+                  cacheCreationTokens: parsedUsage.cacheCreationTokens,
+                  reasoningTokens: parsedUsage.reasoningTokens,
+                  promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+                  presence: parsedUsage.presence,
+                },
+              });
               const responseBody = captureStreamChunks
                 ? rawStreamText
                 : { stream: true, usage: parsedUsage };
@@ -960,11 +988,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 downstreamPath,
                 upstreamPath,
                 clientContext,
-                parsedUsage.promptTokens,
-                parsedUsage.completionTokens,
-                parsedUsage.totalTokens,
+                streamResolvedUsage.columns.promptTokens,
+                streamResolvedUsage.columns.completionTokens,
+                streamResolvedUsage.columns.totalTokens,
+                streamResolvedUsage.columns.cacheReadTokens,
+                streamResolvedUsage.columns.cacheCreationTokens,
+                streamResolvedUsage.columns.reasoningTokens,
+                streamResolvedUsage.columns.promptTokensIncludeCache,
+                streamResolvedUsage.usageSource,
                 isStreamAction,
-                firstByteLatencyMs,
+                getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -996,6 +1029,18 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 ? error.message
                 : 'Gemini upstream stream failed';
               const parsedUsage = parseProxyUsage(aggregateState);
+              const streamResolvedUsage = resolveFinalUsage({
+                upstream: {
+                  promptTokens: parsedUsage.promptTokens,
+                  completionTokens: parsedUsage.completionTokens,
+                  totalTokens: parsedUsage.totalTokens,
+                  cacheReadTokens: parsedUsage.cacheReadTokens,
+                  cacheCreationTokens: parsedUsage.cacheCreationTokens,
+                  reasoningTokens: parsedUsage.reasoningTokens,
+                  promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+                  presence: parsedUsage.presence,
+                },
+              });
               const responseBody = captureStreamChunks
                 ? rawStreamText
                 : { stream: true, usage: parsedUsage, error: errorMessage };
@@ -1014,11 +1059,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 downstreamPath,
                 upstreamPath,
                 clientContext,
-                parsedUsage.promptTokens,
-                parsedUsage.completionTokens,
-                parsedUsage.totalTokens,
+                streamResolvedUsage.columns.promptTokens,
+                streamResolvedUsage.columns.completionTokens,
+                streamResolvedUsage.columns.totalTokens,
+                streamResolvedUsage.columns.cacheReadTokens,
+                streamResolvedUsage.columns.cacheCreationTokens,
+                streamResolvedUsage.columns.reasoningTokens,
+                streamResolvedUsage.columns.promptTokensIncludeCache,
+                streamResolvedUsage.usageSource,
                 isStreamAction,
-                firstByteLatencyMs,
+                getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -1068,6 +1118,18 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               );
             parsedUsage = parseProxyUsage(aggregateState);
             const latency = Date.now() - startTime;
+            const nonStreamResolvedUsage = resolveFinalUsage({
+              upstream: {
+                promptTokens: parsedUsage.promptTokens,
+                completionTokens: parsedUsage.completionTokens,
+                totalTokens: parsedUsage.totalTokens,
+                cacheReadTokens: parsedUsage.cacheReadTokens,
+                cacheCreationTokens: parsedUsage.cacheCreationTokens,
+                reasoningTokens: parsedUsage.reasoningTokens,
+                promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+                presence: parsedUsage.presence,
+              },
+            });
             await recordGeminiChannelSuccessBestEffort(selected.channel.id, latency, actualModel);
             await logProxy(
               selected,
@@ -1080,11 +1142,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               downstreamPath,
               upstreamPath,
               clientContext,
-              parsedUsage.promptTokens,
-              parsedUsage.completionTokens,
-              parsedUsage.totalTokens,
+              nonStreamResolvedUsage.columns.promptTokens,
+              nonStreamResolvedUsage.columns.completionTokens,
+              nonStreamResolvedUsage.columns.totalTokens,
+              nonStreamResolvedUsage.columns.cacheReadTokens,
+              nonStreamResolvedUsage.columns.cacheCreationTokens,
+              nonStreamResolvedUsage.columns.reasoningTokens,
+              nonStreamResolvedUsage.columns.promptTokensIncludeCache,
+              nonStreamResolvedUsage.usageSource,
               isStreamAction,
-              firstByteLatencyMs,
+              getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
             );
             await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
               attemptIndex: retryCount,
@@ -1130,11 +1197,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               downstreamPath,
               upstreamPath,
               clientContext,
-              0,
-              0,
-              0,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
               isStreamAction,
-              firstByteLatencyMs,
+              getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
             );
             await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
               attemptIndex: retryCount,
@@ -1378,9 +1450,14 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             downstreamPath,
             null,
             clientContext,
-            0,
-            0,
-            0,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
             isStreamAction,
             null,
           );
@@ -1394,22 +1471,33 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           return reply.code(lastStatus).type(lastContentType).send(lastText);
         }
 
-        upstreamPath = endpointResult.upstreamPath;
         const upstream = endpointResult.upstream;
-        const firstByteLatencyMs = getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null;
+        upstreamPath = endpointResult.upstreamPath;
         const rawText = await readRuntimeResponseText(upstream);
         let upstreamData: unknown = rawText;
         try {
           upstreamData = JSON.parse(rawText);
         } catch {}
         const parsedUsage = parseProxyUsage(upstreamData);
+        const compatResolvedUsage = resolveFinalUsage({
+          upstream: {
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+            cacheReadTokens: parsedUsage.cacheReadTokens,
+            cacheCreationTokens: parsedUsage.cacheCreationTokens,
+            reasoningTokens: parsedUsage.reasoningTokens,
+            promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+            presence: parsedUsage.presence,
+          },
+        });
         const normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, actualModel, rawText);
         const geminiResponse = geminiGenerateContentTransformer.compatibility.serializeNormalizedFinalToGemini({
           normalized: normalizedFinal,
           usage: {
-            promptTokens: parsedUsage.promptTokens,
-            completionTokens: parsedUsage.completionTokens,
-            totalTokens: parsedUsage.totalTokens,
+            promptTokens: compatResolvedUsage.columns.promptTokens ?? parsedUsage.promptTokens,
+            completionTokens: compatResolvedUsage.columns.completionTokens ?? parsedUsage.completionTokens,
+            totalTokens: compatResolvedUsage.columns.totalTokens ?? parsedUsage.totalTokens,
           },
         });
         const latency = Date.now() - startTime;
@@ -1425,11 +1513,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           downstreamPath,
           upstreamPath,
           clientContext,
-          parsedUsage.promptTokens,
-          parsedUsage.completionTokens,
-          parsedUsage.totalTokens,
+          compatResolvedUsage.columns.promptTokens,
+          compatResolvedUsage.columns.completionTokens,
+          compatResolvedUsage.columns.totalTokens,
+          compatResolvedUsage.columns.cacheReadTokens,
+          compatResolvedUsage.columns.cacheCreationTokens,
+          compatResolvedUsage.columns.reasoningTokens,
+          compatResolvedUsage.columns.promptTokensIncludeCache,
+          compatResolvedUsage.usageSource,
           isStreamAction,
-          firstByteLatencyMs,
+          null,
         );
         const downstreamPayload = isGeminiCliDownstream
           ? { response: geminiResponse }
@@ -1477,9 +1570,14 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           downstreamPath,
           upstreamPath || null,
           clientContext,
-          0,
-          0,
-          0,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
           isStreamAction,
           null,
         );

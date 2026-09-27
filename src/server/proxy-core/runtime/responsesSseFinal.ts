@@ -297,7 +297,16 @@ export function collectResponsesFinalPayloadFromSseText(
     totalTokens: 0,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    reasoningTokens: 0,
     promptTokensIncludeCache: null as boolean | null,
+    presence: {
+      promptTokens: false,
+      completionTokens: false,
+      totalTokens: false,
+      cacheReadTokens: false,
+      cacheCreationTokens: false,
+      reasoningTokens: false,
+    },
   };
   let completedPayload: Record<string, unknown> | null = null;
   let terminalStatus: ResponsesTerminalStatus = 'completed';

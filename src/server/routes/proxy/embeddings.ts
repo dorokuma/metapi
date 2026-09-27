@@ -6,6 +6,7 @@ import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertSe
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
+import { resolveFinalUsage } from '../../services/proxyUsageNormalize.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
@@ -73,6 +74,8 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
       const upstreamModel = selected.actualModel || requestedModel;
       const forwardBody = { ...body, model: upstreamModel };
       const startTime = Date.now();
+      let estimatedCost = 0;
+      let billingDetails: unknown = null;
       try {
         const { upstream, text, firstByteLatencyMs } = await runWithSiteApiEndpointPool(selected.site, async (target) => {
           const attemptStartedAtMs = Date.now();
@@ -140,13 +143,45 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
             totalTokens: parsedUsage.totalTokens,
           },
         });
-        const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
+        const finalUsage = resolveFinalUsage({
+          upstream: {
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+            cacheReadTokens: (parsedUsage as any).cacheReadTokens,
+            cacheCreationTokens: (parsedUsage as any).cacheCreationTokens,
+            reasoningTokens: (parsedUsage as any).reasoningTokens,
+            promptTokensIncludeCache: parsedUsage.promptTokensIncludeCache,
+            presence: (parsedUsage as any).presence,
+          },
+          selfLog: resolvedUsage?.recoveredFromSelfLog ? {
+            promptTokens: resolvedUsage.promptTokens,
+            completionTokens: resolvedUsage.completionTokens,
+            totalTokens: resolvedUsage.totalTokens,
+            cacheReadTokens: resolvedUsage.selfLogBillingMeta?.cacheReadTokens ?? 0,
+            cacheCreationTokens: resolvedUsage.selfLogBillingMeta?.cacheCreationTokens ?? 0,
+            promptTokensIncludeCache: resolvedUsage.selfLogBillingMeta?.promptTokensIncludeCache ?? null,
+          } : null,
+        });
+        const resolvedBilling = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,
           modelName: selected.actualModel || requestedModel,
-          parsedUsage,
-          resolvedUsage,
+          resolvedUsage: {
+            promptTokens: finalUsage.columns.promptTokens ?? 0,
+            completionTokens: finalUsage.columns.completionTokens ?? 0,
+            totalTokens: finalUsage.columns.totalTokens ?? 0,
+            cacheReadTokens: finalUsage.columns.cacheReadTokens ?? 0,
+            cacheCreationTokens: finalUsage.columns.cacheCreationTokens ?? 0,
+            promptTokensIncludeCache: finalUsage.columns.promptTokensIncludeCache,
+            selfLogBillingMeta: resolvedUsage.selfLogBillingMeta,
+            recoveredFromSelfLog: resolvedUsage.recoveredFromSelfLog,
+            estimatedCostFromQuota: resolvedUsage.estimatedCostFromQuota,
+          },
+          resolvedUsageColumns: finalUsage.columns,
         });
+        estimatedCost = resolvedBilling.estimatedCost;
+        billingDetails = resolvedBilling.billingDetails;
 
         await recordTokenRouterEventBestEffort('record channel success', () => (
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
@@ -154,8 +189,16 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected, requestedModel, 'success', upstream.status, latency, null, retryCount, downstreamApiKeyId,
-          resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost, billingDetails, clientContext, downstreamPath,
-          resolvedUsage.usageSource, false, firstByteLatencyMs,
+          finalUsage.columns.promptTokens,
+          finalUsage.columns.completionTokens,
+          finalUsage.columns.totalTokens,
+          finalUsage.columns.cacheReadTokens,
+          finalUsage.columns.cacheCreationTokens,
+          finalUsage.columns.reasoningTokens,
+          finalUsage.columns.promptTokensIncludeCache,
+          finalUsage.usageSource,
+          estimatedCost, billingDetails, clientContext, downstreamPath,
+          false, firstByteLatencyMs,
         );
         return reply.code(upstream.status).send(data);
       } catch (err: any) {
@@ -176,14 +219,18 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
           errorText,
           retryCount,
           downstreamApiKeyId,
-          0,
-          0,
-          0,
-          0,
           null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          estimatedCost,
+          billingDetails,
           clientContext,
           downstreamPath,
-          null,
           false,
           firstByteLatencyMs,
         );
@@ -223,14 +270,18 @@ async function logProxy(
   errorMessage: string | null,
   retryCount: number,
   downstreamApiKeyId: number | null = null,
-  promptTokens = 0,
-  completionTokens = 0,
-  totalTokens = 0,
+  promptTokens: number | null = null,
+  completionTokens: number | null = null,
+  totalTokens: number | null = null,
+  cacheReadTokens: number | null = null,
+  cacheCreationTokens: number | null = null,
+  reasoningTokens: number | null = null,
+  promptTokensIncludeCache: boolean | null = null,
+  usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   estimatedCost = 0,
   billingDetails: unknown = null,
   clientContext: DownstreamClientContext | null = null,
   downstreamPath = '/v1/embeddings',
-  usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   isStream = false,
   firstByteLatencyMs: number | null = null,
 ) {
@@ -261,6 +312,12 @@ async function logProxy(
       promptTokens,
       completionTokens,
       totalTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      reasoningTokens,
+      promptTokensIncludeCache,
+      usageSource,
+      siteId: selected?.site?.id ?? null,
       estimatedCost,
       billingDetails,
       clientFamily: clientContext?.clientKind || null,

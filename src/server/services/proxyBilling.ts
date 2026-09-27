@@ -13,6 +13,9 @@ interface ProxyBillingUsageSummary {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   promptTokensIncludeCache: boolean | null;
+  selfLogBillingMeta: SelfLogBillingMeta | null;
+  recoveredFromSelfLog: boolean;
+  estimatedCostFromQuota: number;
 }
 
 interface ResolvedProxyUsageSummary {
@@ -37,8 +40,15 @@ interface ResolveProxyLogBillingInput {
     apiToken?: string | null;
   };
   modelName: string;
-  parsedUsage: ProxyBillingUsageSummary;
-  resolvedUsage: ResolvedProxyUsageSummary;
+  resolvedUsage: ProxyBillingUsageSummary;
+  resolvedUsageColumns: {
+    promptTokens: number | null;
+    completionTokens: number | null;
+    totalTokens: number | null;
+    cacheReadTokens: number | null;
+    cacheCreationTokens: number | null;
+    promptTokensIncludeCache: boolean | null;
+  };
 }
 
 function toPricingOverride(meta: SelfLogBillingMeta | null): ProxyBillingPricingOverride | null {
@@ -57,18 +67,19 @@ export async function resolveProxyLogBilling(
 ): Promise<{ estimatedCost: number; billingDetails: ProxyBillingDetails | null }> {
   const selfLogMeta = input.resolvedUsage.selfLogBillingMeta;
   const billingPricingOverride = toPricingOverride(selfLogMeta);
-  const cacheReadTokens = selfLogMeta?.cacheReadTokens ?? input.parsedUsage.cacheReadTokens;
-  const cacheCreationTokens = selfLogMeta?.cacheCreationTokens ?? input.parsedUsage.cacheCreationTokens;
-  const promptTokensIncludeCache = selfLogMeta?.promptTokensIncludeCache
-    ?? input.parsedUsage.promptTokensIncludeCache;
+  // 归一后只消费 columns（resolveFinalUsage 已统一处理 flag/cache 语义）。
+  const columns = input.resolvedUsageColumns;
+  const cacheReadTokens = columns.cacheReadTokens ?? 0;
+  const cacheCreationTokens = columns.cacheCreationTokens ?? 0;
+  const promptTokensIncludeCache = columns.promptTokensIncludeCache;
 
   const billingInput = {
     site: input.site,
     account: input.account,
     modelName: input.modelName,
-    promptTokens: input.resolvedUsage.promptTokens,
-    completionTokens: input.resolvedUsage.completionTokens,
-    totalTokens: input.resolvedUsage.totalTokens,
+    promptTokens: columns.promptTokens ?? 0,
+    completionTokens: columns.completionTokens ?? 0,
+    totalTokens: columns.totalTokens ?? 0,
     cacheReadTokens,
     cacheCreationTokens,
     promptTokensIncludeCache,

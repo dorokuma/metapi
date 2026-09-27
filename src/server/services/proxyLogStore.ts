@@ -39,6 +39,14 @@ export type ProxyLogInsertInput = {
   promptTokens?: number | null;
   completionTokens?: number | null;
   totalTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheCreationTokens?: number | null;
+  reasoningTokens?: number | null;
+  promptTokensIncludeCache?: boolean | null;
+  usageSource?: string | null;
+  siteId?: number | null;
+  modelSiteId?: number | null;
+  credentialSiteId?: number | null;
   estimatedCost?: number | null;
   billingDetails?: unknown;
   clientFamily?: string | null;
@@ -65,6 +73,14 @@ function buildProxyLogCoreSelectFields() {
     promptTokens: schema.proxyLogs.promptTokens,
     completionTokens: schema.proxyLogs.completionTokens,
     totalTokens: schema.proxyLogs.totalTokens,
+    cacheReadTokens: schema.proxyLogs.cacheReadTokens,
+    cacheCreationTokens: schema.proxyLogs.cacheCreationTokens,
+    reasoningTokens: schema.proxyLogs.reasoningTokens,
+    promptTokensIncludeCache: schema.proxyLogs.promptTokensIncludeCache,
+    usageSource: schema.proxyLogs.usageSource,
+    siteId: schema.proxyLogs.siteId,
+    modelSiteId: schema.proxyLogs.modelSiteId,
+    credentialSiteId: schema.proxyLogs.credentialSiteId,
     estimatedCost: schema.proxyLogs.estimatedCost,
     errorMessage: schema.proxyLogs.errorMessage,
     retryCount: schema.proxyLogs.retryCount,
@@ -286,6 +302,14 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<number
     promptTokens: input.promptTokens ?? null,
     completionTokens: input.completionTokens ?? null,
     totalTokens: input.totalTokens ?? null,
+    cacheReadTokens: input.cacheReadTokens ?? null,
+    cacheCreationTokens: input.cacheCreationTokens ?? null,
+    reasoningTokens: input.reasoningTokens ?? null,
+    promptTokensIncludeCache: input.promptTokensIncludeCache ?? null,
+    usageSource: input.usageSource ?? null,
+    siteId: input.siteId ?? null,
+    modelSiteId: input.modelSiteId ?? null,
+    credentialSiteId: input.credentialSiteId ?? null,
     estimatedCost: input.estimatedCost ?? 0,
     errorMessage: input.errorMessage ?? null,
     retryCount: input.retryCount ?? 0,

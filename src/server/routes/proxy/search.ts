@@ -14,6 +14,7 @@ import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../proxy-core/downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { resolveFinalUsage } from '../../services/proxyUsageNormalize.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
@@ -230,6 +231,7 @@ async function logProxy(
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
+    const resolvedUsage = resolveFinalUsage({ zeros: true });
     await insertProxyLog({
       routeId: selected.channel.routeId,
       channelId: selected.channel.id,
@@ -242,9 +244,15 @@ async function logProxy(
       isStream,
       firstByteLatencyMs,
       latencyMs,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
+      promptTokens: resolvedUsage.columns.promptTokens ?? 0,
+      completionTokens: resolvedUsage.columns.completionTokens ?? 0,
+      totalTokens: resolvedUsage.columns.totalTokens ?? 0,
+      cacheReadTokens: resolvedUsage.columns.cacheReadTokens ?? 0,
+      cacheCreationTokens: resolvedUsage.columns.cacheCreationTokens ?? 0,
+      reasoningTokens: resolvedUsage.columns.reasoningTokens ?? 0,
+      promptTokensIncludeCache: resolvedUsage.columns.promptTokensIncludeCache,
+      usageSource: resolvedUsage.usageSource,
+      siteId: selected?.site?.id ?? null,
       estimatedCost: 0,
       errorMessage: composeProxyLogMessage({
         clientKind: clientContext?.clientKind && clientContext.clientKind !== 'generic'

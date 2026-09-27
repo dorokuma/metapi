@@ -1,20 +1,57 @@
-interface ParsedProxyUsage {
+export type ProxyUsageFieldKey =
+  | 'promptTokens'
+  | 'completionTokens'
+  | 'totalTokens'
+  | 'cacheReadTokens'
+  | 'cacheCreationTokens'
+  | 'reasoningTokens';
+
+export type ProxyUsagePresence = Record<ProxyUsageFieldKey, boolean>;
+
+export interface ParsedProxyUsage {
+  /**
+   * 原始上游值，未做任何扣减（归一在 `resolveFinalUsage` 一次完成）。
+   * 每个字段单独带 presence：键缺失 → presence=false、值 0；键在且值为 0 → presence=true、值 0。
+   */
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  reasoningTokens: number;
   promptTokensIncludeCache: boolean | null;
+  presence: ProxyUsagePresence;
 }
 
-const ZERO_USAGE: ParsedProxyUsage = {
-  promptTokens: 0,
-  completionTokens: 0,
-  totalTokens: 0,
-  cacheReadTokens: 0,
-  cacheCreationTokens: 0,
-  promptTokensIncludeCache: null,
-};
+export const PROXY_USAGE_FIELD_KEYS: readonly ProxyUsageFieldKey[] = [
+  'promptTokens',
+  'completionTokens',
+  'totalTokens',
+  'cacheReadTokens',
+  'cacheCreationTokens',
+  'reasoningTokens',
+] as const;
+
+/** @internal 供 normalize 模块导入，不构成外部调用面的 ABI 承诺。 */
+export function createEmptyProxyUsage(): ParsedProxyUsage {
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    promptTokensIncludeCache: null,
+    presence: {
+      promptTokens: false,
+      completionTokens: false,
+      totalTokens: false,
+      cacheReadTokens: false,
+      cacheCreationTokens: false,
+      reasoningTokens: false,
+    },
+  };
+}
 
 const USAGE_DIRECT_KEYS = [
   'prompt_tokens',
@@ -70,7 +107,7 @@ const USAGE_DETAIL_KEYS = [
   'cacheCreation',
 ] as const;
 
-function toPositiveInt(value: unknown): number {
+function toNonNegativeInt(value: unknown): number {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.round(n));
@@ -96,6 +133,18 @@ function hasExplicitUsageValue(value: unknown): boolean {
   }
   if (!isRecord(value)) return false;
   return Object.values(value).some((entry) => hasExplicitUsageValue(entry));
+}
+
+function sumNumericFields(record: Record<string, unknown> | undefined): number {
+  if (!record || typeof record !== 'object') return 0;
+  return Object.values(record).reduce<number>((sum, value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) return sum + value;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length > 0 && Number.isFinite(Number(trimmed))) return sum + Number(trimmed);
+    }
+    return sum;
+  }, 0);
 }
 
 function collectUsageCandidates(payload: unknown): Array<Record<string, unknown>> {
@@ -141,17 +190,115 @@ function collectUsageCandidates(payload: unknown): Array<Record<string, unknown>
   return candidates;
 }
 
-function firstPositiveInt(record: Record<string, unknown>, keys: string[]): number {
-  for (const key of keys) {
-    const value = toPositiveInt(record[key]);
-    if (value > 0) return value;
-  }
-  return 0;
+/**
+ * 按 hasOwn 逐键读取：任一别名键存在且值可解析为有限数 → present。
+ * 多个别名同时存在时取最大值（与旧 firstPositiveInt 的「第一个正值」语义近似，且不丢显式 0）。
+ */
+interface UsageFieldValue {
+  present: boolean;
+  value: number;
 }
 
-function sumNumericFields(value: unknown): number {
-  if (!isRecord(value)) return 0;
-  return Object.values(value).reduce<number>((sum, item) => sum + toPositiveInt(item), 0);
+function emptyField(): UsageFieldValue {
+  return { present: false, value: 0 };
+}
+
+function readUsageField(record: Record<string, unknown>, keys: readonly string[]): UsageFieldValue {
+  let present = false;
+  let value = 0;
+  for (const key of keys) {
+    if (!hasOwn(record, key)) continue;
+    const raw = record[key];
+    if (raw === null || raw === undefined) continue;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isFinite(n)) continue;
+    present = true;
+    value = Math.max(value, Math.max(0, Math.round(n)));
+  }
+  return present ? { present: true, value } : emptyField();
+}
+
+function readNestedUsageField(
+  record: Record<string, unknown>,
+  parentKeys: readonly string[],
+  childKeys: readonly string[],
+): UsageFieldValue {
+  let present = false;
+  let value = 0;
+  for (const parentKey of parentKeys) {
+    const parent = record[parentKey];
+    if (!isRecord(parent)) continue;
+    for (const childKey of childKeys) {
+      if (!hasOwn(parent, childKey)) continue;
+      const raw = parent[childKey];
+      if (raw === null || raw === undefined) continue;
+      const n = typeof raw === 'number' ? raw : Number(raw);
+      if (!Number.isFinite(n)) continue;
+      present = true;
+      value = Math.max(value, Math.max(0, Math.round(n)));
+    }
+  }
+  return present ? { present: true, value } : emptyField();
+}
+
+function sumAllNestedNumericFields(
+  record: Record<string, unknown>,
+  parentKeys: readonly string[],
+): UsageFieldValue {
+  let present = false;
+  let value = 0;
+  for (const parentKey of parentKeys) {
+    const parent = record[parentKey];
+    if (!isRecord(parent)) continue;
+    const sum = sumNumericFields(parent);
+    // Mark present if the detail object exists and has ANY keys (even if sum is 0).
+    if (Object.keys(parent).length > 0) {
+      present = true;
+      value = Math.max(value, sum);
+    }
+  }
+  return present ? { present: true, value } : emptyField();
+}
+
+/** Sum selected numeric child fields inside each named detail object (max across parents). */
+function sumSelectedNestedNumericFields(
+  record: Record<string, unknown>,
+  parentKeys: readonly string[],
+  childKeys: readonly string[],
+): UsageFieldValue {
+  let present = false;
+  let value = 0;
+  for (const parentKey of parentKeys) {
+    const parent = record[parentKey];
+    if (!isRecord(parent)) continue;
+    let sum = 0;
+    let anyChildKeyExists = false;
+    for (const childKey of childKeys) {
+      if (hasOwn(parent, childKey)) {
+        anyChildKeyExists = true;
+        const raw = parent[childKey];
+        if (raw === null || raw === undefined) continue;
+        const n = typeof raw === 'number' ? raw : Number(raw);
+        if (!Number.isFinite(n)) continue;
+        sum += Math.max(0, Math.round(n));
+      }
+    }
+    if (anyChildKeyExists) {
+      present = true;
+      value = Math.max(value, sum);
+    }
+  }
+  return present ? { present: true, value } : emptyField();
+}
+
+function maxField(left: UsageFieldValue, right: UsageFieldValue): UsageFieldValue {
+  if (!left.present && !right.present) return emptyField();
+  return { present: true, value: Math.max(left.value, right.value) };
+}
+
+function sumFieldPair(left: UsageFieldValue, right: UsageFieldValue): UsageFieldValue {
+  if (!left.present && !right.present) return emptyField();
+  return { present: true, value: left.value + right.value };
 }
 
 function detectPromptTokensIncludeCache(record: Record<string, unknown>): boolean | null {
@@ -176,64 +323,110 @@ function detectPromptTokensIncludeCache(record: Record<string, unknown>): boolea
     'inputTokensDetails',
     'prompt_cache_hit_tokens',
     'promptCacheHitTokens',
+    'cached_tokens',
+    'cachedTokens',
+    // Gemini：promptTokenCount 含 cachedContentTokenCount。
+    'cachedContentTokenCount',
+    'cachedContentTokens',
+    // 通用 OpenAI 风格的 cache 键：与 cached_tokens 同族，视为 prompt 含缓存；
+    // 若这些键出现而 flag 留 null，归一会把已观测到的 cache 列写回 NULL，属于观测丢失。
+    'cache_read_tokens',
+    'cacheReadTokens',
+    'cache_creation_tokens',
+    'cacheCreationTokens',
   ].some((key) => key in record);
   if (hasDetailCacheFields) return true;
 
   return null;
 }
 
-function getCacheReadTokens(record: Record<string, unknown>): number {
-  const direct = firstPositiveInt(record, [
-    'cache_read_input_tokens',
-    'cacheReadInputTokens',
-    'prompt_cache_hit_tokens',
-    'promptCacheHitTokens',
-    'cached_tokens',
-    'cachedTokens',
-    'cache_read_tokens',
-    'cacheReadTokens',
-  ]);
-  if (direct > 0) return direct;
-
-  return Math.max(
-    toPositiveInt((record.prompt_tokens_details as any)?.cached_tokens),
-    toPositiveInt((record.promptTokensDetails as any)?.cachedTokens),
-    toPositiveInt((record.input_tokens_details as any)?.cached_tokens),
-    toPositiveInt((record.inputTokensDetails as any)?.cachedTokens),
+function getCacheReadTokens(record: Record<string, unknown>): UsageFieldValue {
+  return maxField(
+    readUsageField(record, [
+      'cache_read_input_tokens',
+      'cacheReadInputTokens',
+      'prompt_cache_hit_tokens',
+      'promptCacheHitTokens',
+      'cached_tokens',
+      'cachedTokens',
+      'cache_read_tokens',
+      'cacheReadTokens',
+      // Gemini API / Vertex usageMetadata：promptTokenCount 含 cachedContentTokenCount。
+      'cachedContentTokenCount',
+      'cachedContentTokens',
+    ]),
+    sumSelectedNestedNumericFields(record, [
+      'prompt_tokens_details',
+      'promptTokensDetails',
+      'input_tokens_details',
+      'inputTokensDetails',
+    ], ['cached_tokens', 'cachedTokens', 'cache_read_input_tokens', 'cacheReadInputTokens']),
   );
 }
 
-function getCacheCreationTokens(record: Record<string, unknown>): number {
-  const direct = firstPositiveInt(record, [
+function getCacheCreationTokens(record: Record<string, unknown>): UsageFieldValue {
+  const direct = readUsageField(record, [
     'cache_creation_input_tokens',
     'cacheCreationInputTokens',
     'cache_creation_tokens',
     'cacheCreationTokens',
   ]);
-  if (direct > 0) return direct;
+  const splitCandidates: UsageFieldValue[] = [
+    sumFieldPair(
+      readNestedUsageField(record, ['cache_creation'], ['ephemeral_5m_input_tokens', 'ephemeral5mInputTokens']),
+      readNestedUsageField(record, ['cache_creation'], ['ephemeral_1h_input_tokens', 'ephemeral1hInputTokens']),
+    ),
+    sumFieldPair(
+      readNestedUsageField(record, ['cacheCreation'], ['ephemeral5mInputTokens', 'ephemeral_5m_input_tokens']),
+      readNestedUsageField(record, ['cacheCreation'], ['ephemeral1hInputTokens', 'ephemeral_1h_input_tokens']),
+    ),
+    sumFieldPair(
+      readUsageField(record, ['claude_cache_creation_5_m_tokens', 'claudeCacheCreation5mTokens']),
+      readUsageField(record, ['claude_cache_creation_1_h_tokens', 'claudeCacheCreation1hTokens']),
+    ),
+    sumSelectedNestedNumericFields(record, [
+      'prompt_tokens_details',
+      'promptTokensDetails',
+      'input_tokens_details',
+      'inputTokensDetails',
+    ], ['cache_creation_input_tokens', 'cacheCreationInputTokens', 'cache_creation_tokens', 'cacheCreationTokens']),
+  ];
 
-  const split = Math.max(
-    toPositiveInt((record.cache_creation as any)?.ephemeral_5m_input_tokens)
-      + toPositiveInt((record.cache_creation as any)?.ephemeral_1h_input_tokens),
-    toPositiveInt((record.cacheCreation as any)?.ephemeral5mInputTokens)
-      + toPositiveInt((record.cacheCreation as any)?.ephemeral1hInputTokens),
-    toPositiveInt(record.claude_cache_creation_5_m_tokens)
-      + toPositiveInt(record.claude_cache_creation_1_h_tokens),
-    toPositiveInt(record.claudeCacheCreation5mTokens)
-      + toPositiveInt(record.claudeCacheCreation1hTokens),
-  );
-  if (split > 0) return split;
+  let result = direct;
+  for (const candidate of splitCandidates) {
+    result = maxField(result, candidate);
+  }
+  return result;
+}
 
-  return Math.max(
-    toPositiveInt((record.prompt_tokens_details as any)?.cache_creation_tokens),
-    toPositiveInt((record.promptTokensDetails as any)?.cacheCreationTokens),
-    toPositiveInt((record.input_tokens_details as any)?.cache_creation_tokens),
-    toPositiveInt((record.inputTokensDetails as any)?.cacheCreationTokens),
+function getReasoningTokens(record: Record<string, unknown>): UsageFieldValue {
+  return maxField(
+    readUsageField(record, [
+      'thoughtsTokenCount',
+      'thoughts_token_count',
+    ]),
+    readNestedUsageField(record, [
+      'completion_tokens_details',
+      'completionTokensDetails',
+      'output_tokens_details',
+      'outputTokensDetails',
+    ], [
+      'reasoning_tokens',
+      'reasoningTokens',
+    ]),
   );
 }
 
+/**
+ * 解析单条 usage 形状记录。presence 化后：
+ * - 不再用 details 求和合成缺失的 prompt / completion；
+ * - 不做 total 合成、不用 total 反推 prompt / completion、不做 `Math.max(total, p+c)` 抬高；
+ * - Gemini：completion = candidatesTokenCount + thoughtsTokenCount（有 thoughts 才相加）、
+ *   reasoning = thoughtsTokenCount、cache read 含 cachedContentTokenCount。
+ */
 function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
-  let promptTokens = firstPositiveInt(record, [
+  const usage = createEmptyProxyUsage();
+  let promptTokens = readUsageField(record, [
     'prompt_tokens',
     'promptTokens',
     'prompt_token_count',
@@ -243,7 +436,7 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
     'input_token_count',
     'inputTokenCount',
   ]);
-  let completionTokens = firstPositiveInt(record, [
+  const directCompletionTokens = readUsageField(record, [
     'completion_tokens',
     'completionTokens',
     'completion_token_count',
@@ -255,67 +448,79 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
     'output_token_count',
     'outputTokenCount',
   ]);
-  let totalTokens = firstPositiveInt(record, [
+  const totalTokens = readUsageField(record, [
     'total_tokens',
     'totalTokens',
     'total_token_count',
     'totalTokenCount',
   ]);
+  const candidatesTokens = readUsageField(record, ['candidates_token_count', 'candidatesTokenCount']);
+  const thoughtsTokens = readUsageField(record, ['thoughtsTokenCount', 'thoughts_token_count']);
   const cacheReadTokens = getCacheReadTokens(record);
   const cacheCreationTokens = getCacheCreationTokens(record);
-  const promptTokensIncludeCache = detectPromptTokensIncludeCache(record);
+  const reasoningTokens = getReasoningTokens(record);
 
-  if (promptTokens <= 0) {
-    promptTokens = Math.max(
-      sumNumericFields(record.prompt_tokens_details),
-      sumNumericFields(record.promptTokensDetails),
-      sumNumericFields(record.input_tokens_details),
-      sumNumericFields(record.inputTokensDetails),
-    );
+  let completionTokens = directCompletionTokens;
+  if (thoughtsTokens.present) {
+    if (candidatesTokens.present) {
+      completionTokens = {
+        present: true,
+        value: candidatesTokens.value + thoughtsTokens.value,
+      };
+    } else if (!completionTokens.present) {
+      completionTokens = { present: true, value: thoughtsTokens.value };
+    }
   }
 
-  if (completionTokens <= 0) {
-    completionTokens = Math.max(
-      sumNumericFields(record.completion_tokens_details),
-      sumNumericFields(record.completionTokensDetails),
-      sumNumericFields(record.output_tokens_details),
-      sumNumericFields(record.outputTokensDetails),
-    );
-  }
+  // Gemini 的 thoughts 即 reasoning；本字段族通常不出现嵌套 reasoning 形状。
+  const resolvedReasoningTokens = thoughtsTokens.present ? thoughtsTokens : reasoningTokens;
 
-  if (totalTokens <= 0) {
-    totalTokens = promptTokens + completionTokens;
-  }
+  usage.promptTokens = promptTokens.value;
+  usage.presence.promptTokens = promptTokens.present;
+  usage.completionTokens = completionTokens.value;
+  usage.presence.completionTokens = completionTokens.present;
+  usage.totalTokens = totalTokens.value;
+  usage.presence.totalTokens = totalTokens.present;
+  usage.cacheReadTokens = cacheReadTokens.value;
+  usage.presence.cacheReadTokens = cacheReadTokens.present;
+  usage.cacheCreationTokens = cacheCreationTokens.value;
+  usage.presence.cacheCreationTokens = cacheCreationTokens.present;
+  usage.reasoningTokens = resolvedReasoningTokens.value;
+  usage.presence.reasoningTokens = resolvedReasoningTokens.present;
+  usage.promptTokensIncludeCache = detectPromptTokensIncludeCache(record);
 
-  if (promptTokens <= 0 && totalTokens > completionTokens) {
-    promptTokens = totalTokens - completionTokens;
-  }
-  if (completionTokens <= 0 && totalTokens > promptTokens) {
-    completionTokens = totalTokens - promptTokens;
-  }
+  return usage;
+}
 
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: Math.max(totalTokens, promptTokens + completionTokens),
-    cacheReadTokens,
-    cacheCreationTokens,
-    promptTokensIncludeCache,
-  };
+function scoreProxyUsage(usage: ParsedProxyUsage): number {
+  let score = 0;
+  if (usage.presence.totalTokens && usage.totalTokens > 0) {
+    score += usage.totalTokens * 10_000;
+  }
+  score += (
+    usage.promptTokens
+    + usage.completionTokens
+    + usage.cacheReadTokens
+    + usage.cacheCreationTokens
+    + usage.reasoningTokens
+  );
+  for (const key of PROXY_USAGE_FIELD_KEYS) {
+    if (usage.presence[key]) score += 1;
+  }
+  if (usage.promptTokensIncludeCache !== null) score += 1;
+  return score;
 }
 
 export function parseProxyUsage(payload: unknown): ParsedProxyUsage {
-  if (!payload || typeof payload !== 'object') return { ...ZERO_USAGE };
+  if (!payload || typeof payload !== 'object') return createEmptyProxyUsage();
   const candidates = collectUsageCandidates(payload);
 
-  let best = { ...ZERO_USAGE };
+  let best = createEmptyProxyUsage();
   let bestScore = -1;
 
   for (const candidate of candidates) {
     const parsed = parseUsageRecord(candidate);
-    const score = parsed.totalTokens > 0
-      ? (parsed.totalTokens * 10_000 + parsed.promptTokens + parsed.completionTokens)
-      : (parsed.promptTokens + parsed.completionTokens);
+    const score = scoreProxyUsage(parsed);
     if (score > bestScore) {
       best = parsed;
       bestScore = score;
@@ -334,46 +539,51 @@ export function hasProxyUsagePayload(payload: unknown): boolean {
   ));
 }
 
+export function hasProxyUsageObservation(usage: ParsedProxyUsage): boolean {
+  return PROXY_USAGE_FIELD_KEYS.some((key) => usage.presence[key]);
+}
+
+function sanitizeUsage(usage: ParsedProxyUsage): ParsedProxyUsage {
+  const sanitized = createEmptyProxyUsage();
+  for (const key of PROXY_USAGE_FIELD_KEYS) {
+    const present = usage.presence?.[key] === true;
+    sanitized[key] = present ? toNonNegativeInt(usage[key]) : 0;
+    sanitized.presence[key] = present;
+  }
+  sanitized.promptTokensIncludeCache = usage.promptTokensIncludeCache ?? null;
+  return sanitized;
+}
+
+/**
+ * 逐帧合并（日志通道语义）：逐字段取 max + presence OR。
+ *
+ * 不变量：
+ * - 输入永远是 parse 出来的原始未减值（归一在 `resolveFinalUsage` 一次完成），
+ *   因此这里绝不会出现「已减帧与未减帧取 max」；
+ * - 修复旧实现 `incomingScore > baseScore` 时整体替换 incoming、丢掉 base 已有 cache/flag 字段的问题；
+ * - total presence = 任一侧 OR，不用 0/NULL 混判；本函数不做 total 合成。
+ */
 export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsage): ParsedProxyUsage {
-  const normalizeUsage = (usage: ParsedProxyUsage): ParsedProxyUsage => ({
-    promptTokens: toPositiveInt(usage.promptTokens),
-    completionTokens: toPositiveInt(usage.completionTokens),
-    totalTokens: Math.max(
-      toPositiveInt(usage.totalTokens),
-      toPositiveInt(usage.promptTokens) + toPositiveInt(usage.completionTokens),
-    ),
-    cacheReadTokens: toPositiveInt(usage.cacheReadTokens),
-    cacheCreationTokens: toPositiveInt(usage.cacheCreationTokens),
-    promptTokensIncludeCache: usage.promptTokensIncludeCache ?? null,
-  });
-  const baseCacheReadTokens = toPositiveInt(base.cacheReadTokens);
-  const baseCacheCreationTokens = toPositiveInt(base.cacheCreationTokens);
-  const incomingCacheReadTokens = toPositiveInt(incoming.cacheReadTokens);
-  const incomingCacheCreationTokens = toPositiveInt(incoming.cacheCreationTokens);
-  const baseScore = base.totalTokens > 0
-    ? (base.totalTokens * 10_000 + base.promptTokens + base.completionTokens + baseCacheReadTokens + baseCacheCreationTokens)
-    : (base.promptTokens + base.completionTokens + baseCacheReadTokens + baseCacheCreationTokens);
-  const incomingScore = incoming.totalTokens > 0
-    ? (incoming.totalTokens * 10_000 + incoming.promptTokens + incoming.completionTokens + incomingCacheReadTokens + incomingCacheCreationTokens)
-    : (incoming.promptTokens + incoming.completionTokens + incomingCacheReadTokens + incomingCacheCreationTokens);
+  const sanitizedBase = sanitizeUsage(base);
+  const sanitizedIncoming = sanitizeUsage(incoming);
+  const merged = createEmptyProxyUsage();
 
-  if (incomingScore > baseScore) return normalizeUsage(incoming);
+  for (const key of PROXY_USAGE_FIELD_KEYS) {
+    const basePresent = sanitizedBase.presence[key];
+    const incomingPresent = sanitizedIncoming.presence[key];
+    merged[key] = Math.max(
+      basePresent ? sanitizedBase[key] : 0,
+      incomingPresent ? sanitizedIncoming[key] : 0,
+    );
+    merged.presence[key] = basePresent || incomingPresent;
+  }
 
-  const promptTokens = Math.max(base.promptTokens, incoming.promptTokens);
-  const completionTokens = Math.max(base.completionTokens, incoming.completionTokens);
-  const totalTokens = Math.max(base.totalTokens, incoming.totalTokens, promptTokens + completionTokens);
-  const cacheReadTokens = Math.max(baseCacheReadTokens, incomingCacheReadTokens);
-  const cacheCreationTokens = Math.max(baseCacheCreationTokens, incomingCacheCreationTokens);
-  const promptTokensIncludeCache = incoming.promptTokensIncludeCache ?? base.promptTokensIncludeCache;
+  merged.promptTokensIncludeCache = (
+    sanitizedIncoming.promptTokensIncludeCache
+    ?? sanitizedBase.promptTokensIncludeCache
+  );
 
-  return normalizeUsage({
-    promptTokens,
-    completionTokens,
-    totalTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    promptTokensIncludeCache,
-  });
+  return merged;
 }
 
 export function pullSseDataEvents(buffer: string): { events: string[]; rest: string } {

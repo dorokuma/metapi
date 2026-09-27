@@ -22,7 +22,16 @@ describe('proxyUsageParser', () => {
       totalTokens: 168,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      reasoningTokens: 0,
       promptTokensIncludeCache: null,
+      presence: {
+        promptTokens: true,
+        completionTokens: true,
+        totalTokens: true,
+        cacheReadTokens: false,
+        cacheCreationTokens: false,
+        reasoningTokens: false,
+      },
     });
   });
 
@@ -37,10 +46,19 @@ describe('proxyUsageParser', () => {
     expect(usage).toEqual({
       promptTokens: 80,
       completionTokens: 20,
-      totalTokens: 100,
+      totalTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      reasoningTokens: 0,
       promptTokensIncludeCache: null,
+      presence: {
+        promptTokens: true,
+        completionTokens: true,
+        totalTokens: false,
+        cacheReadTokens: false,
+        cacheCreationTokens: false,
+        reasoningTokens: false,
+      },
     });
   });
 
@@ -59,7 +77,16 @@ describe('proxyUsageParser', () => {
       totalTokens: 46,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      reasoningTokens: 0,
       promptTokensIncludeCache: null,
+      presence: {
+        promptTokens: true,
+        completionTokens: true,
+        totalTokens: true,
+        cacheReadTokens: false,
+        cacheCreationTokens: false,
+        reasoningTokens: false,
+      },
     });
   });
 
@@ -84,11 +111,20 @@ describe('proxyUsageParser', () => {
       totalTokens: 250,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      reasoningTokens: 0,
       promptTokensIncludeCache: null,
+      presence: {
+        promptTokens: true,
+        completionTokens: true,
+        totalTokens: true,
+        cacheReadTokens: false,
+        cacheCreationTokens: false,
+        reasoningTokens: false,
+      },
     });
   });
 
-  it('falls back to usage detail objects when aggregate fields are absent', () => {
+  it('reads detail objects for cache and reasoning without synthesizing prompt/completion/total', () => {
     const usage = parseProxyUsage({
       usage: {
         prompt_tokens_details: {
@@ -102,12 +138,21 @@ describe('proxyUsageParser', () => {
     });
 
     expect(usage).toEqual({
-      promptTokens: 10,
-      completionTokens: 20,
-      totalTokens: 30,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
       cacheReadTokens: 3,
       cacheCreationTokens: 0,
+      reasoningTokens: 20,
       promptTokensIncludeCache: true,
+      presence: {
+        promptTokens: false,
+        completionTokens: false,
+        totalTokens: false,
+        cacheReadTokens: true,
+        cacheCreationTokens: false,
+        reasoningTokens: true,
+      },
     });
   });
 
@@ -124,10 +169,19 @@ describe('proxyUsageParser', () => {
     expect(usage).toEqual({
       promptTokens: 120,
       completionTokens: 30,
-      totalTokens: 150,
+      totalTokens: 0,
       cacheReadTokens: 1000,
       cacheCreationTokens: 40,
+      reasoningTokens: 0,
       promptTokensIncludeCache: false,
+      presence: {
+        promptTokens: true,
+        completionTokens: true,
+        totalTokens: false,
+        cacheReadTokens: true,
+        cacheCreationTokens: true,
+        reasoningTokens: false,
+      },
     });
   });
 
@@ -139,7 +193,16 @@ describe('proxyUsageParser', () => {
         totalTokens: 0,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
+        reasoningTokens: 0,
         promptTokensIncludeCache: null,
+        presence: {
+          promptTokens: false,
+          completionTokens: false,
+          totalTokens: false,
+          cacheReadTokens: false,
+          cacheCreationTokens: false,
+          reasoningTokens: false,
+        },
       },
       {
         promptTokens: 90,
@@ -147,7 +210,16 @@ describe('proxyUsageParser', () => {
         totalTokens: 120,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
+        reasoningTokens: 0,
         promptTokensIncludeCache: null,
+        presence: {
+          promptTokens: true,
+          completionTokens: true,
+          totalTokens: true,
+          cacheReadTokens: false,
+          cacheCreationTokens: false,
+          reasoningTokens: false,
+        },
       },
     );
 
@@ -157,7 +229,16 @@ describe('proxyUsageParser', () => {
       totalTokens: 120,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      reasoningTokens: 0,
       promptTokensIncludeCache: null,
+      presence: {
+        promptTokens: true,
+        completionTokens: true,
+        totalTokens: true,
+        cacheReadTokens: false,
+        cacheCreationTokens: false,
+        reasoningTokens: false,
+      },
     });
   });
 
@@ -183,6 +264,96 @@ describe('proxyUsageParser', () => {
         },
       },
     })).toBe(true);
+  });
+
+  it('distinguishes missing keys from explicit zero values', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 0,
+        // total_tokens is absent
+        cache_read_input_tokens: 0,
+      },
+    });
+
+    expect(usage.presence.promptTokens).toBe(true);
+    expect(usage.presence.completionTokens).toBe(true); // explicit 0 is present
+    expect(usage.presence.totalTokens).toBe(false); // missing key
+    expect(usage.presence.cacheReadTokens).toBe(true); // explicit 0 is present
+    expect(usage.promptTokens).toBe(10);
+    expect(usage.completionTokens).toBe(0);
+    expect(usage.totalTokens).toBe(0);
+    expect(usage.cacheReadTokens).toBe(0);
+  });
+
+  it('takes the max across multiple aliases and preserves explicit zero', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        prompt_tokens: 10,
+        promptTokens: 0,
+        completion_tokens: 5,
+        completionTokens: 20,
+        total_tokens: 0,
+        totalTokens: 50,
+      },
+    });
+
+    expect(usage.promptTokens).toBe(10); // max(10, 0)
+    expect(usage.presence.promptTokens).toBe(true);
+    expect(usage.completionTokens).toBe(20); // max(5, 20)
+    expect(usage.presence.completionTokens).toBe(true);
+    expect(usage.totalTokens).toBe(50); // max(0, 50)
+    expect(usage.presence.totalTokens).toBe(true);
+  });
+
+  it('reads OpenAI reasoning tokens from completion_tokens_details', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        completion_tokens_details: {
+          reasoning_tokens: 15,
+        },
+      },
+    });
+
+    expect(usage.reasoningTokens).toBe(15);
+    expect(usage.presence.reasoningTokens).toBe(true);
+    expect(usage.completionTokens).toBe(20);
+    expect(usage.presence.completionTokens).toBe(true);
+  });
+
+  it('reads OpenAI reasoning tokens from output_tokens_details', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        prompt_tokens: 100,
+        output_tokens: 20,
+        output_tokens_details: {
+          reasoning_tokens: 12,
+        },
+      },
+    });
+
+    expect(usage.reasoningTokens).toBe(12);
+    expect(usage.presence.reasoningTokens).toBe(true);
+  });
+
+  it('prefers Gemini thoughtsTokenCount over nested reasoning tokens', () => {
+    const usage = parseProxyUsage({
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 5,
+        thoughtsTokenCount: 8,
+        totalTokenCount: 18,
+        completion_tokens_details: {
+          reasoning_tokens: 99,
+        },
+      },
+    });
+
+    expect(usage.completionTokens).toBe(13); // 5 + 8
+    expect(usage.reasoningTokens).toBe(8); // thoughts takes precedence
+    expect(usage.presence.reasoningTokens).toBe(true);
   });
 
   it('pulls SSE data events across chunk boundaries', () => {

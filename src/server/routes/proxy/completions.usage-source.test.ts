@@ -99,6 +99,7 @@ describe('/v1/completions usage source logging', () => {
       promptTokens: 3,
       completionTokens: 4,
       totalTokens: 7,
+      recoveredFromSelfLog: true,
       usageSource: 'self-log',
     });
     resolveProxyLogBillingMock.mockResolvedValue({
@@ -183,9 +184,11 @@ describe('/v1/completions usage source logging', () => {
     });
 
     expect(response.statusCode).toBe(200);
+    // 上游有观测（usage 1/2/3）时，标签只取 resolveFinalUsage 四分支裁决（'upstream'），
+    // 不得被 self-log mock 的 recoveredFromSelfLog=true 改写。
     expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
       status: 'success',
-      errorMessage: expect.stringContaining('[usage:self-log]'),
+      errorMessage: expect.stringContaining('[usage:upstream]'),
     }));
   });
 });

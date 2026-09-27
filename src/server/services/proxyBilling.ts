@@ -12,6 +12,8 @@ interface ProxyBillingUsageSummary {
   totalTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** 1h-TTL cache-creation tokens, only when upstream reports them separately (drives expr cc1h). */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache: boolean | null;
 }
 
@@ -59,6 +61,7 @@ export async function resolveProxyLogBilling(
   const billingPricingOverride = toPricingOverride(selfLogMeta);
   const cacheReadTokens = selfLogMeta?.cacheReadTokens ?? input.parsedUsage.cacheReadTokens;
   const cacheCreationTokens = selfLogMeta?.cacheCreationTokens ?? input.parsedUsage.cacheCreationTokens;
+  const cacheCreationTokens1h = input.parsedUsage.cacheCreationTokens1h;
   const promptTokensIncludeCache = selfLogMeta?.promptTokensIncludeCache
     ?? input.parsedUsage.promptTokensIncludeCache;
 
@@ -71,6 +74,7 @@ export async function resolveProxyLogBilling(
     totalTokens: input.resolvedUsage.totalTokens,
     cacheReadTokens,
     cacheCreationTokens,
+    cacheCreationTokens1h,
     promptTokensIncludeCache,
     billingPricingOverride,
   };

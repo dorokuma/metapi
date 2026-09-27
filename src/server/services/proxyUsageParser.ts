@@ -4,6 +4,14 @@ interface ParsedProxyUsage {
   totalTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /**
+   * 1h-TTL cache-creation tokens, only when upstream reports them separately
+   * (e.g. cache_creation.ephemeral_1h_input_tokens / claude_cache_creation_1_h_tokens).
+   * 0/undefined when the 1h share cannot be distinguished from the 5m share — in which
+   * case the expr cc1h variable stays 0 and the 1h cost folds into the standard cache-creation
+   * figure (documented in the billing notes).
+   */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache: boolean | null;
 }
 
@@ -13,6 +21,7 @@ const ZERO_USAGE: ParsedProxyUsage = {
   totalTokens: 0,
   cacheReadTokens: 0,
   cacheCreationTokens: 0,
+  cacheCreationTokens1h: 0,
   promptTokensIncludeCache: null,
 };
 
@@ -232,6 +241,21 @@ function getCacheCreationTokens(record: Record<string, unknown>): number {
   );
 }
 
+/**
+ * 1h-TTL cache-creation tokens, only when upstream reports them as a distinct field.
+ * Returns 0 when the 1h share is not separately reported (cannot be distinguished from
+ * the 5m share), in which case cc1h stays 0 and the 1h cost folds into the standard
+ * cache-creation figure.
+ */
+function getCacheCreationTokens1h(record: Record<string, unknown>): number {
+  return Math.max(
+    toPositiveInt((record.cache_creation as any)?.ephemeral_1h_input_tokens),
+    toPositiveInt((record.cacheCreation as any)?.ephemeral1hInputTokens),
+    toPositiveInt(record.claude_cache_creation_1_h_tokens),
+    toPositiveInt(record.claudeCacheCreation1hTokens),
+  );
+}
+
 function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
   let promptTokens = firstPositiveInt(record, [
     'prompt_tokens',
@@ -263,6 +287,7 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
   ]);
   const cacheReadTokens = getCacheReadTokens(record);
   const cacheCreationTokens = getCacheCreationTokens(record);
+  const cacheCreationTokens1h = getCacheCreationTokens1h(record);
   const promptTokensIncludeCache = detectPromptTokensIncludeCache(record);
 
   if (promptTokens <= 0) {
@@ -300,6 +325,7 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
     totalTokens: Math.max(totalTokens, promptTokens + completionTokens),
     cacheReadTokens,
     cacheCreationTokens,
+    cacheCreationTokens1h,
     promptTokensIncludeCache,
   };
 }
@@ -344,12 +370,15 @@ export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsa
     ),
     cacheReadTokens: toPositiveInt(usage.cacheReadTokens),
     cacheCreationTokens: toPositiveInt(usage.cacheCreationTokens),
+    cacheCreationTokens1h: toPositiveInt(usage.cacheCreationTokens1h),
     promptTokensIncludeCache: usage.promptTokensIncludeCache ?? null,
   });
   const baseCacheReadTokens = toPositiveInt(base.cacheReadTokens);
   const baseCacheCreationTokens = toPositiveInt(base.cacheCreationTokens);
+  const baseCacheCreationTokens1h = toPositiveInt(base.cacheCreationTokens1h);
   const incomingCacheReadTokens = toPositiveInt(incoming.cacheReadTokens);
   const incomingCacheCreationTokens = toPositiveInt(incoming.cacheCreationTokens);
+  const incomingCacheCreationTokens1h = toPositiveInt(incoming.cacheCreationTokens1h);
   const baseScore = base.totalTokens > 0
     ? (base.totalTokens * 10_000 + base.promptTokens + base.completionTokens + baseCacheReadTokens + baseCacheCreationTokens)
     : (base.promptTokens + base.completionTokens + baseCacheReadTokens + baseCacheCreationTokens);
@@ -364,6 +393,7 @@ export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsa
   const totalTokens = Math.max(base.totalTokens, incoming.totalTokens, promptTokens + completionTokens);
   const cacheReadTokens = Math.max(baseCacheReadTokens, incomingCacheReadTokens);
   const cacheCreationTokens = Math.max(baseCacheCreationTokens, incomingCacheCreationTokens);
+  const cacheCreationTokens1h = Math.max(baseCacheCreationTokens1h, incomingCacheCreationTokens1h);
   const promptTokensIncludeCache = incoming.promptTokensIncludeCache ?? base.promptTokensIncludeCache;
 
   return normalizeUsage({
@@ -372,6 +402,7 @@ export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsa
     totalTokens,
     cacheReadTokens,
     cacheCreationTokens,
+    cacheCreationTokens1h,
     promptTokensIncludeCache,
   });
 }

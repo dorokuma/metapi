@@ -89,6 +89,8 @@ type SurfaceUsageSummary = {
   totalTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** 1h-TTL cache-creation tokens, only when upstream reports them separately (drives expr cc1h). */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache: boolean | null;
 };
 

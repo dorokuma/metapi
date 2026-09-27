@@ -11,6 +11,26 @@ make small, consistent changes without re-learning the codebase each time.
 - **提交规范**：提交规范——commit message 须过全局 commit-msg hook：Conventional Commits 类型白名单、≤72 字、冒号后一空格、禁噪声词与密钥。
 - **决策与踩坑记录**：决策/踩坑须记 .agents/notes/（满足触发规则任一条即写，参考模板并按规范归档）。
 
+## 运行实例与数据 / Runtime Instance And Data
+
+- **生产实例**：本机 Docker 容器 `metapi`（host 网络，`127.0.0.1:4000`，重启策略 `unless-stopped`）。**镜像 tag 规则：发版镜像 = `metapi:<版本号>`**（如 `metapi:1.4.1`）；现役 tag 以 `docker inspect metapi --format '{{.Config.Image}}'` 实际为准，勿写死；历史镜像本地保留（如 `metapi:local-*`、`-bak-*`），可作回滚位。
+- **真实数据位置**：宿主 `/var/lib/metapi/data`（容器内挂载为 `/app/data`）；核心库 `/var/lib/metapi/data/hub.db`（SQLite）。站点/账号/路由/设置（`sites`/`accounts`/`token_routes`/`settings`）、代理日志 `proxy_logs`、调试抓取 `proxy_debug_*` 等运行期数据都在此库；运行日志在 `docker logs metapi`。
+- **仓库内的 `data/` 是开发副本，不是生产数据**——排查线上问题勿用它。
+- **排查原则**：先读运行实例的事实（hub.db 只读打开，如 `sqlite3 "file:/var/lib/metapi/data/hub.db?mode=ro"`；必要时 `docker logs` / `docker inspect`），弄清「发生了什么」；需要解释机制、定位实现时再读源码（它回答「为什么」）。只读源码往往查不到运行期问题，两者结合使用；对生产数据/配置/容器的任何写操作须先经用户批准。
+
+## 发版与无痛上线 / Release And Painless Deploy
+
+用户说「发版」即按本节执行（上线 → 验收 → 发布收尾）。前置：改动在分支上经双审（reviewer + oracle）通过后方可提交；commit message 须过 commit-msg hook。
+
+- **无痛上线（旧容器运行到切换前一刻）**：
+  1. **定版本**：先 bump `package.json` 版本号并提交（连同 CHANGELOG、`.agents/notes/`）——版本号按语义化递增（或按用户指定），镜像 tag 与版本对齐。
+  2. **旁路构建**：`docker build -t metapi:<版本号> -f docker/Dockerfile .`（如 `metapi:1.4.1`；旧容器照跑）。
+  3. **回流位**：记录新旧 IMAGE ID；旧版本镜像保留为回滚位（回滚 = 用上一版本 tag）；切换前对 hub.db 做只读一致性快照（`.backup`）到 `/root/deploy-prep/`。
+  4. **切换**：先 `docker inspect metapi` 核对现配置（网络/卷/Cmd/Entrypoint/Env，Env 现读现用不落盘）→ 停并删旧容器 → 以同配置 `docker run metapi:<版本号>`（host 网络同端口不能并存，切换为秒级）。
+  5. **健康检查 + 验收**：容器 running、端口/HTTP 探测、`docker logs` 无致命错；不过 → 用上一版本 tag 原地回滚。然后按本次改动做真实流量验证（复现触发 / 查调试库与日志核对）。
+- **发布收尾**：**显式** `git push origin <branch>` → `git merge --ff-only` 进 main → `git push origin main`。
+- **红线**：main 的 tracking 指向 upstream——裸 `git push` 会指向 upstream，一律显式写 `origin`；不推 upstream、不 force、不打 tag、不删分支（除用户明说）。
+
 ## Index & Documentation / 索引与现状文档
 
 - 项目文档：[docs/](docs/)（VitePress 文档目录）及 [CONTRIBUTING.md](CONTRIBUTING.md)（贡献与本地开发指南）

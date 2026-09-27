@@ -344,13 +344,17 @@ function toAnthropicTextBlock(text: string): Record<string, unknown> | null {
 }
 
 function resolveAnthropicThinkingSignature(item: Record<string, unknown>): string | null | undefined {
-  const rawSignature = asTrimmedString(item.signature ?? item.reasoning_signature);
+  // Only the `signature` field carries the Anthropic reasoning signature for
+  // inbound blocks. `reasoning_signature` is the OpenAI response-side field
+  // that pi writes; putting the raw UUID there causes resolveAnthropicThinkingSignature
+  // to return null (drop the block) and the signature is lost.
+  const rawSignature = asTrimmedString(item.signature);
   if (!rawSignature) return undefined;
   const decodedTaggedSignature = decodeAnthropicReasoningSignature(rawSignature);
   if (decodedTaggedSignature !== null) {
     return decodedTaggedSignature;
   }
-  if (item.reasoning_signature !== undefined || rawSignature.startsWith('metapi:')) {
+  if (rawSignature.startsWith('metapi:')) {
     return null;
   }
   return rawSignature;
@@ -907,12 +911,66 @@ export function convertOpenAiBodyToAnthropicMessagesBody(
     const role = asTrimmedString(item.role).toLowerCase() || 'assistant';
     if (role !== 'assistant') return;
 
-    const contentBlocks = convertOpenAiContentToAnthropicBlocks(item.content);
+    let contentBlocks = convertOpenAiContentToAnthropicBlocks(item.content);
+
+    // Build the thinking carrier from the highest-priority source:
+    // 1. reasoning_details[reasoning.text] items (pi's stream signature loop)
+    //    — non-empty signature takes precedence; empty text is still valid
+    //      (864-type: empty thinking + UUID signature + tool_use passes).
+    // 2. reasoning_content / reasoning (non-stream fallback)
+    // 3. signature (explicit OpenAI-side signature field)
+    let reasoningText = '';
+    let reasoningSignature: string | undefined;
+
+    const reasoningDetails = Array.isArray(item.reasoning_details) ? item.reasoning_details : [];
+    for (const detail of reasoningDetails) {
+      if (!isRecord(detail)) continue;
+      if (asTrimmedString(detail.type).toLowerCase() !== 'reasoning.text') continue;
+      const detailText = asTrimmedString(detail.text);
+      const detailSignature = asTrimmedString(detail.signature);
+      // A non-empty signature is enough to anchor the block even when
+      // the thinking text is empty (864/865 pattern).
+      if (detailSignature) {
+        reasoningText = detailText;
+        reasoningSignature = detailSignature;
+        break;
+      }
+      // No signature yet; accumulate text if this is the first detail.
+      if (!reasoningText && detailText) {
+        reasoningText = detailText;
+      }
+    }
+
+    if (!reasoningText) {
+      reasoningText = asTrimmedString(item.reasoning_content ?? item.reasoning);
+    }
+
+    const carrierSignature = reasoningSignature
+      ?? (asTrimmedString(item.reasoning_signature) || undefined)
+      ?? (asTrimmedString(item.signature) || undefined);
+
+    // Deduplicate any thinking block from content that carries the same text
+    // as the reasoning we're about to emit as the carrier. Only do this when
+    // we have a valid (non-metapi:) signature anchor: if the signature is
+    // null or a foreign-metapi prefix, sanitizeAnthropicContentBlock drops
+    // the carrier and the content's original thinking block must be kept.
+    const rawSig = reasoningSignature
+      ?? asTrimmedString(item.reasoning_signature)
+      ?? asTrimmedString(item.signature);
+    const sigIsValid = !!rawSig && !rawSig.startsWith('metapi:');
+    if (sigIsValid) {
+      contentBlocks = contentBlocks.filter((block) => {
+        if (asTrimmedString(block.type).toLowerCase() !== 'thinking') return true;
+        const blockText = asTrimmedString(block.thinking ?? block.text);
+        return blockText !== reasoningText;
+      });
+    }
+
     const reasoningCarrier = sanitizeAnthropicContentBlock({
       type: 'thinking',
-      thinking: asTrimmedString(item.reasoning_content ?? item.reasoning),
-      reasoning_signature: item.reasoning_signature,
-      signature: item.signature,
+      thinking: reasoningText,
+      reasoning_signature: carrierSignature,
+      signature: carrierSignature,
     });
     if (reasoningCarrier) {
       contentBlocks.unshift(reasoningCarrier);

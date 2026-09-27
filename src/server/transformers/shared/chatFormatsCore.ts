@@ -37,6 +37,24 @@ export type StreamTransformContext = {
   // Last-seen terminal usage payload (finite-numbered). Captured by the
   // openai/chat bridge from choices:[]+usage frames and the final fallback.
   terminalUsage?: Record<string, unknown>;
+  // Signature/tracking fields added for thinking/signature passthrough.
+  // Accumulates thinking text across thinking_delta events for the current
+  // thinking block so the full text can accompany the signature in a single
+  // reasoning_details emission (pi concatenates successive reasoning.text).
+  pendingThinkingText?: string;
+  // Accumulates signature fragments from signature_delta events. Cleared on
+  // content_block_start and flushed (with pendingThinkingText) when the
+  // thinking block closes or the stream ends.
+  pendingSignature?: string;
+  // True once the OpenAI reasoning_details chunk for the current signature
+  // has been emitted, preventing pi from doubling the text.
+  signatureDetailsSent?: boolean;
+  // Callback invoked when the thinking block is about to close (stop event
+  // received) or when the stream is being finalized. For OpenAI downstream,
+  // emits a single reasoning_details chunk carrying the full thinking text
+  // plus the accumulated signature. For Claude downstream, the Anthropic
+  // stream bridge emits signature_delta SSE directly.
+  onThinkingBlockStopped?: (flushChunk: Record<string, unknown>) => void;
 };
 
 export type ClaudeDownstreamContext = {
@@ -58,6 +76,11 @@ export type NormalizedStreamEvent = {
   contentDelta?: string;
   reasoningDelta?: string;
   reasoningSignature?: string;
+  reasoningDetails?: Array<{
+    type: string;
+    text?: string;
+    signature?: string;
+  }>;
   redactedReasoningContent?: string;
   toolCallDeltas?: Array<{
     index: number;
@@ -102,6 +125,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function asUntouchedString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }
 
 function pickFiniteNumber(value: unknown): number | undefined {
@@ -230,11 +257,13 @@ function extractRawStreamingTextAndDirectReasoning(value: unknown): { content: s
     return { content: value, reasoning: '' };
   }
   if (isRecord(value)) {
-    const content = typeof value.content === 'string' ? value.content
-      : (typeof value.text === 'string' ? value.text : '');
+    const content = typeof value.thinking === 'string' ? value.thinking
+      : (typeof value.text === 'string' ? value.text
+        : (typeof value.content === 'string' ? value.content : ''));
     const reasoning =
       (typeof value.reasoning_content === 'string' ? value.reasoning_content : '')
-      || (typeof value.reasoning === 'string' ? value.reasoning : '');
+      || (typeof value.reasoning === 'string' ? value.reasoning : '')
+      || (typeof value.thinking === 'string' ? value.thinking : '');
     return { content, reasoning };
   }
   return { content: '', reasoning: '' };
@@ -318,6 +347,10 @@ export function createStreamTransformContext(modelName: string): StreamTransform
     responsesReasoningByIndex: {},
     thinkTagParser: createThinkTagParserState(),
     includeUsage: false,
+    pendingThinkingText: '',
+    pendingSignature: '',
+    signatureDetailsSent: false,
+    onThinkingBlockStopped: undefined,
   };
 }
 
@@ -1593,6 +1626,15 @@ export function normalizeUpstreamStreamEvent(
     const reasoningSignature = isNonEmptyString((delta as any).reasoning_signature)
       ? (delta as any).reasoning_signature
       : undefined;
+    // Buffer reasoning text and signature for later flush as reasoning_details.
+    // The OpenAI downstream expects a single reasoning_details chunk carrying
+    // the full text + signature at block stop / stream end.
+    if (reasoningDelta || reasoningSignature) {
+      context.pendingThinkingText = (context.pendingThinkingText || '') + (reasoningDelta || '');
+      if (reasoningSignature) {
+        context.pendingSignature = (context.pendingSignature || '') + reasoningSignature;
+      }
+    }
 
     const finishReason = normalizeStopReason(choice?.finish_reason);
 
@@ -1648,7 +1690,7 @@ export function normalizeUpstreamStreamEvent(
       role: (delta as any).role === 'assistant' ? 'assistant' : undefined,
       contentDelta: contentDelta || undefined,
       reasoningDelta: reasoningDeltaWithFlush || undefined,
-      reasoningSignature,
+      reasoningSignature: undefined,
       toolCallDeltas: toolCallDeltas.length > 0 ? toolCallDeltas : undefined,
       finishReason,
     };
@@ -1945,6 +1987,12 @@ export function normalizeUpstreamStreamEvent(
         : 0
     );
     const contentBlock = isRecord(payload.content_block) ? payload.content_block : {};
+    if ((contentBlock as any)?.type === 'thinking') {
+      context.pendingThinkingText = '';
+      context.pendingSignature = '';
+      context.signatureDetailsSent = false;
+      context.thinkTagParser.reasoningChannelActive = true;
+    }
     if (contentBlock.type === 'tool_use') {
       const id = typeof contentBlock.id === 'string' && contentBlock.id.trim().length > 0
         ? contentBlock.id
@@ -1976,9 +2024,6 @@ export function normalizeUpstreamStreamEvent(
     }
 
     const parsed = extractStreamingTextAndReasoning(payload.content_block, context.thinkTagParser);
-    if ((payload.content_block as any)?.type === 'thinking') {
-      context.thinkTagParser.reasoningChannelActive = true;
-    }
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
@@ -1989,6 +2034,14 @@ export function normalizeUpstreamStreamEvent(
     const delta = isRecord(payload.delta) ? payload.delta : {};
     const deltaType = typeof delta.type === 'string' ? delta.type : '';
     const parsed = extractStreamingTextAndReasoning(delta, context.thinkTagParser);
+
+    if (deltaType === 'signature_delta') {
+      const signatureText = asTrimmedString((delta as any).signature);
+      if (signatureText) {
+        context.pendingSignature = (context.pendingSignature || '') + signatureText;
+      }
+      return {};
+    }
 
     if (deltaType === 'input_json_delta') {
       const index = (
@@ -2009,8 +2062,10 @@ export function normalizeUpstreamStreamEvent(
 
     if (deltaType === 'thinking_delta') {
       context.thinkTagParser.reasoningChannelActive = true;
+      const thinkingText = asUntouchedString((delta as any).thinking ?? (delta as any).text);
+      context.pendingThinkingText = (context.pendingThinkingText || '') + thinkingText;
       return {
-        reasoningDelta: parsed.content || parsed.reasoning || undefined,
+        reasoningDelta: thinkingText || undefined,
       };
     }
 
@@ -2058,6 +2113,35 @@ export function normalizeUpstreamStreamEvent(
   };
 }
 
+/**
+ * Build a synthetic NormalizedStreamEvent carrying the pending signature as
+ * a single reasoning_details entry. Returns null when there is nothing to
+ * flush (no signature, or already sent).
+ *
+ * The caller is responsible for writing the resulting chunk and for
+ * invoking context.onThinkingBlockStopped exactly once.
+ */
+function buildPendingSignatureFlushEvent(
+  context: StreamTransformContext,
+): NormalizedStreamEvent | null {
+  if (context.signatureDetailsSent) return null;
+  const signature = typeof context.pendingSignature === 'string' ? context.pendingSignature : '';
+  if (!signature) return null;
+
+  context.signatureDetailsSent = true;
+  context.pendingSignature = '';
+  const thinkingText = typeof context.pendingThinkingText === 'string' ? context.pendingThinkingText : '';
+  context.pendingThinkingText = '';
+
+  return {
+    reasoningDetails: [{
+      type: 'reasoning.text',
+      text: thinkingText,
+      signature,
+    }],
+  };
+}
+
 function buildOpenAiStreamChunk(
   context: StreamTransformContext,
   event: NormalizedStreamEvent,
@@ -2086,6 +2170,28 @@ function buildOpenAiStreamChunk(
 
   if (normalizedReasoningDelta) {
     delta.reasoning_content = normalizedReasoningDelta;
+  }
+
+  // Flush the buffered signature as reasoning_details at block stop /
+  // stream end (finish_reason or done). The onThinkingBlockStopped callback
+  // writes the chunk directly so it bypasses pendingWrites and reaches the
+  // client before [DONE].
+  if ((event.finishReason || event.done) && context.onThinkingBlockStopped) {
+    const pendingSignatureFlush = buildPendingSignatureFlushEvent(context);
+    if (pendingSignatureFlush?.reasoningDetails) {
+      const flushChunk: Record<string, unknown> = {
+        id: context.id,
+        object: 'chat.completion.chunk',
+        created: context.created,
+        model: context.model,
+        choices: [{
+          index: 0,
+          delta: { reasoning_details: pendingSignatureFlush.reasoningDetails },
+          finish_reason: null,
+        }],
+      };
+      context.onThinkingBlockStopped(flushChunk);
+    }
   }
 
   if (Array.isArray(event.toolCallDeltas) && event.toolCallDeltas.length > 0) {
@@ -2401,6 +2507,22 @@ export function serializeStreamDone(
   context.doneSent = true;
 
   if (downstreamFormat === 'openai') {
+    const pendingSignatureFlush = buildPendingSignatureFlushEvent(context);
+    if (pendingSignatureFlush?.reasoningDetails && context.onThinkingBlockStopped) {
+      const flushChunk: Record<string, unknown> = {
+        id: context.id,
+        object: 'chat.completion.chunk',
+        created: context.created,
+        model: context.model,
+        choices: [{
+          index: 0,
+          delta: { reasoning_details: pendingSignatureFlush.reasoningDetails },
+          finish_reason: null,
+        }],
+      };
+      context.onThinkingBlockStopped(flushChunk);
+    }
+
     const terminalUsageChunk = buildOpenAiTerminalUsageChunk(context);
     return terminalUsageChunk
       ? [terminalUsageChunk, serializeSse('', '[DONE]')]

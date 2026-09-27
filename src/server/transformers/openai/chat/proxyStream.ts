@@ -49,6 +49,27 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     };
   const streamContext = downstreamTransformer.createStreamContext(input.modelName);
   streamContext.includeUsage = input.includeUsage === true;
+
+  // For OpenAI downstream, flush buffered signatures as reasoning_details
+  // chunks so pi receives the full thinking text + signature in a single
+  // delta (pi concatenates successive reasoning.text items and stores the
+  // resulting array as thinkingSignature for the next round).
+  if (input.downstreamFormat === 'openai') {
+    streamContext.onThinkingBlockStopped = (flushChunk) => {
+      if (!flushChunk) return;
+      const serialized = `data: ${JSON.stringify(flushChunk)}\n\n`;
+      // Write directly (not via pendingWrites) so the signature chunk
+      // reaches the client before [DONE] and is not trapped in the
+      // pending-writes queue waiting for a subsequent tool/text chunk.
+      input.writeLines([serialized]);
+      // The signature chunk is real downstream output. Mark the stream as
+      // forwarded so the terminal finish_reason chunk emitted in this same
+      // event block (and any later chunk) is force-written directly instead
+      // of being deferred to finalize's pendingWrites flush — guaranteeing
+      // reasoning_details precedes finish_reason/[DONE].
+      forwardedDownstreamOutput = true;
+    };
+  }
   const claudeContext = anthropicMessagesTransformer.createDownstreamContext();
   const chatAggregateState = input.downstreamFormat === 'openai'
     ? createOpenAiChatAggregateState()
@@ -182,6 +203,12 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     if (terminalResult.status === 'failed') return false;
     if (hasMeaningfulChatAggregateOutput()) return false;
     if (hasMeaningfulNormalizedFinalOutput()) return false;
+    // A buffered (or already-flushed) signature is meaningful output; don't
+    // fail empty completion. After the flush clears pendingSignature, the
+    // signatureDetailsSent flag carries the "we emitted a signed
+    // reasoning_details" state, so a pure-signature (no tool/content) response
+    // must not be killed by the empty-content interceptor.
+    if (streamContext.pendingSignature || streamContext.signatureDetailsSent) return false;
     return true;
   };
 

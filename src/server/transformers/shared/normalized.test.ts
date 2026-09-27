@@ -4,12 +4,15 @@ import { describe, expect, it } from 'vitest';
 import {
   fromTransformerMetadataRecord,
   createStreamTransformContext,
+  createClaudeDownstreamContext,
   normalizeStopReason,
   normalizeUpstreamFinalResponse,
   normalizeUpstreamStreamEvent,
   parseDownstreamChatRequest,
   pullSseEventsWithDone,
   serializeFinalResponse,
+  serializeNormalizedStreamEvent,
+  serializeStreamDone,
   toTransformerMetadataRecord,
   type NormalizedFinalResponse,
   type TransformerMetadata,
@@ -842,6 +845,204 @@ describe('shared normalized helpers', () => {
         content: '回复开头：最终答案',
         reasoningContent: '直接思考',
       });
+    });
+  });
+
+  describe('openai reasoning signature passthrough (real path)', () => {
+    it('buffers reasoning_signature across frames and flushes once on terminal event', () => {
+      const context = createStreamTransformContext('gpt-5');
+      const flushed: Array<Record<string, unknown>> = [];
+      context.onThinkingBlockStopped = (chunk) => {
+        if (chunk) flushed.push(chunk);
+      };
+
+      // Frame 1: reasoning text + signature
+      const ev1 = normalizeUpstreamStreamEvent({
+        id: 'cmpl-1',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          finish_reason: null,
+          delta: { role: 'assistant', reasoning_content: 'hello ', reasoning_signature: 'uuid-1' },
+        }],
+      }, context, 'gpt-5');
+
+      // Frame 2: more reasoning, no signature
+      const ev2 = normalizeUpstreamStreamEvent({
+        id: 'cmpl-1',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          finish_reason: null,
+          delta: { reasoning_content: 'world' },
+        }],
+      }, context, 'gpt-5');
+
+      // Terminal frame: finish_reason
+      const ev3 = normalizeUpstreamStreamEvent({
+        id: 'cmpl-1',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'stop',
+        }],
+      }, context, 'gpt-5');
+
+      // Text is emitted incrementally as reasoning_content deltas
+      expect(ev1.reasoningDelta).toBe('hello ');
+      expect(ev2.reasoningDelta).toBe('world');
+      // Signature is NOT emitted inline
+      expect(ev1.reasoningSignature).toBeUndefined();
+      expect(ev2.reasoningSignature).toBeUndefined();
+
+      // Serialize through buildOpenAiStreamChunk
+      const claudeCtx = createClaudeDownstreamContext();
+      const lines1 = serializeNormalizedStreamEvent('openai', ev1, context, claudeCtx);
+      const lines2 = serializeNormalizedStreamEvent('openai', ev2, context, claudeCtx);
+      const lines3 = serializeNormalizedStreamEvent('openai', ev3, context, claudeCtx);
+
+      // Signature is flushed exactly once, on the terminal event
+      expect(flushed.length).toBe(1);
+      expect(flushed[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+        { type: 'reasoning.text', text: 'hello world', signature: 'uuid-1' },
+      ]);
+      expect(flushed[0]?.choices?.[0]?.finish_reason).toBeNull();
+
+      // Terminal chunk still carries finish_reason
+      const terminalPayload = JSON.parse(lines3[0].slice(6));
+      expect(terminalPayload.choices?.[0]?.finish_reason).toBe('stop');
+    });
+
+    it('preserves whitespace in reasoning deltas (no trim)', () => {
+      const context = createStreamTransformContext('gpt-5');
+
+      const ev = normalizeUpstreamStreamEvent({
+        id: 'cmpl-ws',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          finish_reason: null,
+          delta: { reasoning_content: '  hello ' },
+        }],
+      }, context, 'gpt-5');
+
+      expect(ev.reasoningDelta).toBe('  hello ');
+    });
+
+    it('flushes buffered signature via onThinkingBlockStopped on serializeStreamDone (EOF fallback)', () => {
+      const context = createStreamTransformContext('gpt-5');
+      const flushed: Array<Record<string, unknown>> = [];
+      context.onThinkingBlockStopped = (chunk) => {
+        if (chunk) flushed.push(chunk);
+      };
+
+      // Buffer signature without terminal event
+      normalizeUpstreamStreamEvent({
+        id: 'cmpl-eof',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          finish_reason: null,
+          delta: { reasoning_content: 'eof-text', reasoning_signature: 'eof-uuid' },
+        }],
+      }, context, 'gpt-5');
+
+      // EOF triggers serializeStreamDone
+      const doneLines = serializeStreamDone('openai', context, createClaudeDownstreamContext());
+
+      expect(flushed.length).toBe(1);
+      expect(flushed[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+        { type: 'reasoning.text', text: 'eof-text', signature: 'eof-uuid' },
+      ]);
+      expect(doneLines).toContain('data: [DONE]\n\n');
+    });
+
+    it('handles 864 pattern: empty reasoning + signature + tool_use', () => {
+      const context = createStreamTransformContext('gpt-5');
+      const flushed: Array<Record<string, unknown>> = [];
+      context.onThinkingBlockStopped = (chunk) => {
+        if (chunk) flushed.push(chunk);
+      };
+
+      // Empty reasoning with signature
+      normalizeUpstreamStreamEvent({
+        id: 'cmpl-864',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          finish_reason: null,
+          delta: { reasoning_signature: '864-uuid' },
+        }],
+      }, context, 'gpt-5');
+
+      // tool_calls in the same chunk
+      const ev = normalizeUpstreamStreamEvent({
+        id: 'cmpl-864',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          finish_reason: null,
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_1',
+              type: 'function',
+              function: { name: 'lookup', arguments: '{}' },
+            }],
+          },
+        }],
+      }, context, 'gpt-5');
+
+      // Terminal
+      const terminal = normalizeUpstreamStreamEvent({
+        id: 'cmpl-864',
+        model: 'gpt-5',
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+      }, context, 'gpt-5');
+
+      const claudeCtx = createClaudeDownstreamContext();
+      serializeNormalizedStreamEvent('openai', ev, context, claudeCtx);
+      serializeNormalizedStreamEvent('openai', terminal, context, claudeCtx);
+
+      expect(flushed.length).toBe(1);
+      expect(flushed[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+        { type: 'reasoning.text', text: '', signature: '864-uuid' },
+      ]);
+    });
+
+    it('does not double-flush when signatureDetailsSent is set', () => {
+      const context = createStreamTransformContext('gpt-5');
+      const flushed: Array<Record<string, unknown>> = [];
+      context.onThinkingBlockStopped = (chunk) => {
+        if (chunk) flushed.push(chunk);
+      };
+
+      // First terminal event flushes
+      const ev1 = normalizeUpstreamStreamEvent({
+        id: 'cmpl-dup',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          delta: { reasoning_content: 'text', reasoning_signature: 'uuid-dup' },
+          finish_reason: 'stop',
+        }],
+      }, context, 'gpt-5');
+      serializeNormalizedStreamEvent('openai', ev1, context, createClaudeDownstreamContext());
+
+      // Second terminal event should not flush again
+      const ev2 = normalizeUpstreamStreamEvent({
+        id: 'cmpl-dup',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'stop',
+        }],
+      }, context, 'gpt-5');
+      serializeNormalizedStreamEvent('openai', ev2, context, createClaudeDownstreamContext());
+
+      expect(flushed.length).toBe(1);
     });
   });
 });

@@ -437,6 +437,272 @@ describe('convertOpenAiBodyToAnthropicMessagesBody', () => {
     ]);
   });
 
+  it('reads reasoning_details from pi stream response and preserves signature in thinking block', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'thinking',
+                thinking: 'pi reasoning',
+              },
+              {
+                type: 'text',
+                text: 'final answer',
+              },
+            ],
+            reasoning_details: [
+              { type: 'reasoning.text', text: 'pi reasoning', signature: 'uuid-from-pi-stream' },
+            ],
+          },
+        ],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'pi reasoning',
+            signature: 'uuid-from-pi-stream',
+          },
+          {
+            type: 'text',
+            text: 'final answer',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves empty-thinking block with non-empty signature from reasoning_details (864 pattern)', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+ {
+            role: 'assistant',
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_123',
+                name: 'lookup',
+                input: { city: 'Paris' },
+              },
+            ],
+            reasoning_details: [
+              { type: 'reasoning.text', text: '', signature: 'uuid-empty-thinking-864' },
+            ],
+          },
+        ],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    // Empty thinking text + non-empty signature must still produce a thinking
+    // block (hasThinkingCarrier keeps it from being dropped by sanitize).
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: '',
+            signature: 'uuid-empty-thinking-864',
+          },
+          {
+            type: 'tool_use',
+            id: 'toolu_123',
+            name: 'lookup',
+            input: { city: 'Paris' },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('B2: dedups an empty content thinking block against an empty-text+signature reasoning_details (one signed block, no dup, no loss)', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: '' },
+              { type: 'text', text: 'done' },
+            ],
+            reasoning_details: [
+              { type: 'reasoning.text', text: '', signature: 'uuid-b2-dedup' },
+            ],
+          },
+        ],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    // The empty content thinking block is deduped (same empty text as the
+    // carrier) and replaced by exactly ONE signed thinking block; the text
+    // block is preserved. No duplication, no signature loss.
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: '',
+            signature: 'uuid-b2-dedup',
+          },
+          {
+            type: 'text',
+            text: 'done',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('B2: does not delete non-empty content (thinking/text) when reasoning_details carries empty text + signature', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: 'real internal reasoning' },
+              { type: 'text', text: 'the answer is 42' },
+            ],
+            reasoning_details: [
+              { type: 'reasoning.text', text: '', signature: 'uuid-b2-keep' },
+            ],
+          },
+        ],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    // The empty-text signature anchors a NEW empty signed thinking block; the
+    // non-empty original thinking block and the text block must NOT be deleted
+    // (the dedup only drops thinking blocks whose text equals the carrier text).
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: '',
+            signature: 'uuid-b2-keep',
+          },
+          {
+            type: 'thinking',
+            thinking: 'real internal reasoning',
+          },
+          {
+            type: 'text',
+            text: 'the answer is 42',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('does not put raw UUID into reasoning_signature; only signature field receives it', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'thinking',
+                thinking: 'some thought',
+              },
+              {
+                type: 'text',
+                text: 'answer',
+              },
+            ],
+            reasoning_details: [
+              { type: 'reasoning.text', text: 'some thought', signature: 'raw-uuid-no-prefix' },
+            ],
+          },
+        ],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    // The outbound Anthropic message must have `signature`, NOT `reasoning_signature`
+    // (reasoning_signature would cause resolveAnthropicThinkingSignature to
+    // return null and drop the block).
+    const assistantMessage = body.messages?.[0];
+    expect(assistantMessage).toBeDefined();
+    const thinkingBlock = assistantMessage?.content?.find(
+      (b: Record<string, unknown>) => b.type === 'thinking',
+    );
+    expect(thinkingBlock).toBeDefined();
+    expect((thinkingBlock as Record<string, unknown> | undefined)?.signature).toBe('raw-uuid-no-prefix');
+    expect((thinkingBlock as Record<string, unknown> | undefined)?.reasoning_signature).toBeUndefined();
+  });
+
+  it('ignores metapi: prefixed reasoning_details signatures (foreign encrypted types)', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'thinking',
+                thinking: 'internal only',
+              },
+              {
+                type: 'text',
+                text: 'final answer',
+              },
+            ],
+            reasoning_details: [
+              { type: 'reasoning.text', text: 'internal only', signature: 'metapi:openai-encrypted-reasoning:enc-foreign' },
+            ],
+          },
+        ],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    // metapi: foreign prefixes are dropped; the original thinking block from
+    // content survives because no valid signature anchor exists for the carrier.
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'internal only',
+          },
+          {
+            type: 'text',
+            text: 'final answer',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('strips cache_control from thinking blocks and empty text blocks', () => {
     const body = convertOpenAiBodyToAnthropicMessagesBody(
       {

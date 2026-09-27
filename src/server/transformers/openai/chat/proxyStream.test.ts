@@ -213,4 +213,167 @@ describe('createChatProxyStreamSession (usage terminal chunk)', () => {
       config.proxyEmptyContentFailEnabled = originalEmptyContentFail;
     }
   });
+
+  it('streams 864 pattern: empty reasoning + signature + tool_use through real proxy path', async () => {
+    const lines: string[] = [];
+    const reader = makeReader([
+      dataFrame({ id: 'cmpl-864', model: 'gpt-5', choices: [{ index: 0, delta: { reasoning_signature: '864-uuid' }, finish_reason: null }] }),
+      dataFrame({ id: 'cmpl-864', model: 'gpt-5', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }, finish_reason: null }] }),
+      dataFrame({ id: 'cmpl-864', model: 'gpt-5', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }),
+      DONE_FRAME,
+    ]);
+
+    const session = createChatProxyStreamSession({
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5',
+      successfulUpstreamPath: '/v1/chat/completions',
+      includeUsage: false,
+      writeLines: (next) => { lines.push(...next); },
+      writeRaw: () => {},
+    });
+
+    const result = await session.run(reader as any, { end() {} });
+    expect(result.status).toBe('completed');
+
+    const { payloads, done } = parseStreamOutput(lines.join(''));
+    expect(done).toBe(1);
+
+    // Signature chunk must appear before [DONE]
+    const signatureChunks = payloads.filter((p) => p.choices?.[0]?.delta?.reasoning_details);
+    expect(signatureChunks.length).toBe(1);
+    expect(signatureChunks[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+      { type: 'reasoning.text', text: '', signature: '864-uuid' },
+    ]);
+
+    // tool_calls chunk must also be present
+    const toolChunks = payloads.filter((p) => p.choices?.[0]?.delta?.tool_calls);
+    expect(toolChunks.length).toBeGreaterThan(0);
+
+    // Terminal finish_reason chunk
+    const terminal = payloads.find((p) => p.choices?.[0]?.finish_reason === 'tool_calls');
+    expect(terminal).toBeDefined();
+  });
+
+  it('does not fail empty completion when only a signature is buffered (no content/tools)', async () => {
+    const originalEmptyContentFail = config.proxyEmptyContentFailEnabled;
+    // Close the loop: enable the empty-content interceptor so this test
+    // actually exercises the pendingSignature/signatureDetailsSent guard
+    // instead of passing trivially with the switch off (false green).
+    config.proxyEmptyContentFailEnabled = true;
+    try {
+      const lines: string[] = [];
+      const reader = makeReader([
+        dataFrame({ id: 'cmpl-sig-only', model: 'gpt-5', choices: [{ index: 0, delta: { reasoning_signature: 'sig-only' }, finish_reason: null }] }),
+        dataFrame({ id: 'cmpl-sig-only', model: 'gpt-5', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+        DONE_FRAME,
+      ]);
+
+      const session = createChatProxyStreamSession({
+        downstreamFormat: 'openai',
+        modelName: 'gpt-5',
+        successfulUpstreamPath: '/v1/chat/completions',
+        includeUsage: false,
+        writeLines: (next) => { lines.push(...next); },
+        writeRaw: () => {},
+      });
+
+      const result = await session.run(reader as any, { end() {} });
+      expect(result.status).toBe('completed');
+
+      const { payloads, done } = parseStreamOutput(lines.join(''));
+      expect(done).toBe(1);
+      const signatureChunks = payloads.filter((p) => p.choices?.[0]?.delta?.reasoning_details);
+      expect(signatureChunks.length).toBe(1);
+      expect(signatureChunks[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+        { type: 'reasoning.text', text: '', signature: 'sig-only' },
+      ]);
+    } finally {
+      config.proxyEmptyContentFailEnabled = originalEmptyContentFail;
+    }
+  });
+
+  it('B1: writes the buffered signature chunk before finish_reason and [DONE] (order guarantee)', async () => {
+    const lines: string[] = [];
+    const reader = makeReader([
+      dataFrame({ id: 'cmpl-b1-order', model: 'gpt-5', choices: [{ index: 0, delta: { reasoning_signature: 'sig-b1-order' }, finish_reason: null }] }),
+      dataFrame({ id: 'cmpl-b1-order', model: 'gpt-5', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      DONE_FRAME,
+    ]);
+
+    const session = createChatProxyStreamSession({
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5',
+      successfulUpstreamPath: '/v1/chat/completions',
+      includeUsage: false,
+      writeLines: (next) => { lines.push(...next); },
+      writeRaw: () => {},
+    });
+
+    const result = await session.run(reader as any, { end() {} });
+    expect(result.status).toBe('completed');
+
+    const output = lines.join('');
+    const detailIdx = output.indexOf('"reasoning_details"');
+    const finishIdx = output.indexOf('finish_reason":"stop"');
+    const doneIdx = output.indexOf('[DONE]');
+    expect(detailIdx).toBeGreaterThan(-1);
+    expect(finishIdx).toBeGreaterThan(-1);
+    expect(doneIdx).toBeGreaterThan(-1);
+    // reasoning_details precedes the finish_reason frame, which precedes [DONE].
+    expect(detailIdx).toBeLessThan(finishIdx);
+    expect(finishIdx).toBeLessThan(doneIdx);
+    // Exactly one reasoning_details chunk carries the buffered signature.
+    const { payloads } = parseStreamOutput(output);
+    const signatureChunks = payloads.filter((p) => p.choices?.[0]?.delta?.reasoning_details);
+    expect(signatureChunks.length).toBe(1);
+    expect(signatureChunks[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+      { type: 'reasoning.text', text: '', signature: 'sig-b1-order' },
+    ]);
+  });
+
+  it('B1: flushes a buffered signature before [DONE] on premature finalize (stream ends without finish_reason)', async () => {
+    const originalEmptyContentFail = config.proxyEmptyContentFailEnabled;
+    // Enable the interceptor so the buffered-signature guard is exercised on
+    // the premature-finalize path (no finish_reason frame, direct [DONE]).
+    config.proxyEmptyContentFailEnabled = true;
+    try {
+      const lines: string[] = [];
+      const reader = makeReader([
+        dataFrame({ id: 'cmpl-b1-eof', model: 'gpt-5', choices: [{ index: 0, delta: { reasoning_signature: 'sig-b1-eof' }, finish_reason: null }] }),
+        DONE_FRAME,
+      ]);
+
+      const session = createChatProxyStreamSession({
+        downstreamFormat: 'openai',
+        modelName: 'gpt-5',
+        successfulUpstreamPath: '/v1/chat/completions',
+        includeUsage: false,
+        writeLines: (next) => { lines.push(...next); },
+        writeRaw: () => {},
+      });
+
+      const result = await session.run(reader as any, { end() {} });
+      // The buffered signature is meaningful output: must not be killed by the
+      // empty-content interceptor even though no content/tool frame arrived.
+      expect(result.status).toBe('completed');
+
+      const output = lines.join('');
+      const detailIdx = output.indexOf('"reasoning_details"');
+      const doneIdx = output.indexOf('[DONE]');
+      expect(detailIdx).toBeGreaterThan(-1);
+      expect(doneIdx).toBeGreaterThan(-1);
+      // The EOF-fallback flush (serializeStreamDone) writes the signature chunk
+      // before the [DONE] terminator.
+      expect(detailIdx).toBeLessThan(doneIdx);
+      const { payloads, done } = parseStreamOutput(output);
+      expect(done).toBe(1);
+      const signatureChunks = payloads.filter((p) => p.choices?.[0]?.delta?.reasoning_details);
+      expect(signatureChunks.length).toBe(1);
+      expect(signatureChunks[0]?.choices?.[0]?.delta?.reasoning_details).toEqual([
+        { type: 'reasoning.text', text: '', signature: 'sig-b1-eof' },
+      ]);
+    } finally {
+      config.proxyEmptyContentFailEnabled = originalEmptyContentFail;
+    }
+  });
 });

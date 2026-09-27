@@ -658,7 +658,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   // Update a site
   app.put<{ Params: { id: string }; Body: unknown }>('/api/sites/:id', async (request, reply) => {
     const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
+    if (Number.isNaN(id) || id <= 0) {
       return reply.code(400).send({ error: 'Invalid site id' });
     }
 
@@ -813,8 +813,11 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // Delete a site
-  app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
+  app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request, reply) => {
     const id = parseInt(request.params.id);
+    if (Number.isNaN(id) || id <= 0) {
+      return reply.code(400).send({ error: 'Invalid site id' });
+    }
     await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
     invalidateSiteCaches();
     return { success: true };

@@ -105,4 +105,33 @@ describe('sites batch routes', () => {
       message: 'Invalid ids. Expected number[].',
     });
   });
+
+  for (const ids of [ [0], [-1], [1, -2] ]) {
+    it(`rejects batch ids with zero/negative (${JSON.stringify(ids)}) as a whole with 400 and no partial success`, async () => {
+      // 准备正 id 站点，验证整包 400 不会误伤正 id（[1,-2] 混入不应部分成功 id 1）。
+      await db.insert(schema.sites).values([
+        { id: 1, name: 'batch-guard-site', url: 'https://batch-guard.example.com', platform: 'new-api' },
+      ]).run();
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/sites/batch',
+        payload: {
+          ids,
+          action: 'enable',
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const body = response.json() as { message?: string; failedItems?: unknown; successIds?: unknown };
+      expect(body.message).toBe('Invalid ids. Expected number[].');
+      // 整包 400：不出现 failedItems / successIds。
+      expect(body).not.toHaveProperty('failedItems');
+      expect(body).not.toHaveProperty('successIds');
+
+      // 站点未被改动（enable 未执行）。
+      const rows = await db.select().from(schema.sites).all();
+      expect(rows.every((row) => row.status === 'active')).toBe(true);
+    });
+  }
 });

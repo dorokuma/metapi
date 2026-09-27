@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-09-27
+
+### 修复
+
+- 首字节超时清理改为有界取消：`reader.cancel()` 在 body 来自 `tee()` 分支时可能永不 settle，清理路径原先无界等待会把合成 408 响应一并挂住；现统一经 `settleReaderCancelQuietly`（默认 250ms 上限，并吞掉取消失败与迟到的 rejection）。
+
 ## [1.4.3] - 2026-09-27
 
 ### 修复

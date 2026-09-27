@@ -3352,6 +3352,14 @@ export default function ProxyLogs() {
                           {billingDetailSummary}
                         </div>
                       )}
+                      {detailLog.billingDetails?.pricing && (
+                        <div style={{ color: "var(--color-text-muted)" }}>
+                          计费路径：{detailLog.billingDetails.pricing.pricingSource === 'expr' ? 'expr（公式计费）' : 'ratio（占位倍率）'}
+                          {detailLog.billingDetails.pricing.exprFallback && (
+                            <> — 回退：{detailLog.billingDetails.pricing.exprFallbackReason ?? '未知原因'}</>
+                          )}
+                        </div>
+                      )}
                       <MobileField
                         label="客户端详情"
                         value={renderProxyLogClientCell(detailLog, {
@@ -3807,6 +3815,18 @@ export default function ProxyLogs() {
                                         }}
                                       >
                                         {billingDetailSummary}
+                                      </div>
+                                    )}
+                                    {detailLog.billingDetails?.pricing && (
+                                      <div
+                                        style={{
+                                          color: "var(--color-text-muted)",
+                                        }}
+                                      >
+                                        计费路径：{detailLog.billingDetails.pricing.pricingSource === 'expr' ? 'expr（公式计费）' : 'ratio（占位倍率）'}
+                                        {detailLog.billingDetails.pricing.exprFallback && (
+                                          <> — 回退：{detailLog.billingDetails.pricing.exprFallbackReason ?? '未知原因'}</>
+                                        )}
                                       </div>
                                     )}
                                     <div

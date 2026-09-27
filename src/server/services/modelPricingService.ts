@@ -762,8 +762,12 @@ function buildExprBreakdown(
   // len is the raw context length used only for tier selection. When cache tokens are
   // tracked separately (Claude-style, promptTokensIncludeCache === false) the reported
   // prompt excludes them, so the true input context is prompt + cacheRead + cacheCreation.
-  // Otherwise the reported prompt already includes cache (or is unknown); fall back to
-  // total tokens when the prompt is missing.
+  // When promptTokensIncludeCache is true (or unknown/null), the reported prompt is assumed
+  // to already include cache tokens — this is the common case for non-Anthropic providers.
+  // Known approximation: some upstreams may still report a prompt that only partially
+  // includes cache; in that case len may be slightly understated and tier selection can
+  // pick a lower tier than the true context warrants. The ratio fallback path has the same
+  // limitation because it does not use len at all.
   let len: number;
   if (normalizedUsage.promptTokensIncludeCache === false) {
     len = normalizedUsage.promptTokens

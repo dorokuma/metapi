@@ -246,6 +246,12 @@ function getCacheCreationTokens(record: Record<string, unknown>): number {
  * Returns 0 when the 1h share is not separately reported (cannot be distinguished from
  * the 5m share), in which case cc1h stays 0 and the 1h cost folds into the standard
  * cache-creation figure.
+ *
+ * Field sources (first positive value wins within each group):
+ *  - cache_creation.ephemeral_1h_input_tokens
+ *  - cacheCreation.ephemeral1hInputTokens
+ *  - claude_cache_creation_1_h_tokens
+ *  - claudeCacheCreation1hTokens
  */
 function getCacheCreationTokens1h(record: Record<string, unknown>): number {
   return Math.max(

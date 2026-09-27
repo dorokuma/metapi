@@ -12,6 +12,7 @@ const GPT_6_SOL = 'len <= 272000 ? tier("0_272k", p * 2 + cr * 0.2 + cc * 2.5 + 
 const GPT_5_6_SOL = 'len <= 272000 ? tier("0_272k", p * 5 + c * 30 + cr * 0.5 + cc * 6.25) : tier("272k_plus", p * 10 + c * 45 + cr * 1 + cc * 12.5)';
 const CLAUDE_OPUS_55 = 'tier("standard", p * 4 + cr * 0.2 + cc * 5 + cc1h * 8 + c * 20)';
 const DEEPSEEK_PRO = '(tier("base", p * 4.5 + c * 13.5 + cr * 0.15)) * (hour("UTC") >= 1 && hour("UTC") < 4 ? 2 : 1) * (hour("UTC") >= 6 && hour("UTC") < 10 ? 2 : 1)';
+const PEAK_HOUR_TIERED = 'len <= 200000 ? tier("0_200k", p * 2 + c * 6 + cr * 0.3) * (hour("UTC") >= 9 && hour("UTC") < 18 ? 1.5 : 1) : tier("200k_plus", p * 4 + c * 12 + cr * 0.6) * (hour("UTC") >= 9 && hour("UTC") < 18 ? 1.5 : 1)';
 const GROK_45 = 'len <= 200000 ? tier("0_200k", p * 2 + c * 6 + cr * 0.3) : tier("200k_plus", p * 4 + c * 12 + cr * 0.6)';
 
 function evalExpr(source: string, ctx: BillingExprContext): number {
@@ -63,6 +64,19 @@ describe('billingExpr — parse + evaluate (real upstream samples)', () => {
     expect(evalExpr(DEEPSEEK_PRO, { p: 1, now: utcDate(2024, 0, 1, 12) })).toBeCloseTo(4.5, 10);
     // hour 0 UTC: 0 >= 1 false -> out of [1,4) -> base
     expect(evalExpr(DEEPSEEK_PRO, { p: 1, now: utcDate(2024, 0, 1, 0) })).toBeCloseTo(4.5, 10);
+  });
+
+  it('selects len tier and applies hour multiplier together (real upstream sample)', () => {
+    // Below 200k, off-peak (UTC 4): base tier, no peak multiplier.
+    expect(evalExpr(PEAK_HOUR_TIERED, { p: 1, c: 1, cr: 0, len: 100_000, now: utcDate(2024, 0, 1, 4) })).toBeCloseTo(2 + 6, 10);
+    // Below 200k, peak (UTC 10): base tier * 1.5
+    expect(evalExpr(PEAK_HOUR_TIERED, { p: 1, c: 1, cr: 0, len: 100_000, now: utcDate(2024, 0, 1, 10) })).toBeCloseTo((2 + 6) * 1.5, 10);
+    // Above 200k, off-peak (UTC 4): 200k_plus tier, no peak multiplier.
+    expect(evalExpr(PEAK_HOUR_TIERED, { p: 1, c: 1, cr: 0, len: 300_000, now: utcDate(2024, 0, 1, 4) })).toBeCloseTo(4 + 12, 10);
+    // Above 200k, peak (UTC 10): 200k_plus tier * 1.5
+    expect(evalExpr(PEAK_HOUR_TIERED, { p: 1, c: 1, cr: 0, len: 300_000, now: utcDate(2024, 0, 1, 10) })).toBeCloseTo((4 + 12) * 1.5, 10);
+    // At boundary (len == 200000): still 0_200k (<=)
+    expect(evalExpr(PEAK_HOUR_TIERED, { p: 1, c: 0, cr: 0, len: 200_000, now: utcDate(2024, 0, 1, 10) })).toBeCloseTo(2 * 1.5, 10);
   });
 
   it('matches metapi ratio*2 semantics for the anchored gpt-5.6-sol', () => {

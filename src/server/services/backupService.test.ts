@@ -1865,4 +1865,267 @@ describe('backupService', () => {
       warnSpy.mockRestore();
     }
   });
+
+  // ─── 切片 13：导入归因（backupService）──────────────────────────────
+  // 验收：min id 赢、导出哨兵 -1 → -1、导入哨兵列 -1/null、旧备份无哨兵字段 → null、
+  //       导出不含裸 id、checkpoint 重置。
+
+  it('import: duplicate site identity keys resolve to min positive id; non-positive ids skipped before comparison (min-id win, sentinel-safe)', async () => {
+    const now = '2026-03-01T00:00:00.000Z';
+    // 当前 DB：一个站点（platform+url origin 与备份 dup key 相同）+ 一个引用它的 proxyLog
+    const localSite = await db.insert(schema.sites).values({
+      name: 'local-dup', url: 'https://dup.example.com', platform: 'new-api',
+      apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+      externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values({
+      siteId: localSite.id, modelRequested: 'gpt-4o', modelActual: 'gpt-4o',
+      status: 'success', totalTokens: 100, createdAt: now,
+    }).run();
+
+    // 两个备份站点同 key（同 platform + origin），但 url 不同（尾斜杠差异）避免 UNIQUE 冲突。
+    const mkSite = (id: number, url: string) => ({
+      id, name: `dup-${id}`, url, platform: 'new-api',
+      apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+      externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+      createdAt: now, updatedAt: now,
+    });
+    // 大 id（10）在前，小 id（5）在后，验证不依赖行序。哨兵 -1 也加入（同 key，url 变体）。
+    const payload = {
+      timestamp: Date.now(),
+      accounts: {
+        sites: [
+          mkSite(10, 'https://dup.example.com/'),
+          mkSite(-1, 'https://dup.example.com//'),
+          mkSite(5, 'https://dup.example.com'),
+        ],
+        accounts: [], accountTokens: [], tokenRoutes: [], routeChannels: [], routeGroupSources: [],
+      },
+    } as Record<string, unknown>;
+
+    await backupService.importBackup(payload);
+
+    const restoredLog = await db.select().from(schema.proxyLogs).get();
+    // 哨兵 -1 不得赢过正 id；重复正 id 取较小者（5），不依赖行序。
+    expect(restoredLog?.siteId).toBe(5);
+  });
+
+  it('roundtrip: proxyLog site sentinel -1 round-trips to column -1; real id resolves to target; null stays null', async () => {
+    const now = '2026-03-01T00:00:00.000Z';
+    // 当前 DB：一个真实站点
+    const realSite = await db.insert(schema.sites).values({
+      name: 'real-site', url: 'https://real.example.com', platform: 'new-api',
+      apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+      externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    // 三条 proxyLog：哨兵 -1、真实站点、null（三列均 null）
+    await db.insert(schema.proxyLogs).values([
+      { siteId: -1, modelSiteId: -1, credentialSiteId: -1, modelRequested: 'gpt-a', modelActual: 'gpt-a', status: 'success', totalTokens: 10, createdAt: now },
+      { siteId: realSite.id, modelSiteId: realSite.id, credentialSiteId: realSite.id, modelRequested: 'gpt-b', modelActual: 'gpt-b', status: 'success', totalTokens: 20, createdAt: now },
+      { modelRequested: 'gpt-c', modelActual: 'gpt-c', status: 'success', totalTokens: 30, createdAt: now },
+    ]).run();
+
+    // 备份：包含真实站点（同 platform+url，同 id）
+    const payload = {
+      timestamp: Date.now(),
+      accounts: {
+        sites: [{
+          id: realSite.id, name: 'real-site', url: 'https://real.example.com', platform: 'new-api',
+          apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+          externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+          createdAt: now, updatedAt: now,
+        }],
+        accounts: [], accountTokens: [], tokenRoutes: [], routeChannels: [], routeGroupSources: [],
+      },
+    } as Record<string, unknown>;
+
+    await backupService.importBackup(payload);
+
+    const logs = await db.select().from(schema.proxyLogs).all();
+    const byTokens = (n: number) => logs.find((l) => l.totalTokens === n)!;
+
+    // 导出哨兵：-1 → -1（不是 -1 那行的键）；导入哨兵：列 -1
+    expect(byTokens(10).siteId).toBe(-1);
+    expect(byTokens(10).modelSiteId).toBe(-1);
+    expect(byTokens(10).credentialSiteId).toBe(-1);
+
+    // 导入哨兵：正 id 命中写目标 id
+    expect(byTokens(20).siteId).toBe(realSite.id);
+    expect(byTokens(20).modelSiteId).toBe(realSite.id);
+    expect(byTokens(20).credentialSiteId).toBe(realSite.id);
+
+    // 导入哨兵：null → 列 null（含旧备份无哨兵字段）
+    expect(byTokens(30).siteId).toBeNull();
+    expect(byTokens(30).modelSiteId).toBeNull();
+    expect(byTokens(30).credentialSiteId).toBeNull();
+  });
+
+  it('import: resets usage projection checkpoint to zero watermark before commit', async () => {
+    const now = '2026-03-01T00:00:00.000Z';
+    const site = await db.insert(schema.sites).values({
+      name: 'site', url: 'https://site.example.com', platform: 'new-api',
+      apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+      externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values({
+      siteId: site.id, modelRequested: 'gpt-4o', modelActual: 'gpt-4o',
+      status: 'success', totalTokens: 100, createdAt: now,
+    }).run();
+
+    // 设置一个非零水位的 checkpoint（先删旧行避免 PRIMARY KEY 冲突）
+    await db.delete(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, 'usage-aggregates-v1')).run();
+    await db.insert(schema.analyticsProjectionCheckpoints).values({
+      projectorKey: 'usage-aggregates-v1',
+      lastProxyLogId: 999,
+      watermarkCreatedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const payload = {
+      timestamp: Date.now(),
+      accounts: {
+        sites: [{
+          id: site.id, name: 'site', url: 'https://site.example.com', platform: 'new-api',
+          apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+          externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+          createdAt: now, updatedAt: now,
+        }],
+        accounts: [], accountTokens: [], tokenRoutes: [], routeChannels: [], routeGroupSources: [],
+      },
+    } as Record<string, unknown>;
+
+    await backupService.importBackup(payload);
+
+    // 验证：checkpoint 已重置为零水位（导入 commit 后下一 pass 从 0 全量重扫）
+    const checkpoint = await db.select().from(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, 'usage-aggregates-v1')).get();
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint!.lastProxyLogId).toBe(0);
+    expect(checkpoint!.watermarkCreatedAt).toBeNull();
+  });
+
+  it('export snapshot: proxyLogs contains no bare id, all seven keys present; checkinLogs/siteAnnouncements/nonManualAvailability same', async () => {
+    // 造一条站点 + 一条带满七列的 proxyLog
+    const now = '2026-04-01T00:00:00.000Z';
+    const site = await db.insert(schema.sites).values({
+      name: 'site', url: 'https://site.example.com', platform: 'new-api',
+      apiKey: null, status: 'active', isPinned: false, sortOrder: 0, globalWeight: 1,
+      externalCheckinUrl: null, useSystemProxy: false, customHeaders: null,
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id, accessToken: 'acc-tok', status: 'active',
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id, name: 'tok-1', token: 'tok-abc', valueStatus: 'ready',
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o', enabled: true,
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id, accountId: account.id, tokenId: token.id,
+      enabled: true, createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    const apiKey = await db.insert(schema.downstreamApiKeys).values({
+      name: 'key-1', key: 'sk-xyz', enabled: true,
+      createdAt: now, updatedAt: now,
+    }).returning().get();
+
+    // 一条带满七列的 proxyLog（siteId / modelSiteId / credentialSiteId 均指向 site.id）
+    await db.insert(schema.proxyLogs).values({
+      siteId: site.id,
+      modelSiteId: site.id,
+      credentialSiteId: site.id,
+      routeId: route.id,
+      channelId: channel.id,
+      accountId: account.id,
+      downstreamApiKeyId: apiKey.id,
+      modelRequested: 'gpt-4o', modelActual: 'gpt-4o',
+      status: 'success', totalTokens: 100, createdAt: now,
+    }).run();
+
+    // 一条 checkinLog
+    await db.insert(schema.checkinLogs).values({
+      accountId: account.id, status: 'success', createdAt: now,
+    }).run();
+
+    // 一条 siteAnnouncement
+    await db.insert(schema.siteAnnouncements).values({
+      siteId: site.id, platform: 'new-api', sourceKey: 'ann-1',
+      title: 't', content: 'hello',
+    }).run();
+
+    // 一条 nonManual modelAvailability（isManual=false）
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id, modelName: 'gpt-4o', isManual: false,
+    }).run();
+
+    // 一条 tokenModelAvailability
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id, modelName: 'gpt-4o', available: true,
+    }).run();
+
+    // 调用 forTests 导出
+    const snapshot = await backupService.__collectCurrentRuntimeStateSnapshotForTests();
+
+    // --- proxyLogs：七裸 id 缺席、七键在场 ---
+    expect(snapshot.proxyLogs).toHaveLength(1);
+    const pl = snapshot.proxyLogs[0]!;
+    expect(pl).not.toHaveProperty('accountId');
+    expect(pl).not.toHaveProperty('routeId');
+    expect(pl).not.toHaveProperty('channelId');
+    expect(pl).not.toHaveProperty('downstreamApiKeyId');
+    expect(pl).not.toHaveProperty('siteId');
+    expect(pl).not.toHaveProperty('modelSiteId');
+    expect(pl).not.toHaveProperty('credentialSiteId');
+    expect(pl).toHaveProperty('accountKey');
+    expect(pl).toHaveProperty('routeKey');
+    expect(pl).toHaveProperty('channelKey');
+    expect(pl).toHaveProperty('downstreamApiKeyKey');
+    expect(pl).toHaveProperty('siteKey');
+    expect(pl).toHaveProperty('modelSiteKey');
+    expect(pl).toHaveProperty('credentialSiteKey');
+
+    // --- checkinLogs：accountId 缺席、accountKey 在场 ---
+    expect(snapshot.checkinLogs).toHaveLength(1);
+    const cl = snapshot.checkinLogs[0]!;
+    expect(cl).not.toHaveProperty('accountId');
+    expect(cl).toHaveProperty('accountKey');
+
+    // --- siteAnnouncements：siteId 缺席、siteKey 在场 ---
+    expect(snapshot.siteAnnouncements).toHaveLength(1);
+    const sa = snapshot.siteAnnouncements[0]!;
+    expect(sa).not.toHaveProperty('siteId');
+    expect(sa).toHaveProperty('siteKey');
+
+    // --- nonManualAvailability：accountId 缺席、accountKey 在场 ---
+    expect(snapshot.nonManualAvailability).toHaveLength(1);
+    const ma = snapshot.nonManualAvailability[0]!;
+    expect(ma).not.toHaveProperty('accountId');
+    expect(ma).toHaveProperty('accountKey');
+
+    // --- tokenAvailability：tokenId 缺席、tokenKey 在场（值=该 token 的身份键字符串） ---
+    expect(snapshot.tokenAvailability).toHaveLength(1);
+    const ta = snapshot.tokenAvailability[0]!;
+    expect(ta).not.toHaveProperty('tokenId');
+    expect(ta).toHaveProperty('tokenKey');
+    expect(typeof ta.tokenKey).toBe('string');
+    expect(ta.tokenKey.length).toBeGreaterThan(0);
+  });
 });

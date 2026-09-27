@@ -4,11 +4,16 @@ import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
+import { getResolvedTimeZone } from './localTimeService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { resetLegacyNotificationTemplateMigrationFlag } from './notificationTemplates.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
 
 const BACKUP_VERSION = '2.1';
+
+// 用量投影 checkpoint 的 projector key（与 usageAggregationService 的 USAGE_PROJECTOR_KEY 一致）。
+// 导入事务内用它定位并重置水位，使下次投影从 0 全量重扫重建聚合（§11.6）。
+const USAGE_PROJECTION_CHECKPOINT_KEY = 'usage-aggregates-v1';
 
 export type BackupExportType = 'all' | 'accounts' | 'preferences';
 
@@ -167,27 +172,44 @@ type RouteChannelRuntimeSnapshot = Pick<RouteChannelRow,
   | 'cooldownUntil'
 >;
 
-type ProxyLogSnapshot = ProxyLogRow & {
-  accountKey: string | null;
-  routeKey: string | null;
-  channelKey: string | null;
-  downstreamApiKeyKey: string | null;
+// 快照身份键的三态编码值：哨兵 -1 字面直通 / null / 身份键字符串。
+// 见 §9.4：存储 -1 → 快照 -1；null → null；正 id → 键表查得字符串（未命中 null）；其它非正 → null。
+type EncodedIdentityKey = string | -1 | null;
+
+// 导出侧「裸值清除」：带裸 id 的快照类型用 Omit 剔除对应裸 id 列，只保留身份键，
+// 避免 {...row} 把裸 id 一起带进备份。裸 id 与身份键一一对应（七键口径）。
+type ProxyLogSnapshot = Omit<ProxyLogRow,
+  'accountId'
+  | 'routeId'
+  | 'channelId'
+  | 'downstreamApiKeyId'
+  | 'siteId'
+  | 'modelSiteId'
+  | 'credentialSiteId'
+> & {
+  accountKey: EncodedIdentityKey;
+  routeKey: EncodedIdentityKey;
+  channelKey: EncodedIdentityKey;
+  downstreamApiKeyKey: EncodedIdentityKey;
+  siteKey: EncodedIdentityKey;
+  modelSiteKey: EncodedIdentityKey;
+  credentialSiteKey: EncodedIdentityKey;
 };
 
-type CheckinLogSnapshot = CheckinLogRow & {
-  accountKey: string | null;
+type CheckinLogSnapshot = Omit<CheckinLogRow, 'accountId'> & {
+  accountKey: EncodedIdentityKey;
 };
 
-type SiteAnnouncementSnapshot = SiteAnnouncementRow & {
-  siteKey: string | null;
+type SiteAnnouncementSnapshot = Omit<SiteAnnouncementRow, 'siteId'> & {
+  siteKey: EncodedIdentityKey;
 };
 
-type ModelAvailabilitySnapshot = ModelAvailabilityRow & {
-  accountKey: string | null;
+type ModelAvailabilitySnapshot = Omit<ModelAvailabilityRow, 'accountId'> & {
+  accountKey: EncodedIdentityKey;
 };
 
-type TokenModelAvailabilitySnapshot = TokenModelAvailabilityRow & {
-  tokenKey: string | null;
+type TokenModelAvailabilitySnapshot = Omit<TokenModelAvailabilityRow, 'tokenId'> & {
+  tokenKey: EncodedIdentityKey;
 };
 
 type DownstreamApiKeyRuntimeSnapshot = Pick<DownstreamApiKeyRow, 'usedCost' | 'usedRequests' | 'lastUsedAt'>;
@@ -384,6 +406,54 @@ function buildRouteChannelIdentityKey(
   return [routeKey, accountKey, tokenKey, asString(row.sourceModel)].join('::');
 }
 
+/**
+ * 三态编码（导出侧，七键同一套，§9.4）：
+ *   存储 -1      → 快照字面 -1（哨兵直通，不查键表）
+ *   null / undefined → null
+ *   正 id          → 键表查得字符串；未命中 → null + debug
+ *   其它非正（0、负且≠-1）→ null + debug（写域不会写，防御性，不得编码成 -1）
+ */
+function encodeIdentityKey(
+  rawValue: number | null | undefined,
+  keyById: Map<number, string>,
+  label: string,
+): EncodedIdentityKey {
+  if (rawValue === null || rawValue === undefined) return null;
+  if (rawValue === -1) return -1; // 哨兵直通，不查键表
+  if (rawValue > 0) {
+    const key = keyById.get(rawValue);
+    if (!key) {
+      console.debug(`[backup] ${label}: stored id ${rawValue} has no identity key; encoded as null`);
+      return null;
+    }
+    return key;
+  }
+  // 其它非正（0、负且 ≠ -1）：写域不应出现，防御性降级为 null。
+  console.debug(`[backup] ${label}: unexpected non-positive stored id ${rawValue}; encoded as null`);
+  return null;
+}
+
+/**
+ * 三态解码（导入侧，七键同一套，§9.2）：
+ *   键 -1   → 列写 -1（哨兵直通，不查 id 表）
+ *   键 null  → 列写 null（含旧备份无此字段）
+ *   其它     → idByKey.get(key) 命中写目标 id；未命中写 null + debug
+ */
+function decodeIdentityKey(
+  key: EncodedIdentityKey,
+  idByKey: Map<string, number>,
+  label: string,
+): number | null {
+  if (key === -1) return -1; // 哨兵直通，不查 id 表
+  if (key == null) return null; // null 或 undefined（旧备份无此字段）
+  const id = idByKey.get(key);
+  if (id == null) {
+    console.debug(`[backup] ${label}: key ${key} not found; decoded as null`);
+    return null;
+  }
+  return id;
+}
+
 function buildRuntimeIdentityIndexesFromSection(section: AccountsBackupSection): RuntimeIdentityIndexes {
   const siteKeyById = new Map<number, string>();
   const siteIdByKey = new Map<string, number>();
@@ -397,9 +467,23 @@ function buildRuntimeIdentityIndexesFromSection(section: AccountsBackupSection):
   const channelIdByKey = new Map<string, number>();
 
   for (const row of section.sites) {
+    // 哨兵防御：先跳过非正 id，再参与 min-id 比较（防哨兵 -1 赢过正 id）。
+    if (row.id <= 0) continue;
     const siteKey = buildSiteIdentityKey(row);
+    // id → key 始终有效（用于导出编码）。
     siteKeyById.set(row.id, siteKey);
-    siteIdByKey.set(siteKey, row.id);
+    // key → id 取 min id：重复 key 时保留较小 id，调试记录重复。
+    const existingId = siteIdByKey.get(siteKey);
+    if (existingId != null) {
+      console.debug(
+        `[backup] duplicate site identity key on import (${siteKey}); keeping min id ${Math.min(existingId, row.id)}`,
+      );
+      if (row.id < existingId) {
+        siteIdByKey.set(siteKey, row.id);
+      }
+    } else {
+      siteIdByKey.set(siteKey, row.id);
+    }
   }
 
   for (const row of section.accounts) {
@@ -472,7 +556,7 @@ async function collectCurrentRuntimeStateSnapshot(): Promise<RuntimeStateSnapsho
     tokenModelAvailability,
     downstreamApiKeys,
   ] = await Promise.all([
-    db.select().from(schema.sites).all() as Promise<SiteRow[]>,
+    db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all() as Promise<SiteRow[]>,
     db.select().from(schema.accounts).all() as Promise<AccountRow[]>,
     db.select().from(schema.accountTokens).all() as Promise<AccountTokenRow[]>,
     db.select().from(schema.tokenRoutes).all() as Promise<TokenRouteRow[]>,
@@ -487,6 +571,8 @@ async function collectCurrentRuntimeStateSnapshot(): Promise<RuntimeStateSnapsho
 
   const siteKeyById = new Map<number, string>();
   for (const row of sites) {
+    // 跳过非正 id（哨兵防御，与导入侧 buildRuntimeIdentityIndexesFromSection 策略一致）。
+    if (row.id <= 0) continue;
     siteKeyById.set(row.id, buildSiteIdentityKey(row));
   }
 
@@ -567,33 +653,66 @@ async function collectCurrentRuntimeStateSnapshot(): Promise<RuntimeStateSnapsho
   return {
     accountRuntimeByKey,
     routeChannelRuntimeByKey,
-    siteAnnouncements: siteAnnouncements.map((row) => ({
-      ...row,
-      siteKey: siteKeyById.get(row.siteId) || null,
-    })),
+    siteAnnouncements: siteAnnouncements.map((row) => {
+      // 裸值清除：解构剔除裸 siteId，只保留身份键（非事后覆盖）。
+      const { siteId, ...rest } = row;
+      return {
+        ...rest,
+        siteKey: encodeIdentityKey(siteId, siteKeyById, 'siteKey'),
+      };
+    }),
     nonManualAvailability: modelAvailability
       .filter((row) => !row.isManual)
-      .map((row) => ({
-        ...row,
-        accountKey: accountKeyById.get(row.accountId) || null,
-      })),
-    tokenAvailability: tokenModelAvailability.map((row) => ({
-      ...row,
-      tokenKey: tokenKeyById.get(row.tokenId) || null,
-    })),
+      .map((row) => {
+        // 裸值清除：解构剔除裸 accountId，只保留身份键。
+        const { accountId, ...rest } = row;
+        return {
+          ...rest,
+          accountKey: encodeIdentityKey(accountId, accountKeyById, 'accountKey'),
+        };
+      }),
+    tokenAvailability: tokenModelAvailability.map((row) => {
+      // 裸值清除：解构剔除裸 tokenId，只保留身份键（§9.1，同七键机制）。
+      const { tokenId, ...rest } = row;
+      return {
+        ...rest,
+        tokenKey: encodeIdentityKey(tokenId, tokenKeyById, 'tokenKey'),
+      };
+    }),
     downstreamApiKeyRuntimeByKey,
     downstreamApiKeyIdByKey,
-    proxyLogs: proxyLogs.map((row) => ({
-      ...row,
-      accountKey: row.accountId ? (accountKeyById.get(row.accountId) || null) : null,
-      routeKey: row.routeId ? (routeKeyById.get(row.routeId) || null) : null,
-      channelKey: row.channelId ? (channelKeyById.get(row.channelId) || null) : null,
-      downstreamApiKeyKey: row.downstreamApiKeyId ? (downstreamApiKeyKeyById.get(row.downstreamApiKeyId) || null) : null,
-    })),
-    checkinLogs: checkinLogs.map((row) => ({
-      ...row,
-      accountKey: accountKeyById.get(row.accountId) || null,
-    })),
+    proxyLogs: proxyLogs.map((row) => {
+      // 裸值清除：解构剔除七键对应的裸 id，只保留身份键（§9.1，非事后覆盖）。
+      const {
+        accountId,
+        routeId,
+        channelId,
+        downstreamApiKeyId,
+        siteId,
+        modelSiteId,
+        credentialSiteId,
+        ...rest
+      } = row;
+      return {
+        ...rest,
+        accountKey: encodeIdentityKey(accountId, accountKeyById, 'accountKey'),
+        routeKey: encodeIdentityKey(routeId, routeKeyById, 'routeKey'),
+        channelKey: encodeIdentityKey(channelId, channelKeyById, 'channelKey'),
+        downstreamApiKeyKey: encodeIdentityKey(downstreamApiKeyId, downstreamApiKeyKeyById, 'downstreamApiKeyKey'),
+        // 三站点向键共用同一 sites 键表（均引用 sites.id），三态编码同一套（§9.4）。
+        siteKey: encodeIdentityKey(siteId, siteKeyById, 'siteKey'),
+        modelSiteKey: encodeIdentityKey(modelSiteId, siteKeyById, 'modelSiteKey'),
+        credentialSiteKey: encodeIdentityKey(credentialSiteId, siteKeyById, 'credentialSiteKey'),
+      };
+    }),
+    checkinLogs: checkinLogs.map((row) => {
+      // 裸值清除：解构剔除裸 accountId，只保留身份键。
+      const { accountId, ...rest } = row;
+      return {
+        ...rest,
+        accountKey: encodeIdentityKey(accountId, accountKeyById, 'accountKey'),
+      };
+    }),
   };
 }
 
@@ -1759,9 +1878,11 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     }
 
     for (const row of runtimeState.nonManualAvailability) {
-      if (!row.accountKey) continue;
-      const accountId = importedIndexes.accountIdByKey.get(row.accountKey);
+      const accountId = decodeIdentityKey(row.accountKey, importedIndexes.accountIdByKey, 'accountKey');
       if (!accountId) continue;
+      // accountKey 必须是字符串身份键（modelAvailability 非哨兵列，-1 不适用）；
+      // 哨兵 -1 / null 在此防御性跳过，并把类型收窄为 string。
+      if (typeof row.accountKey !== 'string') continue;
       const modelKey = buildModelAvailabilityIdentityKey(row.accountKey, row.modelName);
       if (importedManualModelKeys.has(modelKey)) continue;
 
@@ -1776,9 +1897,9 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     }
 
     for (const row of runtimeState.tokenAvailability) {
-      if (!row.tokenKey) continue;
-      const tokenId = importedIndexes.tokenIdByKey.get(row.tokenKey);
-      if (!tokenId) continue;
+      // 三态解码（§9.2）：-1 原样返回、由守卫跳过（本域无哨兵，防御）；null/undefined → 跳过；正 id → 查表命中即插、未命中跳过。
+      const tokenId = decodeIdentityKey(row.tokenKey, importedIndexes.tokenIdByKey, 'tokenKey');
+      if (typeof tokenId !== 'number' || tokenId <= 0) continue;
 
       await tx.insert(schema.tokenModelAvailability).values({
         tokenId,
@@ -1791,7 +1912,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
 
     for (const row of runtimeState.siteAnnouncements) {
       if (!row.siteKey) continue;
-      const siteId = importedIndexes.siteIdByKey.get(row.siteKey);
+      const siteId = decodeIdentityKey(row.siteKey, importedIndexes.siteIdByKey, 'siteKey');
       if (!siteId) continue;
 
       await tx.insert(schema.siteAnnouncements).values({
@@ -1850,12 +1971,15 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     }
 
     for (const row of runtimeState.proxyLogs) {
-      const accountId = row.accountKey ? (importedIndexes.accountIdByKey.get(row.accountKey) ?? null) : null;
-      const routeId = row.routeKey ? (importedIndexes.routeIdByKey.get(row.routeKey) ?? null) : null;
-      const channelId = row.channelKey ? (importedIndexes.channelIdByKey.get(row.channelKey) ?? null) : null;
-      const downstreamApiKeyId = row.downstreamApiKeyKey
-        ? (downstreamApiKeyIdByKey.get(row.downstreamApiKeyKey) ?? null)
-        : null;
+      // 三态解码（§9.2）：键 -1 → 列 -1（哨兵直通）；null → null；其它 → idByKey 查得目标 id（未命中 null + debug）。
+      const accountId = decodeIdentityKey(row.accountKey, importedIndexes.accountIdByKey, 'accountKey');
+      const routeId = decodeIdentityKey(row.routeKey, importedIndexes.routeIdByKey, 'routeKey');
+      const channelId = decodeIdentityKey(row.channelKey, importedIndexes.channelIdByKey, 'channelKey');
+      const downstreamApiKeyId = decodeIdentityKey(row.downstreamApiKeyKey, downstreamApiKeyIdByKey, 'downstreamApiKeyKey');
+      // 三站点向列：导入写回目标库 sites.id（§9.2）；未命中/哨兵缺失写 null。
+      const siteId = decodeIdentityKey(row.siteKey, importedIndexes.siteIdByKey, 'siteKey');
+      const modelSiteId = decodeIdentityKey(row.modelSiteKey, importedIndexes.siteIdByKey, 'modelSiteKey');
+      const credentialSiteId = decodeIdentityKey(row.credentialSiteKey, importedIndexes.siteIdByKey, 'credentialSiteKey');
 
       await tx.insert(schema.proxyLogs).values({
         id: row.id,
@@ -1863,6 +1987,9 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         channelId,
         accountId,
         downstreamApiKeyId,
+        siteId,
+        modelSiteId,
+        credentialSiteId,
         modelRequested: row.modelRequested ?? null,
         modelActual: row.modelActual ?? null,
         status: row.status ?? null,
@@ -1884,7 +2011,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     }
 
     for (const row of runtimeState.checkinLogs) {
-      const accountId = row.accountKey ? importedIndexes.accountIdByKey.get(row.accountKey) : undefined;
+      const accountId = decodeIdentityKey(row.accountKey, importedIndexes.accountIdByKey, 'accountKey');
       if (!accountId) continue;
 
       await tx.insert(schema.checkinLogs).values({
@@ -1896,6 +2023,23 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         createdAt: row.createdAt,
       }).run();
     }
+
+    // 用量投影 checkpoint 重置（§11.6 / F10）：导入清空了目标库数据并重新插入 proxyLogs，
+    // 旧 checkpoint 的 lastProxyLogId 水位指向已不存在的旧 log id，直接保留会让下一 pass
+    // 漏扫新插入的日志。事务内（commit 前）DELETE 该 projector 行并重建哨兵（lastProxyLogId=0），
+    // 使下一次投影从 0 全量重扫重建聚合；不在请求线程跑全量投影。只动 'usage-aggregates-v1'，
+    // 不删其它 projector；插入失败让事务回滚（fail-fast，不静默降级）。
+    await tx.delete(schema.analyticsProjectionCheckpoints)
+      .where(eq(schema.analyticsProjectionCheckpoints.projectorKey, USAGE_PROJECTION_CHECKPOINT_KEY))
+      .run();
+    const checkpointNowIso = new Date().toISOString();
+    await tx.insert(schema.analyticsProjectionCheckpoints).values({
+      projectorKey: USAGE_PROJECTION_CHECKPOINT_KEY,
+      timeZone: getResolvedTimeZone(),
+      lastProxyLogId: 0,
+      createdAt: checkpointNowIso,
+      updatedAt: checkpointNowIso,
+    }).run();
   });
 }
 
@@ -2144,4 +2288,10 @@ export async function reloadBackupWebdavScheduler() {
 
 export function __resetBackupWebdavSchedulerForTests() {
   stopBackupWebdavScheduler();
+}
+
+// 仅测试用：直接转发 collectCurrentRuntimeStateSnapshot，不改其内部逻辑。
+// 用于守护「导出对象不含任一裸 id」的验收句。
+export async function __collectCurrentRuntimeStateSnapshotForTests() {
+  return collectCurrentRuntimeStateSnapshot();
 }

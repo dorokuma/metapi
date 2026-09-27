@@ -442,6 +442,8 @@ export type ProxyLogBillingDetails = {
     totalTokens: number;
     cacheReadTokens: number;
     cacheCreationTokens: number;
+    /** 1h-TTL cache-creation tokens (drives expr cc1h); 0 when untracked. */
+    cacheCreationTokens1h?: number;
     billablePromptTokens: number;
     promptTokensIncludeCache: boolean | null;
   };
@@ -451,16 +453,28 @@ export type ProxyLogBillingDetails = {
     cacheRatio: number;
     cacheCreationRatio: number;
     groupRatio: number;
+    /** Which pricing path produced this cost: 'ratio' or 'expr'. */
+    pricingSource?: 'ratio' | 'expr';
+    /** Raw billing expression actually used, for audit. null when the ratio path was used. */
+    billingExpr?: string | null;
+    /** True when a billing_expr was present but the ratio path was used instead. */
+    exprFallback?: boolean;
+    /** Human-readable reason for the ratio fallback. */
+    exprFallbackReason?: string;
   };
   breakdown: {
     inputPerMillion: number;
     outputPerMillion: number;
     cacheReadPerMillion: number;
     cacheCreationPerMillion: number;
+    /** 1h cache-creation per-M coefficient (expr models with cc1h tracking only). */
+    cc1hPerMillion?: number;
     inputCost: number;
     outputCost: number;
     cacheReadCost: number;
     cacheCreationCost: number;
+    /** 1h cache-creation cost (expr models with cc1h tracking only); included in totalCost. */
+    cc1hCost?: number;
     totalCost: number;
   };
 } | null;

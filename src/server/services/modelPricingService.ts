@@ -4,6 +4,11 @@ import {
   buildNewApiCookieCandidates,
   fetchJsonWithShieldCookieRetry,
 } from './platforms/newApiShield.js';
+import {
+  evaluateBillingExpr,
+  parseBillingExpr,
+  type ParsedBillingExpr,
+} from './billingExpr.js';
 
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_FAILURE_TTL_MS = 60 * 1000;
@@ -30,6 +35,18 @@ export interface PricingModel {
   tags?: string[];
   supportedEndpointTypes?: string[];
   ownerBy?: string | null;
+  /** Which pricing path produced the model cost. 'expr' when billing_expr drives it. */
+  pricingSource?: 'ratio' | 'expr';
+  /** Raw billing expression from the upstream payload (kept for audit/debug). */
+  billingExpr?: string | null;
+  /** Compiled billing expression AST, only present when the expr path is active. */
+  pricingExpr?: ParsedBillingExpr | null;
+  /**
+   * Set when a billing_expr was present but the ratio path is used anyway (unparseable
+   * expression or unsupported billing_mode). Carries the human-readable reason so the
+   * fallback is auditable in billing_details instead of silently distorting prices.
+   */
+  pricingFallbackReason?: string | null;
 }
 
 interface PricingData {
@@ -75,6 +92,8 @@ export interface EstimateProxyCostInput {
   totalTokens?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  /** 1h-TTL cache-creation tokens, only when upstream reports them separately (drives expr cc1h). */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache?: boolean | null;
   billingPricingOverride?: ProxyBillingPricingOverride | null;
 }
@@ -88,6 +107,12 @@ interface ModelGroupPricing {
   perCallInput?: number;
   perCallOutput?: number;
   perCallTotal?: number;
+  /**
+   * True when the per-M figures come from a billing_expr evaluated at the base tier
+   * (len = 0, the lowest tier) — a static per-group estimate without concrete usage, not
+   * the exact per-request price. Set so the UI can label it as an estimate.
+   */
+  exprEstimate?: boolean;
 }
 
 interface ModelPricingCatalogEntry {
@@ -114,6 +139,8 @@ export interface ProxyBillingDetails {
     totalTokens: number;
     cacheReadTokens: number;
     cacheCreationTokens: number;
+    /** 1h-TTL cache-creation tokens (drives the expr cc1h variable); 0 when untracked. */
+    cacheCreationTokens1h: number;
     billablePromptTokens: number;
     promptTokensIncludeCache: boolean | null;
   };
@@ -123,16 +150,31 @@ export interface ProxyBillingDetails {
     cacheRatio: number;
     cacheCreationRatio: number;
     groupRatio: number;
+    /** Which pricing path produced this cost: 'ratio' or 'expr' (per-call models return null details). */
+    pricingSource: 'ratio' | 'expr';
+    /** Raw billing expression actually used, for audit. null when the ratio path was used. */
+    billingExpr?: string | null;
+    /**
+     * True when a billing_expr was present but the ratio path was used instead (silent-fallback
+     * audit). Absent on the normal ratio path (no billing_expr) and on the expr path (no fallback).
+     */
+    exprFallback?: boolean;
+    /** Human-readable reason for the ratio fallback (unparseable expr / unsupported mode / eval error). */
+    exprFallbackReason?: string;
   };
   breakdown: {
     inputPerMillion: number;
     outputPerMillion: number;
     cacheReadPerMillion: number;
     cacheCreationPerMillion: number;
+    /** 1h cache-creation per-M coefficient (expr models with cc1h tracking only). */
+    cc1hPerMillion?: number;
     inputCost: number;
     outputCost: number;
     cacheReadCost: number;
     cacheCreationCost: number;
+    /** 1h cache-creation cost (expr models with cc1h tracking only); included in totalCost. */
+    cc1hCost?: number;
     totalCost: number;
   };
 }
@@ -243,6 +285,42 @@ function normalizePricingModels(rawModels: unknown[]): Map<string, PricingModel>
     const ownerByRaw = (raw as any).owner_by;
     const ownerBy = typeof ownerByRaw === 'string' ? (ownerByRaw.trim() || null) : null;
 
+    // tiered_expr: upstream puts the real per-M price in billing_expr; model_ratio is only
+    // a placeholder. Prefer the expression over ratio, and fall back to ratio (with a warning)
+    // whenever the expression is absent, malformed, or uses syntax we do not cover.
+    const billingExprRaw = (raw as any).billing_expr ?? (raw as any).billingExpr;
+    const billingModeRaw = (raw as any).billing_mode ?? (raw as any).billingMode;
+    const billingExprStr = typeof billingExprRaw === 'string' ? billingExprRaw.trim() : '';
+    const billingModeStr = typeof billingModeRaw === 'string' ? billingModeRaw : '';
+
+    let pricingSource: 'ratio' | 'expr' = 'ratio';
+    let pricingExpr: ParsedBillingExpr | null = null;
+    let billingExpr: string | null = null;
+    let pricingFallbackReason: string | null = null;
+
+    if (billingExprStr) {
+      if (billingModeStr === '' || billingModeStr === 'tiered_expr') {
+        billingExpr = billingExprStr;
+        const compiled = parseBillingExpr(billingExprStr);
+        if (compiled) {
+          pricingSource = 'expr';
+          pricingExpr = compiled;
+        } else {
+          // Keep billingExpr for audit so the ratio fallback is not silent.
+          pricingFallbackReason = `billing_expr not parseable: ${billingExprStr}`;
+          console.warn(
+            `[model-pricing] model "${modelName}" billing_expr is not parseable, falling back to ratio path: ${billingExprStr}`,
+          );
+        }
+      } else {
+        billingExpr = billingExprStr;
+        pricingFallbackReason = `unsupported billing_mode "${billingModeStr}"`;
+        console.warn(
+          `[model-pricing] model "${modelName}" has unsupported billing_mode "${billingModeStr}", falling back to ratio path`,
+        );
+      }
+    }
+
     models.set(modelName, {
       modelName,
       quotaType,
@@ -256,6 +334,10 @@ function normalizePricingModels(rawModels: unknown[]): Map<string, PricingModel>
       tags,
       supportedEndpointTypes,
       ownerBy,
+      pricingSource,
+      billingExpr,
+      pricingExpr,
+      pricingFallbackReason,
     });
   }
 
@@ -621,6 +703,7 @@ function normalizeUsageBreakdownInput(usage: {
   totalTokens: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache?: boolean | null;
 }) {
   const promptTokens = toPositiveInt(usage.promptTokens);
@@ -629,6 +712,8 @@ function normalizeUsageBreakdownInput(usage: {
   const totalTokens = Math.max(totalTokensRaw, promptTokens + completionTokens);
   const cacheReadTokens = toPositiveInt(usage.cacheReadTokens);
   const cacheCreationTokens = toPositiveInt(usage.cacheCreationTokens);
+  // 1h-TTL cache-creation tokens; 0 when upstream does not report them separately.
+  const cacheCreationTokens1h = toPositiveInt(usage.cacheCreationTokens1h);
   const promptTokensIncludeCache = usage.promptTokensIncludeCache ?? null;
   const hasSplit = promptTokens > 0 || completionTokens > 0;
   const effectivePromptTokens = hasSplit ? promptTokens : totalTokens;
@@ -642,9 +727,146 @@ function normalizeUsageBreakdownInput(usage: {
     totalTokens,
     cacheReadTokens,
     cacheCreationTokens,
+    cacheCreationTokens1h,
     billablePromptTokens,
     promptTokensIncludeCache,
   };
+}
+
+/** Result of an expr breakdown: a full breakdown, or the reason the expr path failed. */
+type ExprBreakdownOutcome =
+  | { ok: true; breakdown: ProxyBillingDetails }
+  | { ok: false; reason: string };
+
+/**
+ * Build a billing breakdown from a compiled billing expression. Token variables are
+ * expressed in millions (tokens / 1e6) so the $/M coefficients multiply directly into
+ * dollars; the group multiplier is applied on top.
+ *
+ * Each token dimension is evaluated in isolation (all other token vars = 0) so, for the
+ * (linear) expressions used upstream, the cost parts decompose exactly and sum to the
+ * total. This also captures the cc1h (1h cache-creation) dimension, which has its own
+ * coefficient and would be lost by a four-dimension derivation. `len` is reconstructed to
+ * reflect the full input context when cache tokens are tracked separately
+ * (promptTokensIncludeCache === false). Returns { ok: false, reason } (and logs a warning)
+ * when evaluation fails so the caller can fall back to the ratio path with an audit trail.
+ */
+function buildExprBreakdown(
+  model: PricingModel,
+  normalizedUsage: ReturnType<typeof normalizeUsageBreakdownInput>,
+  multiplier: number,
+): ExprBreakdownOutcome {
+  const parsed = model.pricingExpr;
+  if (!parsed) return { ok: false, reason: 'billing_expr AST missing' };
+
+  // len is the raw context length used only for tier selection. When cache tokens are
+  // tracked separately (Claude-style, promptTokensIncludeCache === false) the reported
+  // prompt excludes them, so the true input context is prompt + cacheRead + cacheCreation.
+  // Otherwise the reported prompt already includes cache (or is unknown); fall back to
+  // total tokens when the prompt is missing.
+  let len: number;
+  if (normalizedUsage.promptTokensIncludeCache === false) {
+    len = normalizedUsage.promptTokens
+      + normalizedUsage.cacheReadTokens
+      + normalizedUsage.cacheCreationTokens;
+  } else {
+    len = normalizedUsage.promptTokens;
+  }
+  if (!(len > 0)) len = normalizedUsage.totalTokens;
+
+  const now = new Date();
+  const hasCc1h = normalizedUsage.cacheCreationTokens1h > 0;
+
+  try {
+    // Evaluate one dimension at a time (others = 0) to isolate each $/M coefficient.
+    const coeff = (p: number, c: number, cr: number, cc: number, cc1h: number): number =>
+      roundCost(evaluateBillingExpr(parsed, { p, c, cr, cc, cc1h, len, now }) * multiplier);
+
+    const inputPerMillion = coeff(1, 0, 0, 0, 0);
+    const outputPerMillion = coeff(0, 1, 0, 0, 0);
+    const cacheReadPerMillion = coeff(0, 0, 1, 0, 0);
+    const cacheCreationPerMillion = coeff(0, 0, 0, 1, 0);
+    const cc1hPerMillion = hasCc1h ? coeff(0, 0, 0, 0, 1) : 0;
+
+    const inputCost = roundCost((normalizedUsage.billablePromptTokens / 1_000_000) * inputPerMillion);
+    const outputCost = roundCost((normalizedUsage.completionTokens / 1_000_000) * outputPerMillion);
+    const cacheReadCost = roundCost((normalizedUsage.cacheReadTokens / 1_000_000) * cacheReadPerMillion);
+    const cacheCreationCost = roundCost((normalizedUsage.cacheCreationTokens / 1_000_000) * cacheCreationPerMillion);
+    const cc1hCost = roundCost((normalizedUsage.cacheCreationTokens1h / 1_000_000) * cc1hPerMillion);
+    const totalCost = roundCost(inputCost + outputCost + cacheReadCost + cacheCreationCost + cc1hCost);
+
+    const breakdown: ProxyBillingDetails['breakdown'] = {
+      inputPerMillion,
+      outputPerMillion,
+      cacheReadPerMillion,
+      cacheCreationPerMillion,
+      inputCost,
+      outputCost,
+      cacheReadCost,
+      cacheCreationCost,
+      totalCost,
+    };
+    if (hasCc1h) {
+      breakdown.cc1hPerMillion = cc1hPerMillion;
+      breakdown.cc1hCost = cc1hCost;
+    }
+
+    return {
+      ok: true,
+      breakdown: {
+        quotaType: model.quotaType,
+        usage: normalizedUsage,
+        pricing: {
+          modelRatio: model.modelRatio,
+          completionRatio: model.completionRatio,
+          cacheRatio: model.cacheRatio ?? 1,
+          cacheCreationRatio: model.cacheCreationRatio ?? 1,
+          groupRatio: multiplier,
+          pricingSource: 'expr',
+          billingExpr: model.billingExpr ?? null,
+        },
+        breakdown,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[model-pricing] model "${model.modelName}" billing_expr evaluation failed (${message}), falling back to ratio path: ${model.billingExpr ?? ''}`,
+    );
+    return { ok: false, reason: `billing_expr evaluation failed: ${message}` };
+  }
+}
+
+/**
+ * Effective per-M figures for the pricing catalog, evaluated at the base tier
+ * (len = 0 selects the lowest tier) and the current time. The catalog is a static
+ * per-group summary without a concrete usage, so this is a BASE-TIER ESTIMATE, not the
+ * exact per-request price (real per-request tiering uses the request's `len`). The
+ * catalog builder marks the result with `exprEstimate: true` so the UI labels it as an
+ * estimate rather than a definitive price.
+ */
+function computeExprPerMillionForCatalog(
+  parsed: ParsedBillingExpr,
+  multiplier: number,
+): {
+  inputPerMillion: number;
+  outputPerMillion: number;
+  cacheReadPerMillion: number;
+  cacheCreationPerMillion: number;
+} | null {
+  const now = new Date();
+  try {
+    const evalPerMillion = (p: number, c: number, cr: number, cc: number): number =>
+      roundCost(evaluateBillingExpr(parsed, { p, c, cr, cc, cc1h: 0, len: 0, now }) * multiplier);
+    return {
+      inputPerMillion: evalPerMillion(1, 0, 0, 0),
+      outputPerMillion: evalPerMillion(0, 1, 0, 0),
+      cacheReadPerMillion: evalPerMillion(0, 0, 1, 0),
+      cacheCreationPerMillion: evalPerMillion(0, 0, 0, 1),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function calculateModelUsageBreakdown(
@@ -655,6 +877,7 @@ export function calculateModelUsageBreakdown(
     totalTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    cacheCreationTokens1h?: number;
     promptTokensIncludeCache?: boolean | null;
   },
   groupRatio: Record<string, number>,
@@ -665,6 +888,21 @@ export function calculateModelUsageBreakdown(
 
   const multiplier = resolveGroupMultiplier(model, groupRatio);
   const normalizedUsage = normalizeUsageBreakdownInput(usage);
+
+  // Determine why a billing_expr, if present, did NOT drive this cost, so the ratio
+  // fallback is auditable (exprFallback + reason) rather than silently distorting prices.
+  let exprFallbackReason: string | null = null;
+  if (model.pricingSource === 'expr' && model.pricingExpr) {
+    const outcome = buildExprBreakdown(model, normalizedUsage, multiplier);
+    if (outcome.ok) return outcome.breakdown;
+    // buildExprBreakdown already logged a warning; fall back to the ratio path below.
+    exprFallbackReason = outcome.reason;
+  } else if (model.billingExpr) {
+    // Model had a billing_expr but the ratio path is used (rejected at normalization:
+    // unparseable or unsupported billing_mode). Surface the stored reason.
+    exprFallbackReason = model.pricingFallbackReason ?? 'billing_expr rejected at normalization';
+  }
+
   const cacheRatio = model.cacheRatio ?? 1;
   const cacheCreationRatio = model.cacheCreationRatio ?? 1;
   const inputPerMillion = roundCost(model.modelRatio * 2 * multiplier);
@@ -686,6 +924,9 @@ export function calculateModelUsageBreakdown(
       cacheRatio,
       cacheCreationRatio,
       groupRatio: multiplier,
+      pricingSource: 'ratio',
+      billingExpr: model.billingExpr ?? null,
+      ...(exprFallbackReason ? { exprFallback: true as const, exprFallbackReason } : {}),
     },
     breakdown: {
       inputPerMillion,
@@ -741,6 +982,21 @@ function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricin
             perCallInput: perCall.input,
             perCallOutput: perCall.output,
             perCallTotal: perCall.total,
+          };
+          return acc;
+        }
+
+        const exprPerMillion = model.pricingSource === 'expr' && model.pricingExpr
+          ? computeExprPerMillionForCatalog(model.pricingExpr, multiplier)
+          : null;
+        if (exprPerMillion) {
+          acc[group] = {
+            quotaType: 0,
+            inputPerMillion: exprPerMillion.inputPerMillion,
+            outputPerMillion: exprPerMillion.outputPerMillion,
+            cacheReadPerMillion: exprPerMillion.cacheReadPerMillion,
+            cacheCreationPerMillion: exprPerMillion.cacheCreationPerMillion,
+            exprEstimate: true,
           };
           return acc;
         }
@@ -801,6 +1057,7 @@ export async function estimateProxyCost(input: EstimateProxyCostInput): Promise<
     totalTokens,
     cacheReadTokens: input.cacheReadTokens,
     cacheCreationTokens: input.cacheCreationTokens,
+    cacheCreationTokens1h: input.cacheCreationTokens1h,
     promptTokensIncludeCache: input.promptTokensIncludeCache,
   };
 
@@ -847,6 +1104,7 @@ export async function buildProxyBillingDetails(input: EstimateProxyCostInput): P
     totalTokens,
     cacheReadTokens: input.cacheReadTokens,
     cacheCreationTokens: input.cacheCreationTokens,
+    cacheCreationTokens1h: input.cacheCreationTokens1h,
     promptTokensIncludeCache: input.promptTokensIncludeCache,
   };
 

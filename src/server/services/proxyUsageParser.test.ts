@@ -22,6 +22,7 @@ describe('proxyUsageParser', () => {
       totalTokens: 168,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: null,
     });
   });
@@ -40,6 +41,7 @@ describe('proxyUsageParser', () => {
       totalTokens: 100,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: null,
     });
   });
@@ -59,6 +61,7 @@ describe('proxyUsageParser', () => {
       totalTokens: 46,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: null,
     });
   });
@@ -84,6 +87,7 @@ describe('proxyUsageParser', () => {
       totalTokens: 250,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: null,
     });
   });
@@ -107,6 +111,7 @@ describe('proxyUsageParser', () => {
       totalTokens: 30,
       cacheReadTokens: 3,
       cacheCreationTokens: 0,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: true,
     });
   });
@@ -127,8 +132,50 @@ describe('proxyUsageParser', () => {
       totalTokens: 150,
       cacheReadTokens: 1000,
       cacheCreationTokens: 40,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: false,
     });
+  });
+
+  it('extracts 1h-TTL cache-creation when upstream reports it separately', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 120,
+          ephemeral_1h_input_tokens: 330,
+        },
+      },
+    });
+
+    // Standard cache creation still reflects the total; the 1h share is surfaced separately.
+    expect(usage.cacheCreationTokens).toBe(450);
+    expect(usage.cacheCreationTokens1h).toBe(330);
+
+    // The flat 1h field form also maps (and wins when larger).
+    const flat = parseProxyUsage({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: { ephemeral_5m_input_tokens: 50 },
+        claude_cache_creation_1_h_tokens: 800,
+      },
+    });
+    expect(flat.cacheCreationTokens1h).toBe(800);
+  });
+
+  it('leaves cc1h at 0 when the 1h share is not separately reported', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: { ephemeral_5m_input_tokens: 120 },
+      },
+    });
+
+    expect(usage.cacheCreationTokens).toBe(120);
+    expect(usage.cacheCreationTokens1h ?? 0).toBe(0);
   });
 
   it('merges usage snapshots by keeping richer values', () => {
@@ -157,6 +204,7 @@ describe('proxyUsageParser', () => {
       totalTokens: 120,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      cacheCreationTokens1h: 0,
       promptTokensIncludeCache: null,
     });
   });

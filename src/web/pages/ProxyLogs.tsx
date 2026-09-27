@@ -330,9 +330,26 @@ function formatPerMillionPrice(value: number) {
   return `$${formatCompactNumber(value)} / 1M 词元`;
 }
 
+function truncateExpr(value: string, max = 48): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max)}…`;
+}
+
 function formatBillingDetailSummary(log: ProxyLogRenderItem) {
   const detail = log.billingDetails;
   if (!detail) return null;
+  const pricing = detail.pricing;
+  // expr-driven billing: show the formula (and its source), not the placeholder ratios,
+  // which would mislead readers into thinking the 37.5-style ratio is the real price.
+  if (pricing.pricingSource === 'expr') {
+    const expr = pricing.billingExpr;
+    return `公式计费${expr ? `：${truncateExpr(expr)}` : ''}`;
+  }
+  // A billing_expr was present but the ratio path was used — make the fallback explicit.
+  if (pricing.exprFallback) {
+    return `计费回退（占位倍率）：${pricing.exprFallbackReason ?? '未知原因'}`;
+  }
   return `模型倍率 ${formatCompactNumber(detail.pricing.modelRatio)}，输出倍率 ${formatCompactNumber(detail.pricing.completionRatio)}，缓存倍率 ${formatCompactNumber(detail.pricing.cacheRatio)}，缓存创建倍率 ${formatCompactNumber(detail.pricing.cacheCreationRatio)}，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`;
 }
 
@@ -381,6 +398,12 @@ function buildBillingProcessLines(log: ProxyLogRenderItem) {
     );
   }
 
+  if ((detail.usage.cacheCreationTokens1h ?? 0) > 0) {
+    lines.push(
+      `1h缓存创建价格：${formatPerMillionPrice(detail.breakdown.cc1hPerMillion ?? 0)}`,
+    );
+  }
+
   const parts = [
     `提示 ${detail.usage.billablePromptTokens.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.inputPerMillion)}`,
   ];
@@ -394,6 +417,12 @@ function buildBillingProcessLines(log: ProxyLogRenderItem) {
   if (detail.usage.cacheCreationTokens > 0) {
     parts.push(
       `缓存创建 ${detail.usage.cacheCreationTokens.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.cacheCreationPerMillion)}`,
+    );
+  }
+
+  if ((detail.usage.cacheCreationTokens1h ?? 0) > 0) {
+    parts.push(
+      `1h缓存创建 ${detail.usage.cacheCreationTokens1h!.toLocaleString()} 词元 / 1M 词元 * $${formatCompactNumber(detail.breakdown.cc1hPerMillion ?? 0)}`,
     );
   }
 

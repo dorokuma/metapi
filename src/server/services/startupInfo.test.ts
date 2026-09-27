@@ -3,12 +3,7 @@ import { buildStartupEndpoints, buildStartupSummaryLines } from './startupInfo.j
 
 describe('startupInfo', () => {
   it('builds single-port endpoint summary for admin and proxy APIs', () => {
-    const endpoints = buildStartupEndpoints({
-      port: 4000,
-      host: '0.0.0.0',
-      authToken: 'admin-token',
-      proxyToken: 'proxy-token',
-    });
+    const endpoints = buildStartupEndpoints({ port: 4000, host: '0.0.0.0' });
 
     expect(endpoints.baseUrl).toBe('http://127.0.0.1:4000');
     expect(endpoints.adminDashboardUrl).toBe('http://127.0.0.1:4000');
@@ -17,16 +12,20 @@ describe('startupInfo', () => {
   });
 
   it('renders copy-ready startup summary lines', () => {
-    const lines = buildStartupSummaryLines({
-      port: 4000,
-      host: '0.0.0.0',
-      authToken: 'admin-token',
-      proxyToken: 'proxy-token',
-    });
+    const lines = buildStartupSummaryLines({ port: 4000, host: '0.0.0.0' });
 
     expect(lines.some((line) => line.includes('metapi running'))).toBe(true);
     expect(lines.some((line) => line.includes('Dashboard: http://127.0.0.1:4000'))).toBe(true);
     expect(lines.some((line) => line.includes('/api/stats/dashboard'))).toBe(true);
     expect(lines.some((line) => line.includes('/v1/chat/completions'))).toBe(true);
+  });
+
+  it('只回显令牌占位，绝不把令牌明文写进启动横幅', () => {
+    const lines = buildStartupSummaryLines({ port: 4000, host: '127.0.0.1' });
+    const rendered = lines.join('\n');
+
+    expect(rendered).toContain('$AUTH_TOKEN');
+    expect(rendered).toContain('$PROXY_TOKEN');
+    expect(rendered).not.toMatch(/Bearer\s+[^$\s]/);
   });
 });

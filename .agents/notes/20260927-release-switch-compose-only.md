@@ -28,7 +28,7 @@ supersedes: ""
   - 可选旁路验证：新 tag + `data-canary` 数据副本 + `PORT=4100` 起一次性容器，验证通过后再切。
 - 流程固化为仓库内单一入口 `scripts/deploy-painless.sh`（构建 → 快照 → canary → compose 切换 → 验收 → 失败自动回滚，无跳过开关）。三条分支已在隔离沙箱实测：切换成功、验收失败自动回滚并恢复旧镜像、canary 失败时生产完全未动。
 - 「运行实例与数据」节补充：生产唯一真相 = compose 文件；仓库内 `docker/docker-compose.yml`、`docker/docker-compose.override.yml`、`update-and-restart.sh`、`data/` 属本地开发件，禁止用于生产。
-- 附带发现（本次未修）：容器启动横幅会把 `AUTH_TOKEN` / `PROXY_TOKEN` 明文写进 `docker logs`（json-file 保留 20m×5），建议后续改为掩码输出。
+- 附带发现（已修）：容器启动横幅曾把 `AUTH_TOKEN` / `PROXY_TOKEN` 明文写进 `docker logs`（json-file 保留 20m×5）；`startupInfo` 改为只回显 `$AUTH_TOKEN` / `$PROXY_TOKEN` 变量占位，并补了断言「横幅不含 Bearer 明文」的回归测试。
 
 ## 被放弃的方案（必填）
 

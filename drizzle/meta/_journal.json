@@ -218,6 +218,13 @@
       "when": 1790320000000,
       "tag": "0030_upstream_provider_observations",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1790320000001,
+      "tag": "0031_proxy_logs_usage_columns",
+      "breakpoints": true
     }
   ]
 }

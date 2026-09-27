@@ -267,6 +267,16 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   clientConfidence: text('client_confidence'),
   errorMessage: text('error_message'),
   retryCount: integer('retry_count').default(0),
+  // ---- 精确词元消耗统计（用量拆分）五列 ----
+  cacheReadTokens: integer('cache_read_tokens'),
+  cacheCreationTokens: integer('cache_creation_tokens'),
+  reasoningTokens: integer('reasoning_tokens'),
+  promptTokensIncludeCache: integer('prompt_tokens_include_cache', { mode: 'boolean' }),
+  usageSource: text('usage_source'),
+  // ---- 站点归属三列（不加 FK）----
+  siteId: integer('site_id'),
+  modelSiteId: integer('model_site_id'),
+  credentialSiteId: integer('credential_site_id'),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
 }, (table) => ({
   createdAtIdx: index('proxy_logs_created_at_idx').on(table.createdAt),
@@ -276,6 +286,7 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   downstreamKeyCreatedIdx: index('proxy_logs_downstream_api_key_created_at_idx').on(table.downstreamApiKeyId, table.createdAt),
   clientAppCreatedIdx: index('proxy_logs_client_app_id_created_at_idx').on(table.clientAppId, table.createdAt),
   clientFamilyCreatedIdx: index('proxy_logs_client_family_created_at_idx').on(table.clientFamily, table.createdAt),
+  siteIdIdx: index('proxy_logs_site_id_idx').on(table.siteId, table.id),
 }));
 
 // 上游探测观测表（Cline 网关 provider_metadata 摘要）。仅追加，不改 proxy_logs 列；

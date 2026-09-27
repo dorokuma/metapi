@@ -19,6 +19,7 @@ function isBooleanLikeColumn(columnName: string, defaultValue: string | null): b
     || normalizedColumn.startsWith('has_')
     || normalizedColumn.endsWith('_enabled')
     || normalizedColumn.endsWith('_available')
+    || normalizedColumn === 'prompt_tokens_include_cache'
     || normalizedColumn === 'read'
     || normalizedColumn === 'enabled'
     || normalizedColumn === 'available'

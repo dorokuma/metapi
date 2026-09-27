@@ -1,6 +1,9 @@
-CREATE TABLE IF NOT EXISTS `upstream_provider_observations` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `proxy_log_id` INT, `site_id` INT, `account_id` INT, `route_id` INT, `channel_id` INT, `downstream_api_key_id` INT, `requested_model` TEXT, `actual_model` TEXT, `upstream_path` TEXT, `is_stream` BOOLEAN, `parser_id` VARCHAR(191) NOT NULL DEFAULT 'cline-gateway', `parser_version` INT NOT NULL DEFAULT 1, `final_provider` TEXT, `resolved_provider` TEXT, `canonical_slug` TEXT, `original_model_id` TEXT, `affinity_outcome` TEXT, `affinity_pinned_provider` TEXT, `client_session_id` TEXT, `client_session_id_source` TEXT, `fallbacks_json` JSON, `fallback_count` INT, `model_attempts_json` JSON, `attempts_truncated` INT NOT NULL DEFAULT 0, `model_attempt_count` INT, `total_provider_attempt_count` INT, `cache_hit_tokens` INT, `cache_miss_tokens` INT, `system_fingerprint` TEXT, `usage_cost` DOUBLE, `usage_gateway_cost` DOUBLE, `usage_market_cost` DOUBLE, `gateway_cost_text` TEXT, `gateway_inference_cost_text` TEXT, `gateway_generation_id` TEXT, `created_at` VARCHAR(191) NOT NULL DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')));
-CREATE INDEX `upstream_provider_obs_created_idx` ON `upstream_provider_observations` (`created_at`);
-CREATE INDEX `upstream_provider_obs_model_provider_created_idx` ON `upstream_provider_observations` (`requested_model`(191), `final_provider`(191), `created_at`);
-CREATE INDEX `upstream_provider_obs_proxy_log_idx` ON `upstream_provider_observations` (`proxy_log_id`);
-CREATE INDEX `upstream_provider_obs_session_created_idx` ON `upstream_provider_observations` (`client_session_id`(191), `created_at`);
-CREATE INDEX `upstream_provider_obs_site_provider_created_idx` ON `upstream_provider_observations` (`site_id`, `final_provider`(191), `created_at`);
+ALTER TABLE `proxy_logs` ADD COLUMN `cache_read_tokens` INT;
+ALTER TABLE `proxy_logs` ADD COLUMN `cache_creation_tokens` INT;
+ALTER TABLE `proxy_logs` ADD COLUMN `reasoning_tokens` INT;
+ALTER TABLE `proxy_logs` ADD COLUMN `prompt_tokens_include_cache` BOOLEAN;
+ALTER TABLE `proxy_logs` ADD COLUMN `usage_source` TEXT;
+ALTER TABLE `proxy_logs` ADD COLUMN `site_id` INT;
+ALTER TABLE `proxy_logs` ADD COLUMN `model_site_id` INT;
+ALTER TABLE `proxy_logs` ADD COLUMN `credential_site_id` INT;
+CREATE INDEX `proxy_logs_site_id_idx` ON `proxy_logs` (`site_id`, `id`);

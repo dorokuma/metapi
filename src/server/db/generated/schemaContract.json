@@ -1417,6 +1417,54 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "cache_read_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "cache_creation_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "reasoning_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "prompt_tokens_include_cache": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "usage_source": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_site_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "credential_site_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -2949,6 +2997,15 @@
       "columns": [
         "model_actual",
         "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "proxy_logs_site_id_idx",
+      "table": "proxy_logs",
+      "columns": [
+        "site_id",
+        "id"
       ],
       "unique": false
     },

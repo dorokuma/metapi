@@ -104,5 +104,65 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('"proxy_logs_downstream_api_key_created_at_idx"');
     expect(postgresBootstrap).toContain('"client_app_id"');
     expect(postgresBootstrap).toContain('"proxy_logs_client_app_id_created_at_idx"');
+
+    // ---- 精确词元消耗统计五列（切片 data 新增）----
+    expect(contract.tables.proxy_logs?.columns.cache_read_tokens?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.cache_creation_tokens?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.reasoning_tokens?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.prompt_tokens_include_cache?.logicalType).toBe('boolean');
+    expect(contract.tables.proxy_logs?.columns.usage_source?.logicalType).toBe('text');
+    // ---- 站点归属三列（切片 data 新增，不加 FK）----
+    expect(contract.tables.proxy_logs?.columns.site_id?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.model_site_id?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.credential_site_id?.logicalType).toBe('integer');
+    // ---- 新列可空性：八列 notNull 均为 false ----
+    for (const col of [
+      'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens',
+      'prompt_tokens_include_cache', 'usage_source',
+      'site_id', 'model_site_id', 'credential_site_id',
+    ]) {
+      expect(contract.tables.proxy_logs?.columns[col]?.notNull).toBe(false);
+    }
+    // ---- (site_id, id) 索引 ----
+    expect(contract.indexes.some((index) => index.name === 'proxy_logs_site_id_idx')).toBe(true);
+    expect(
+      contract.indexes.find((index) => index.name === 'proxy_logs_site_id_idx')?.columns,
+    ).toEqual(['site_id', 'id']);
+
+    // bootstrap 连续断言：三方言产物均含新列
+    for (const col of [
+      'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens',
+      'prompt_tokens_include_cache', 'usage_source',
+      'site_id', 'model_site_id', 'credential_site_id',
+    ]) {
+      expect(mysqlBootstrap).toContain(`\`${col}\``);
+      expect(postgresBootstrap).toContain(`\"${col}\"`);
+    }
+    expect(mysqlBootstrap).toContain('`proxy_logs_site_id_idx`');
+    expect(postgresBootstrap).toContain('"proxy_logs_site_id_idx"');
+  });
+
+  it('keeps upgrade artifacts reflecting the current slice delta against the previous contract', () => {
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const mysqlUpgrade = readFileSync(resolve(generatedDir, 'mysql.upgrade.sql'), 'utf8');
+    const postgresUpgrade = readFileSync(resolve(generatedDir, 'postgres.upgrade.sql'), 'utf8');
+
+    // upgrade 产物必须包含本次切片的 8 条 ADD COLUMN
+    for (const col of [
+      'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens',
+      'prompt_tokens_include_cache', 'usage_source',
+      'site_id', 'model_site_id', 'credential_site_id',
+    ]) {
+      expect(mysqlUpgrade).toContain(`ADD COLUMN \`${col}\``);
+      expect(postgresUpgrade).toContain(`ADD COLUMN \"${col}\"`);
+    }
+
+    // upgrade 产物必须包含本次切片的 1 条索引
+    expect(mysqlUpgrade).toContain('`proxy_logs_site_id_idx`');
+    expect(postgresUpgrade).toContain('"proxy_logs_site_id_idx"');
+
+    // upgrade 产物不得包含已由 0030 发布的增量（上游观测表）
+    expect(mysqlUpgrade).not.toContain('upstream_provider_observations');
+    expect(postgresUpgrade).not.toContain('upstream_provider_observations');
   });
 });

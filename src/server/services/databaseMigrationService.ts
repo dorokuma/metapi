@@ -121,6 +121,11 @@ function asNumber(value: unknown, fallback: number | null = null): number | null
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
+function asNullableBoolean(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null;
+  return asBoolean(value, false);
+}
+
 function asNullableString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   return String(value);
@@ -308,6 +313,7 @@ async function clearTargetData(client: SqlClient): Promise<void> {
     'sites',
     'downstream_api_keys',
     'events',
+    'analytics_projection_checkpoints',
     'settings',
   ];
   for (const table of tables) {
@@ -596,7 +602,7 @@ function buildStatements(
   for (const row of snapshot.accounts.proxyLogs) {
     statements.push({
       table: 'proxy_logs',
-      columns: ['id', 'route_id', 'channel_id', 'account_id', 'downstream_api_key_id', 'model_requested', 'model_actual', 'status', 'http_status', 'latency_ms', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'estimated_cost', 'billing_details', 'error_message', 'retry_count', 'created_at'],
+      columns: ['id', 'route_id', 'channel_id', 'account_id', 'downstream_api_key_id', 'model_requested', 'model_actual', 'status', 'http_status', 'latency_ms', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'estimated_cost', 'billing_details', 'error_message', 'retry_count', 'created_at', 'site_id', 'model_site_id', 'credential_site_id', 'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens', 'prompt_tokens_include_cache', 'usage_source'],
       values: [
         asNumber(row.id, 0),
         asNumber(row.routeId, null),
@@ -616,6 +622,14 @@ function buildStatements(
         asNullableString(row.errorMessage),
         asNumber(row.retryCount, 0),
         asNullableString(row.createdAt),
+        asNumber((row as any).siteId, null),
+        asNumber((row as any).modelSiteId, null),
+        asNumber((row as any).credentialSiteId, null),
+        asNumber(row.cacheReadTokens, null),
+        asNumber(row.cacheCreationTokens, null),
+        asNumber(row.reasoningTokens, null),
+        asNullableBoolean(row.promptTokensIncludeCache),
+        asNullableString(row.usageSource),
       ],
     });
   }

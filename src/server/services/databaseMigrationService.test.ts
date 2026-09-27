@@ -1024,6 +1024,90 @@ describe('databaseMigrationService', () => {
     }
   });
 
+  it('includes all eight new proxy_logs columns and excludes legacy gap columns in the column manifest', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [{
+          id: 1,
+          routeId: 1,
+          channelId: 1,
+          accountId: 1,
+          downstreamApiKeyId: 1,
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'success',
+          httpStatus: 200,
+          latencyMs: 123,
+          promptTokens: 10,
+          completionTokens: 20,
+          totalTokens: 30,
+          estimatedCost: 0.01,
+          billingDetails: {},
+          errorMessage: null,
+          retryCount: 0,
+          createdAt: '2026-09-27T00:00:00.000Z',
+          siteId: 1,
+          modelSiteId: 2,
+          credentialSiteId: 3,
+          cacheReadTokens: 5,
+          cacheCreationTokens: 6,
+          reasoningTokens: 7,
+          promptTokensIncludeCache: true,
+          usageSource: 'upstream',
+        }],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: {
+        settings: [],
+      },
+    } as any);
+
+    const proxyLogsStatement = statements.find((statement) => statement.table === 'proxy_logs');
+    expect(proxyLogsStatement).toBeDefined();
+
+    const newColumns = [
+      'cache_read_tokens',
+      'cache_creation_tokens',
+      'reasoning_tokens',
+      'prompt_tokens_include_cache',
+      'usage_source',
+      'site_id',
+      'model_site_id',
+      'credential_site_id',
+    ];
+    const legacyGapColumns = [
+      'is_stream',
+      'first_byte_latency_ms',
+      'client_family',
+      'client_app_id',
+      'client_app_name',
+      'client_confidence',
+    ];
+
+    for (const column of newColumns) {
+      expect(proxyLogsStatement?.columns).toContain(column);
+    }
+    for (const column of legacyGapColumns) {
+      expect(proxyLogsStatement?.columns).not.toContain(column);
+    }
+  });
+
   it('excludes runtime database config settings from migration statements', () => {
     const statements = __databaseMigrationServiceTestUtils.buildStatements({
       version: 'test',

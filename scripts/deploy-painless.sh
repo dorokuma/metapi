@@ -201,5 +201,6 @@ cat <<EOF
   2 数据级回滚（仅当新版本迁移污染数据）：compose stop → 用 $SNAPSHOT 覆盖 $DB_FILE
     （同时删除 hub.db-wal / hub.db-shm）→ compose up -d
   3 发布收尾：显式 git push origin <branch> → merge --ff-only 进 main → git push origin main
+  4 分支清理：按 AGENTS.md「发版与无痛上线」节第③条执行，仅清理本次 ff-only 合入的那一个分支，其余 ref 不删
 镜像级回滚：cp -f $COMPOSE_BAK $COMPOSE_FILE && cd $COMPOSE_DIR && docker compose up -d
 EOF

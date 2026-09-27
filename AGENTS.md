@@ -32,7 +32,12 @@ make small, consistent changes without re-learning the codebase each time.
 5. 验收：容器 running、`127.0.0.1:4000` 监听、日志含 `Migration complete.`、`/api/stats/dashboard` 与 `/v1/models` 均 200
 6. 收尾：打印快照路径、镜像级/数据级回滚命令
 
-- **脚本跑完还要做的**：① 按本次改动做真实流量验证（复现触发 / 查调试库与日志核对）；② 发布收尾：**显式** `git push origin <branch>` → `git merge --ff-only` 进 main → `git push origin main`。
+- **脚本跑完还要做的**：① 按本次改动做真实流量验证（复现触发 / 查调试库与日志核对）；② 发布收尾：**显式** `git push origin <branch>` → `git merge --ff-only` 进 main → `git push origin main`；③ 分支清理（仅限本次 ff-only 合入的那一个分支）：
+  - 只删本次这一支：清理对象严格限定为本次发版合入的那一个分支，禁止按 `git branch --merged` 等谓词扫除；永久保护 ref 永不删：`main`、`origin/main`、`upstream/*` 全不删。
+  - 先推后删：删 `origin` 远程分支的前提 = `git push origin main` 已成功且该分支 tip 已是 `origin/main` 的祖先；祖先校验参照写死为 fetch 后的 `origin/main`（先 `git fetch origin`，再用 `git merge-base --is-ancestor <分支tip> origin/main` 验证）；远端删除带期望 SHA 校验（在 `git merge --ff-only` 之前用 `git rev-parse <branch>` 冻结期望 SHA，删除时只拿这个冻结值去对 `git ls-remote`，对不上就放弃并报告）。
+  - 在用判据写死：分支满足任一即视为在用、不删——被任何 worktree 检出（`git worktree list`）、关联工作区有未提交/未跟踪改动、有未合并进 main 的 commit。
+  - 禁止强制：删除只用 `git branch -d` 与 `git worktree remove`；git 拒绝时停下报告，严禁 `-D`、严禁 `worktree remove --force`、严禁对 worktree 目录 `rm -rf`（避免主仓库 worktree 元数据变脏）。
+  - 顺序：先回收 worktree → 再删本地分支 → 最后删远程分支。
 - **红线**：
   - **生产容器只由 compose 管**：不 `docker stop/rm metapi`、不手搓 `docker run` 替换它、不把切换拆成「先删后建」两步——任何时刻都不得让生产容器处于「已删除且无替代」状态。
   - **切换中途被打断时，第一优先级是「容器在不在」**（`docker ps -a --filter name=metapi`）：不在就立刻 `cd /var/lib/metapi && docker compose up -d` 恢复，之后才排查原因。
@@ -40,7 +45,7 @@ make small, consistent changes without re-learning the codebase each time.
   - **不手工重建 Env**：环境变量唯一真相是 `/var/lib/metapi/docker-compose.yml` + `/var/lib/metapi/.env`；不要从 `docker inspect` 抄 Env 拼 `docker run`。
   - **日志里的密钥不外传**：启动横幅会把 `AUTH_TOKEN`/`PROXY_TOKEN` 明文写进 `docker logs`，日志内容不得落盘、回传或粘贴到别处。
   - **不擅自改运行时事实**：数据路径 `/var/lib/metapi/data`、host 网络、端口 `4000`、`container_name: metapi`。
-  - main 的 tracking 指向 upstream——裸 `git push` 会指向 upstream，一律显式写 `origin`；不推 upstream、不 force、不打 tag、不删分支（除用户明说）。
+  - main 的 tracking 指向 upstream——裸 `git push` 会指向 upstream，一律显式写 `origin`；不推 upstream、不 force、不打 tag；分支清理只按发布收尾第③条执行，此外不删分支。
 
 ## Index & Documentation / 索引与现状文档
 

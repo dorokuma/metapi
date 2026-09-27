@@ -39,7 +39,17 @@ describe('Sub2ApiAdapter', () => {
 
   it('detects sub2api from URL', async () => {
     expect(await adapter.detect('https://sub2api.example.com')).toBe(true);
-    expect(await adapter.detect('https://example.com')).toBe(false);
+  });
+
+  it('rejects an unrelated site that serves no sub2api envelope', async () => {
+    // 用本地服务代替公网域名：探测会真的打 /api/v1/auth/me、/v1/models 与 /，
+    // 依赖 example.com 的返回会让本文件随网络状况漂移（并行跑时曾整轮变红）。
+    await startServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><head><title>Some other panel</title></head><body>ok</body></html>');
+    });
+
+    expect(await adapter.detect(baseUrl)).toBe(false);
   });
 
   it('detects sub2api by auth/me unauthorized envelope even without sub2api domain', async () => {

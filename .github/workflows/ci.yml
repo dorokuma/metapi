@@ -247,6 +247,12 @@ jobs:
       - name: Run mysql runtime schema bootstrap
         run: npm run test:schema:runtime
 
+      - name: Run mysql live usage aggregation test
+        run: npm run test:live:usage-aggregation
+
+      - name: Run mysql live site sequence matrix
+        run: npm run test:live:site-sequences
+
   schema-postgres:
     name: Schema Check (Postgres)
     runs-on: ubuntu-latest
@@ -290,6 +296,12 @@ jobs:
 
       - name: Run postgres runtime schema bootstrap
         run: npm run test:schema:runtime
+
+      - name: Run postgres live usage aggregation test
+        run: npm run test:live:usage-aggregation
+
+      - name: Run postgres live site sequence matrix
+        run: npm run test:live:site-sequences
 
   docs-build:
     name: Build Docs

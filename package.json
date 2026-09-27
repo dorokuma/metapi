@@ -59,6 +59,8 @@
     "test:schema:parity": "vitest run --root . src/server/db/schemaParity.live.test.ts",
     "test:schema:upgrade": "vitest run --root . src/server/db/schemaUpgrade.live.test.ts",
     "test:schema:runtime": "vitest run --root . src/server/db/runtimeSchemaBootstrap.live.test.ts",
+    "test:live:usage-aggregation": "vitest run --root . src/server/services/usageAggregationService.live.test.ts",
+    "test:live:site-sequences": "vitest run --root . src/server/services/databaseMigrationService.sequences.live.test.ts",
     "smoke:db": "tsx scripts/dev/db-smoke.ts",
     "smoke:db:sqlite": "tsx scripts/dev/db-smoke.ts --db-type sqlite",
     "smoke:db:mysql": "tsx scripts/dev/db-smoke.ts --db-type mysql",

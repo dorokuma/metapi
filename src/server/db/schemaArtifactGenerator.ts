@@ -167,7 +167,9 @@ function buildColumnDefinition(
   const notNull = column.notNull ? ' NOT NULL' : '';
   const defaultValue = formatDefaultValue(dialect, column);
   const primaryKey = emitPrimaryKey && column.primaryKey ? ' PRIMARY KEY' : '';
-  return `${quoteIdentifier(dialect, columnName)} ${sqlType}${notNull}${defaultValue}${primaryKey}`;
+  const autoincrement =
+    emitPrimaryKey && dialect === 'sqlite' && column.primaryKey && columnName === 'id' ? ' AUTOINCREMENT' : '';
+  return `${quoteIdentifier(dialect, columnName)} ${sqlType}${notNull}${defaultValue}${primaryKey}${autoincrement}`;
 }
 
 /**

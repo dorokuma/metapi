@@ -1303,6 +1303,33 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return [];
   }
 
+  override async getUserLevelModels(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId?: number,
+  ): Promise<string[] | null> {
+    // Only native new-api exposes /api/user/models; subclasses (e.g. anyrouter)
+    // keep the base safe default (null).
+    if (this.platformName !== 'new-api') return null;
+
+    const userId = platformUserId ?? await this.discoverUserId(baseUrl, accessToken);
+    if (!userId) return [];
+
+    try {
+      const res = await this.fetchJson<any>(`${baseUrl}/api/user/models`, {
+        headers: this.authHeaders(accessToken, userId),
+      });
+      if (Array.isArray(res?.data)) {
+        return res.data.filter(Boolean);
+      }
+      if (res?.data && typeof res.data === 'object') {
+        return Object.keys(res.data).filter(Boolean);
+      }
+    } catch {}
+
+    return [];
+  }
+
   async getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null> {
     const userId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     const tokens = await this.getApiTokensWithUser(baseUrl, accessToken, userId);

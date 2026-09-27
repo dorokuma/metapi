@@ -106,6 +106,7 @@ export interface PlatformAdapter {
   checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult>;
   getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo>;
   getModels(baseUrl: string, token: string, platformUserId?: number, contextSourceScope?: string): Promise<string[]>;
+  getUserLevelModels(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[] | null>;
   getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null>;
   getApiTokens(baseUrl: string, accessToken: string, platformUserId?: number): Promise<ApiTokenInfo[]>;
   getSiteAnnouncements(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteAnnouncement[]>;
@@ -227,6 +228,15 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
     const token = await this.getApiToken(baseUrl, accessToken, platformUserId);
     if (!token) return [];
     return [{ name: 'default', key: token, enabled: true, tokenGroup: 'default' }];
+  }
+
+  async getUserLevelModels(
+    _baseUrl: string,
+    _accessToken: string,
+    _platformUserId?: number,
+  ): Promise<string[] | null> {
+    // null = platform does not support user-level model discovery
+    return null;
   }
 
   async getSiteAnnouncements(

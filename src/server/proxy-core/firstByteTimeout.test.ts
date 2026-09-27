@@ -45,6 +45,28 @@ describe('fetchWithObservedFirstByte', () => {
     expect(meta?.firstByteLatencyMs).toBeNull();
   });
 
+  it('bounds the wait when the body cancel never settles, and still returns the timeout response', async () => {
+    // tee 分支的 cancel 只有两个分支都取消后才 settle：直接 await 会永久挂住。
+    const source = buildDelayedResponse('never delivered', 60);
+    const [teedBranch] = source.body!.tee();
+
+    const startedAt = Date.now();
+    const response = await fetchWithObservedFirstByte(
+      async () => new Response(teedBranch, { status: 200 }),
+      {
+        firstByteTimeoutMs: 10,
+        startedAtMs: Date.now(),
+      },
+    );
+    const elapsed = Date.now() - startedAt;
+
+    expect(response.status).toBe(408);
+    expect(isObservedFirstByteTimeoutResponse(response)).toBe(true);
+    expect(elapsed).toBeLessThan(2_000);
+    // 让源流的迟到写入到期，确认没有无主异常泄漏出来。
+    await new Promise((resolve) => setTimeout(resolve, 90));
+  });
+
   it('swallows the late write of a cancelled body instead of leaking an unhandled error', async () => {
     const response = await fetchWithObservedFirstByte(
       async () => buildDelayedResponse('never delivered', 60),

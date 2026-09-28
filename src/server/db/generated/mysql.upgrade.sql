@@ -1,9 +1,1 @@
-ALTER TABLE `proxy_logs` ADD COLUMN `cache_read_tokens` INT;
-ALTER TABLE `proxy_logs` ADD COLUMN `cache_creation_tokens` INT;
-ALTER TABLE `proxy_logs` ADD COLUMN `reasoning_tokens` INT;
-ALTER TABLE `proxy_logs` ADD COLUMN `prompt_tokens_include_cache` BOOLEAN;
-ALTER TABLE `proxy_logs` ADD COLUMN `usage_source` TEXT;
-ALTER TABLE `proxy_logs` ADD COLUMN `site_id` INT;
-ALTER TABLE `proxy_logs` ADD COLUMN `model_site_id` INT;
-ALTER TABLE `proxy_logs` ADD COLUMN `credential_site_id` INT;
-CREATE INDEX `proxy_logs_site_id_idx` ON `proxy_logs` (`site_id`, `id`);
+-- no schema changes detected for mysql

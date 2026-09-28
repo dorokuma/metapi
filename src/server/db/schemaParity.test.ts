@@ -142,26 +142,19 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('"proxy_logs_site_id_idx"');
   });
 
-  it('keeps upgrade artifacts reflecting the current slice delta against the previous contract', () => {
-    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+  it('keeps upgrade artifacts in the normalized empty-step state', () => {
     const mysqlUpgrade = readFileSync(resolve(generatedDir, 'mysql.upgrade.sql'), 'utf8');
     const postgresUpgrade = readFileSync(resolve(generatedDir, 'postgres.upgrade.sql'), 'utf8');
 
-    // upgrade 产物必须包含本次切片的 8 条 ADD COLUMN
-    for (const col of [
-      'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens',
-      'prompt_tokens_include_cache', 'usage_source',
-      'site_id', 'model_site_id', 'credential_site_id',
-    ]) {
-      expect(mysqlUpgrade).toContain(`ADD COLUMN \`${col}\``);
-      expect(postgresUpgrade).toContain(`ADD COLUMN \"${col}\"`);
-    }
+    // 归正终态：upgrade 产物为 generator 空步标记（无增量待应用）
+    expect(mysqlUpgrade).toContain('-- no schema changes detected for mysql');
+    expect(postgresUpgrade).toContain('-- no schema changes detected for postgres');
 
-    // upgrade 产物必须包含本次切片的 1 条索引
-    expect(mysqlUpgrade).toContain('`proxy_logs_site_id_idx`');
-    expect(postgresUpgrade).toContain('"proxy_logs_site_id_idx"');
+    // 锁定空步：不得含任何 ADD COLUMN（防回潮）
+    expect(mysqlUpgrade).not.toContain('ADD COLUMN');
+    expect(postgresUpgrade).not.toContain('ADD COLUMN');
 
-    // upgrade 产物不得包含已由 0030 发布的增量（上游观测表）
+    // 不得包含已由 0030/0031 发布的增量
     expect(mysqlUpgrade).not.toContain('upstream_provider_observations');
     expect(postgresUpgrade).not.toContain('upstream_provider_observations');
   });

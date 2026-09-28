@@ -1,6 +1,6 @@
 import baselineContract from './generated/fixtures/2026-03-14-baseline.schemaContract.json' with { type: 'json' };
 import currentContract from './generated/schemaContract.json' with { type: 'json' };
-import { applyContractFixtureThenUpgrade, introspectLiveSchema } from './schemaIntrospection.js';
+import { alignMySqlTextDefaultsWithContract, applyContractFixtureThenUpgrade, introspectLiveSchema } from './schemaIntrospection.js';
 import { describe, expect, it } from 'vitest';
 
 const skipLiveSchema = process.env.DB_PARITY_SKIP_LIVE_SCHEMA === 'true';
@@ -20,7 +20,9 @@ describe('schema upgrade parity', () => {
       connectionString: process.env.DB_PARITY_MYSQL_URL!,
     });
     const live = await introspectLiveSchema({ dialect: 'mysql', connectionString: mysqlUrl });
-    expect(live).toEqual(currentContract);
+    // MySQL/MariaDB 物理 TEXT 列不能携带 DEFAULT（errno 1101）：比对前从 contract 回填
+    // 该类列的默认值（见 alignMySqlTextDefaultsWithContract），其余字段照常校验。
+    expect(alignMySqlTextDefaultsWithContract(live, currentContract)).toEqual(currentContract);
   });
 
   postgresUpgrade('upgrades postgres to the current contract', async () => {

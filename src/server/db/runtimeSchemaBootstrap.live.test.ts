@@ -4,7 +4,7 @@ import mysql from 'mysql2/promise';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { generateBootstrapSql } from './schemaArtifactGenerator.js';
-import { __schemaIntrospectionTestUtils, introspectLiveSchema } from './schemaIntrospection.js';
+import { alignMySqlTextDefaultsWithContract, __schemaIntrospectionTestUtils, introspectLiveSchema } from './schemaIntrospection.js';
 import { bootstrapRuntimeDatabaseSchema } from './runtimeSchemaBootstrap.js';
 
 const mysqlRuntime = process.env.DB_PARITY_MYSQL_URL ? it : it.skip;
@@ -88,7 +88,9 @@ describe('runtime schema bootstrap live upgrade path', () => {
     });
 
     const live = await introspectLiveSchema({ dialect: 'mysql', connectionString });
-    expect(live).toEqual(currentContract);
+    // MySQL/MariaDB 物理 TEXT 列不能携带 DEFAULT（errno 1101）：比对前从 contract 回填
+    // 该类列的默认值（见 alignMySqlTextDefaultsWithContract），其余字段照常校验。
+    expect(alignMySqlTextDefaultsWithContract(live, currentContract)).toEqual(currentContract);
   });
 
   postgresRuntime('upgrades postgres runtime schemas from an older live contract', async () => {

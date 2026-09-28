@@ -189,7 +189,7 @@ describe('schema artifact generator', () => {
     const artifacts = generateDialectArtifacts(contract);
 
     expect(artifacts.mysqlBootstrap).toContain(
-      'CREATE TABLE IF NOT EXISTS `notification_templates` (`event_type` VARCHAR(191) NOT NULL, `channel` VARCHAR(191) NOT NULL, `body` TEXT NOT NULL DEFAULT \'\', PRIMARY KEY (`event_type`, `channel`))',
+      'CREATE TABLE IF NOT EXISTS `notification_templates` (`event_type` VARCHAR(191) NOT NULL, `channel` VARCHAR(191) NOT NULL, `body` TEXT NOT NULL, PRIMARY KEY (`event_type`, `channel`))',
     );
     expect(artifacts.postgresBootstrap).toContain(
       'CREATE TABLE IF NOT EXISTS "notification_templates" ("event_type" TEXT NOT NULL, "channel" TEXT NOT NULL, "body" TEXT NOT NULL DEFAULT \'\', PRIMARY KEY ("event_type", "channel"))',
@@ -204,10 +204,15 @@ describe('schema artifact generator', () => {
     const artifacts = generateDialectArtifacts(readSchemaContract());
 
     // 模板正文上限 4000 字：notification_templates.title/body/parse_mode 有显式长文本
-    // 标记，绝不能因为 DEFAULT '' 被映射成 VARCHAR(191) 而截断
-    expect(artifacts.mysqlBootstrap).toContain('`title` TEXT NOT NULL DEFAULT \'\'');
-    expect(artifacts.mysqlBootstrap).toContain('`body` TEXT NOT NULL DEFAULT \'\'');
-    expect(artifacts.mysqlBootstrap).toContain('`parse_mode` TEXT NOT NULL DEFAULT \'\'');
+    // 标记，绝不能因为 DEFAULT '' 被映射成 VARCHAR(191) 而截断。
+    // MySQL/MariaDB 的 TEXT 列不允许 DEFAULT 子句（errno 1101）：DDL 省略默认值，
+    // 保持 TEXT 类型与 NOT NULL，逻辑默认值由 contract 承载。
+    expect(artifacts.mysqlBootstrap).toContain('`title` TEXT NOT NULL');
+    expect(artifacts.mysqlBootstrap).toContain('`body` TEXT NOT NULL');
+    expect(artifacts.mysqlBootstrap).toContain('`parse_mode` TEXT NOT NULL');
+    expect(artifacts.mysqlBootstrap).not.toContain('`title` TEXT NOT NULL DEFAULT');
+    expect(artifacts.mysqlBootstrap).not.toContain('`body` TEXT NOT NULL DEFAULT');
+    expect(artifacts.mysqlBootstrap).not.toContain('`parse_mode` TEXT NOT NULL DEFAULT');
     expect(artifacts.mysqlBootstrap).not.toContain('`body` VARCHAR(191)');
     expect(artifacts.mysqlBootstrap).not.toContain('`title` VARCHAR(191)');
     // postgres 侧 text 列本来就是 TEXT，不受标记影响
@@ -245,7 +250,9 @@ describe('schema artifact generator', () => {
     expect(artifacts.mysqlBootstrap).toContain('`status` VARCHAR(191) NOT NULL DEFAULT \'active\'');
     expect(artifacts.mysqlBootstrap).toContain('`post_refresh_probe_model` VARCHAR(191) DEFAULT \'\'');
     expect(artifacts.mysqlBootstrap).toContain('`url` TEXT NOT NULL');
-    expect(artifacts.mysqlBootstrap).toContain('`body` TEXT NOT NULL DEFAULT \'\'');
+    // MySQL 物理 TEXT 列不携带 DEFAULT（errno 1101），逻辑默认值在 contract
+    expect(artifacts.mysqlBootstrap).toContain('`body` TEXT NOT NULL');
+    expect(artifacts.mysqlBootstrap).not.toContain('`body` TEXT NOT NULL DEFAULT');
   });
 
   it('keeps existing tables mysql bootstrap column types byte-compatible (varchar(191) with defaults)', () => {

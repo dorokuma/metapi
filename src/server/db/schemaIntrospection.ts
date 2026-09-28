@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import {
   generateBootstrapSql,
   generateUpgradeSql,
+  isMysqlPhysicalTextColumn,
   resolveGeneratedArtifactPath,
 } from './schemaArtifactGenerator.js';
 import type {
@@ -234,12 +235,48 @@ function normalizeDefaultValueForColumn(
   if (lowered === 'true' || lowered === 'false') return lowered;
   if (/^-?\d+(?:\.\d+)?$/.test(normalized)) return normalized;
   if (/^'.*'$/.test(normalized)) return normalized;
-  if (/^[a-z_][a-z0-9_]*$/i.test(normalized)) return `'${normalized}'`;
+  // MySQL 的 information_schema.COLUMN_DEFAULT 对字符串默认值返回不带引号的字面量，
+  // contract 采用带引号的字符串字面量形式（SQLite/PG introspection 形式）：对标识符及
+  // 含连字符的字符串（如 cline-gateway）补回引号，避免同一默认值跨方言产生 diff。
+  if (/^[a-z_][a-z0-9_-]*$/i.test(normalized)) return `'${normalized}'`;
   return normalized;
 }
 
 export function normalizeDefaultValue(rawDefaultValue: string | null | undefined): string | null {
   return normalizeDefaultValueForColumn(rawDefaultValue, null);
+}
+
+/**
+ * MySQL/MariaDB 方言缺口：TEXT 类列不允许携带 DEFAULT（errno 1101），生成的 DDL 对
+ * 物理 TEXT 列省略默认值子句，逻辑默认值只存在于 contract；live introspection 对这类
+ * 列返回 null，与 contract 的期望默认值不是真实漂移。比对前从 contract 回填（仅限
+ * 「contract 有默认值 + live 为 null + 物理类型 TEXT」的列），parity 门禁继续校验其余
+ * 全部字段。
+ */
+export function alignMySqlTextDefaultsWithContract(
+  live: SchemaContract,
+  contract: SchemaContract,
+): SchemaContract {
+  const aligned = JSON.parse(JSON.stringify(live)) as SchemaContract;
+  for (const [tableName, table] of Object.entries(aligned.tables)) {
+    const contractTable = contract.tables[tableName];
+    if (!contractTable) {
+      continue;
+    }
+    for (const [columnName, column] of Object.entries(table.columns)) {
+      const contractColumn = contractTable.columns[columnName];
+      if (!contractColumn) {
+        continue;
+      }
+      if (column.defaultValue != null || contractColumn.defaultValue == null) {
+        continue;
+      }
+      if (isMysqlPhysicalTextColumn(tableName, columnName, contractColumn)) {
+        column.defaultValue = contractColumn.defaultValue;
+      }
+    }
+  }
+  return aligned;
 }
 
 function sortForeignKeys(foreignKeys: SchemaContractForeignKey[]): SchemaContractForeignKey[] {

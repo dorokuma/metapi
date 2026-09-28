@@ -3,7 +3,11 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SchemaContract } from './schemaContract.js';
-import { introspectLiveSchema, materializeFreshSchema } from './schemaIntrospection.js';
+import {
+  alignMySqlTextDefaultsWithContract,
+  introspectLiveSchema,
+  materializeFreshSchema,
+} from './schemaIntrospection.js';
 
 const dbDir = dirname(fileURLToPath(import.meta.url));
 const schemaContractPath = resolve(dbDir, 'generated/schemaContract.json');
@@ -26,7 +30,9 @@ describe('live schema parity', () => {
       connectionString: process.env.DB_PARITY_MYSQL_URL!,
     });
     const live = await introspectLiveSchema({ dialect: 'mysql', connectionString: mysqlUrl });
-    expect(live).toEqual(contract);
+    // MySQL/MariaDB 物理 TEXT 列不能携带 DEFAULT（errno 1101），DDL 按方言缺口省略；
+    // 比对前从 contract 回填（见 alignMySqlTextDefaultsWithContract）。
+    expect(alignMySqlTextDefaultsWithContract(live, contract)).toEqual(contract);
   });
 
   postgresParity('matches the contract for postgres', async () => {

@@ -71,6 +71,27 @@ function isLongTextColumn(tableName: string, columnName: string): boolean {
   return MYSQL_LONG_TEXT_COLUMNS[tableName]?.has(columnName) ?? false;
 }
 
+/**
+ * MySQL/MariaDB 方言下 text 逻辑列的物理类型判定（与 mapColumnType 的 'text' 分支同源）：
+ * 显式长文本标记列恒为 TEXT；其余 text 列中主键或带默认值的物理为 VARCHAR(191)，
+ * 其余为 TEXT。
+ * TEXT 类列不能携带 DEFAULT 子句（errno 1101）：DDL 生成省略默认值、parity 比对识别
+ * 「默认值不落 MySQL」的方言缺口，都依赖此判定，避免规则分叉。
+ */
+export function isMysqlPhysicalTextColumn(
+  tableName: string,
+  columnName: string,
+  column: SchemaContractColumn,
+): boolean {
+  if (column.logicalType !== 'text') {
+    return false;
+  }
+  if (isLongTextColumn(tableName, columnName)) {
+    return true;
+  }
+  return !(column.primaryKey || column.defaultValue != null);
+}
+
 function mapColumnType(
   dialect: SqlDialect,
   tableName: string,
@@ -108,10 +129,7 @@ function mapColumnType(
         // 显式长文本标记列（模板 title/body/parse_mode 等）无长度上限，保持 TEXT，
         // 避免 4000 字上限的模板正文被降级成 VARCHAR(191) 后静默截断；其余列沿用
         // 「主键或确有 VARCHAR(191) 上限依据（带默认值）」规则，与存量库定义一致。
-        if (isLongTextColumn(tableName, columnName)) {
-          return 'TEXT';
-        }
-        return column.primaryKey || column.defaultValue != null ? 'VARCHAR(191)' : 'TEXT';
+        return isMysqlPhysicalTextColumn(tableName, columnName, column) ? 'TEXT' : 'VARCHAR(191)';
       default:
         return 'TEXT';
     }
@@ -156,6 +174,10 @@ function formatDefaultValue(dialect: SqlDialect, column: SchemaContractColumn): 
   return ` DEFAULT ${column.defaultValue}`;
 }
 
+// MySQL/MariaDB 的 TEXT 类列不允许携带 DEFAULT 子句（errno 1101）。DDL 一律省略：
+// notNull 语义保持，逻辑默认值仍由 schema contract 承载（sqlite/postgres 照常输出）。
+const MYSQL_NO_DEFAULT_SQL_TYPES: ReadonlySet<string> = new Set(['TINYTEXT', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT']);
+
 function buildColumnDefinition(
   dialect: SqlDialect,
   tableName: string,
@@ -165,7 +187,8 @@ function buildColumnDefinition(
 ): string {
   const sqlType = mapColumnType(dialect, tableName, columnName, column);
   const notNull = column.notNull ? ' NOT NULL' : '';
-  const defaultValue = formatDefaultValue(dialect, column);
+  const omitDefaultForMysqlText = dialect === 'mysql' && MYSQL_NO_DEFAULT_SQL_TYPES.has(sqlType);
+  const defaultValue = omitDefaultForMysqlText ? '' : formatDefaultValue(dialect, column);
   const primaryKey = emitPrimaryKey && column.primaryKey ? ' PRIMARY KEY' : '';
   const autoincrement =
     emitPrimaryKey && dialect === 'sqlite' && column.primaryKey && columnName === 'id' ? ' AUTOINCREMENT' : '';

@@ -187,12 +187,13 @@ describe('modelPricingService — tiered_expr pricing path', () => {
     });
 
     // ratio fallback: inputPerMillion = model_ratio * 2 = 4
-    expect(details!.pricing.pricingSource).toBe('ratio');
+    expect(details!.pricing.pricingSource).toBe('fallback');
     // The fallback is auditable, not silent: the billing_expr was present but unparseable.
     expect(details!.pricing.exprFallback).toBe(true);
     expect(details!.pricing.exprFallbackReason).toContain('not parseable');
     expect(details!.pricing.billingExpr).toBe('tier("base", p * 2 +');
-    expect(details!.breakdown.inputPerMillion).toBeCloseTo(4, 10);
+    expect(details!.breakdown.inputPerMillion).toBeCloseTo(0, 10);
+    expect(details!.breakdown.totalCost).toBeCloseTo(0, 10);
   });
 
   it('falls back to the ratio path for an unsupported billing_mode', async () => {
@@ -217,12 +218,13 @@ describe('modelPricingService — tiered_expr pricing path', () => {
       totalTokens: 1_000_000,
     });
 
-    // ratio fallback: inputPerMillion = model_ratio * 2 = 6
-    expect(details!.pricing.pricingSource).toBe('ratio');
-    // The fallback is auditable, not silent: the billing_expr was present but the mode is unsupported.
+    // unsupported billing_mode: ratio is rejected, fallback to zero-cost breakdown
+    expect(details!.pricing.pricingSource).toBe('fallback');
     expect(details!.pricing.exprFallback).toBe(true);
     expect(details!.pricing.exprFallbackReason).toContain('unsupported billing_mode');
-    expect(details!.breakdown.inputPerMillion).toBeCloseTo(6, 10);
+    expect(details!.pricing.billingExpr).toBe('p * 2');
+    expect(details!.breakdown.inputPerMillion).toBeCloseTo(0, 10);
+    expect(details!.breakdown.totalCost).toBeCloseTo(0, 10);
   });
 
   it('leaves ratio models untouched (no billing_expr) on the ratio path', async () => {
@@ -405,5 +407,55 @@ describe('modelPricingService — tiered_expr pricing path', () => {
     expect(details!.breakdown.cacheCreationCost).toBeCloseTo(5, 10);
     expect(details!.breakdown.cc1hCost).toBeCloseTo(4, 10);
     expect(details!.breakdown.totalCost).toBeCloseTo(13, 10);
+  });
+
+  it('returns fallback breakdown when pricing catalog is unavailable (Fix 4)', async () => {
+    // Simulate catalog unavailable by not mocking any fetch.
+    const details = await buildProxyBillingDetails({
+      site: site(9040),
+      account: { id: 9040 },
+      modelName: 'unknown-model',
+      promptTokens: 1_000_000,
+      completionTokens: 0,
+      totalTokens: 1_000_000,
+    });
+
+    expect(details).not.toBeNull();
+    expect(details!.pricing.pricingSource).toBe('fallback');
+    expect(details!.pricing.fallbackReason).toBe('pricing catalog unavailable');
+    expect(details!.breakdown.totalCost).toBe(0);
+    expect(details!.pricing.fallbackDivisor).toBe(500_000);
+  });
+
+  it('surfaces override relationship for self-log billing metadata (Fix 5)', async () => {
+    mockPricingPayloadOnce([
+      {
+        model_name: 'override-model',
+        quota_type: 0,
+        model_ratio: 2,
+        completion_ratio: 1,
+        enable_groups: ['default'],
+      },
+    ]);
+
+    const details = await buildProxyBillingDetails({
+      site: site(9041),
+      account: { id: 9041 },
+      modelName: 'override-model',
+      promptTokens: 1_000_000,
+      completionTokens: 0,
+      totalTokens: 1_000_000,
+      billingPricingOverride: {
+        modelRatio: 3,
+        completionRatio: 1,
+        cacheRatio: 1,
+        cacheCreationRatio: 1,
+        groupRatio: 1,
+      },
+    });
+
+    expect(details).not.toBeNull();
+    expect(details!.pricing.pricingSource).toBe('selflog-override');
+    expect(details!.pricing.overrideRelationship).toBe('override_newer_than_catalog');
   });
 });

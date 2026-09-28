@@ -201,6 +201,7 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
                 parsedRewardCountByAccount[row.accounts.id] || 0,
               rewardSum: rewardByAccount[row.accounts.id] || 0,
               extraConfig: row.accounts.extraConfig,
+              platform: row.sites.platform,
             }) * 1_000_000,
           ) / 1_000_000,
         runtimeHealth: buildRuntimeHealthForAccount({

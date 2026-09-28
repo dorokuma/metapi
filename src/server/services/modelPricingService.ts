@@ -52,6 +52,8 @@ export interface PricingModel {
 interface PricingData {
   models: Map<string, PricingModel>;
   groupRatio: Record<string, number>;
+  /** 费率缓存版本戳（毫秒时间戳），用于 billing_details 审计 */
+  fetchedAt: number;
 }
 
 export interface ProxyBillingPricingOverride {
@@ -96,6 +98,8 @@ export interface EstimateProxyCostInput {
   cacheCreationTokens1h?: number;
   promptTokensIncludeCache?: boolean | null;
   billingPricingOverride?: ProxyBillingPricingOverride | null;
+  /** 请求账号实际 group（来自 account/site/token 配置），优先于 model.enableGroups 遍历 */
+  group?: string | null;
 }
 
 interface ModelGroupPricing {
@@ -151,7 +155,7 @@ export interface ProxyBillingDetails {
     cacheCreationRatio: number;
     groupRatio: number;
     /** Which pricing path produced this cost: 'ratio' or 'expr' (per-call models return null details). */
-    pricingSource: 'ratio' | 'expr';
+    pricingSource: 'ratio' | 'expr' | 'fallback' | 'selflog-override';
     /** Raw billing expression actually used, for audit. null when the ratio path was used. */
     billingExpr?: string | null;
     /**
@@ -161,6 +165,16 @@ export interface ProxyBillingDetails {
     exprFallback?: boolean;
     /** Human-readable reason for the ratio fallback (unparseable expr / unsupported mode / eval error). */
     exprFallbackReason?: string;
+    /** 费率缓存版本戳（毫秒），用于事后审计同模型多版本费率 */
+    pricingFetchedAt?: number;
+    /** 兜底原因（fallbackTokenCost 场景） */
+    fallbackReason?: string;
+    /** 兜底除数（fallbackTokenCost 场景） */
+    fallbackDivisor?: number;
+    /** 兜底 tokens（fallbackTokenCost 场景） */
+    fallbackTokens?: number;
+    /** selflog override 与当前定价版本的关系 */
+    overrideRelationship?: string;
   };
   breakdown: {
     inputPerMillion: number;
@@ -321,8 +335,10 @@ function normalizePricingModels(rawModels: unknown[]): Map<string, PricingModel>
       }
     }
 
-    models.set(modelName, {
-      modelName,
+    const canonicalName = modelName;
+    const lowerName = modelName.toLowerCase();
+    models.set(lowerName, {
+      modelName: canonicalName,
       quotaType,
       modelRatio: modelRatio > 0 ? modelRatio : 1,
       completionRatio: completionRatio > 0 ? completionRatio : 1,
@@ -358,7 +374,7 @@ function normalizeCommonPricingPayload(payload: unknown): PricingData | null {
   if (models.size === 0) return null;
 
   const groupRatio = normalizeGroupRatio((payload as any)?.group_ratio);
-  return { models, groupRatio };
+  return { models, groupRatio, fetchedAt: Date.now() };
 }
 
 function normalizeOneHubPricingPayload(availablePayload: unknown, groupPayload: unknown): PricingData | null {
@@ -409,7 +425,7 @@ function normalizeOneHubPricingPayload(availablePayload: unknown, groupPayload: 
   }
 
   const groupRatio = normalizeGroupRatio(groupRatioSource);
-  return { models, groupRatio };
+  return { models, groupRatio, fetchedAt: Date.now() };
 }
 
 async function fetchJson(url: string, options?: UndiciRequestInit): Promise<unknown> {
@@ -508,7 +524,7 @@ function normalizeModelKey(modelName: string): string {
 function buildRoutingReferenceCostMap(data: PricingData): Map<string, number> {
   const costs = new Map<string, number>();
   for (const model of data.models.values()) {
-    const cost = calculateModelUsageCost(model, ROUTING_REFERENCE_USAGE, data.groupRatio);
+    const cost = calculateModelUsageCost(model, ROUTING_REFERENCE_USAGE, data.groupRatio, undefined);
     if (!Number.isFinite(cost)) continue;
     costs.set(normalizeModelKey(model.modelName), Math.max(cost, MIN_ROUTING_REFERENCE_COST));
   }
@@ -569,6 +585,9 @@ async function getPricingDataCached(input: EstimateProxyCostInput): Promise<Pric
   }
 
   const data = await fetchPricingData(input);
+  if (data) {
+    data.fetchedAt = now;
+  }
   const ttlMs = data ? PRICE_CACHE_TTL_MS : PRICE_CACHE_FAILURE_TTL_MS;
   pricingCache.set(key, {
     fetchedAt: now,
@@ -583,6 +602,9 @@ async function refreshPricingDataCache(input: EstimateProxyCostInput): Promise<P
   const key = getCacheKey(input);
   const now = Date.now();
   const data = await fetchPricingData(input);
+  if (data) {
+    data.fetchedAt = now;
+  }
   const ttlMs = data ? PRICE_CACHE_TTL_MS : PRICE_CACHE_FAILURE_TTL_MS;
   pricingCache.set(key, {
     fetchedAt: now,
@@ -615,18 +637,16 @@ export function getCachedModelRoutingReferenceCost(input: {
 }
 
 function resolveModel(modelName: string, data: PricingData): PricingModel | null {
-  const exact = data.models.get(modelName);
-  if (exact) return exact;
-
   const lower = modelName.toLowerCase();
-  for (const [name, model] of data.models.entries()) {
-    if (name.toLowerCase() === lower) return model;
-  }
-
-  return null;
+  return data.models.get(lower) ?? null;
 }
 
-function resolveGroupMultiplier(model: PricingModel, groupRatio: Record<string, number>): number {
+export function resolveGroupMultiplier(model: PricingModel, groupRatio: Record<string, number>, requestGroup?: string | null): number {
+  const normalizedRequestGroup = typeof requestGroup === 'string' ? requestGroup.trim() : '';
+  if (normalizedRequestGroup && groupRatio[normalizedRequestGroup]) {
+    return groupRatio[normalizedRequestGroup];
+  }
+
   if (model.enableGroups.includes(DEFAULT_GROUP) && groupRatio[DEFAULT_GROUP]) {
     return groupRatio[DEFAULT_GROUP];
   }
@@ -755,6 +775,7 @@ function buildExprBreakdown(
   model: PricingModel,
   normalizedUsage: ReturnType<typeof normalizeUsageBreakdownInput>,
   multiplier: number,
+  pricingFetchedAt?: number,
 ): ExprBreakdownOutcome {
   const parsed = model.pricingExpr;
   if (!parsed) return { ok: false, reason: 'billing_expr AST missing' };
@@ -824,6 +845,7 @@ function buildExprBreakdown(
           groupRatio: multiplier,
           pricingSource: 'expr',
           billingExpr: model.billingExpr ?? null,
+          ...(pricingFetchedAt ? { pricingFetchedAt } : {}),
         },
         breakdown,
       },
@@ -881,19 +903,21 @@ export function calculateModelUsageBreakdown(
     promptTokensIncludeCache?: boolean | null;
   },
   groupRatio: Record<string, number>,
+  pricingFetchedAt?: number,
+  requestGroup?: string | null,
 ): ProxyBillingDetails | null {
   if (model.quotaType === 1) {
     return null;
   }
 
-  const multiplier = resolveGroupMultiplier(model, groupRatio);
+  const multiplier = resolveGroupMultiplier(model, groupRatio, requestGroup);
   const normalizedUsage = normalizeUsageBreakdownInput(usage);
 
   // Determine why a billing_expr, if present, did NOT drive this cost, so the ratio
   // fallback is auditable (exprFallback + reason) rather than silently distorting prices.
   let exprFallbackReason: string | null = null;
   if (model.pricingSource === 'expr' && model.pricingExpr) {
-    const outcome = buildExprBreakdown(model, normalizedUsage, multiplier);
+    const outcome = buildExprBreakdown(model, normalizedUsage, multiplier, pricingFetchedAt);
     if (outcome.ok) return outcome.breakdown;
     // buildExprBreakdown already logged a warning; fall back to the ratio path below.
     exprFallbackReason = outcome.reason;
@@ -901,6 +925,38 @@ export function calculateModelUsageBreakdown(
     // Model had a billing_expr but the ratio path is used (rejected at normalization:
     // unparseable or unsupported billing_mode). Surface the stored reason.
     exprFallbackReason = model.pricingFallbackReason ?? 'billing_expr rejected at normalization';
+  }
+
+  // 无法确证为真实 ratio 时拒绝 ratio 计价，改走 fallback。
+  // 典型场景：上游带 billing_expr 但表达式无法解析，此时 model_ratio 可能是占位值。
+  if (model.pricingFallbackReason) {
+    return {
+      quotaType: model.quotaType,
+      usage: normalizedUsage,
+      pricing: {
+        modelRatio: model.modelRatio,
+        completionRatio: model.completionRatio,
+        cacheRatio: model.cacheRatio ?? 1,
+        cacheCreationRatio: model.cacheCreationRatio ?? 1,
+        groupRatio: multiplier,
+        pricingSource: 'fallback',
+        billingExpr: model.billingExpr ?? null,
+        exprFallback: true as const,
+        exprFallbackReason: model.pricingFallbackReason,
+        ...(pricingFetchedAt ? { pricingFetchedAt } : {}),
+      },
+      breakdown: {
+        inputPerMillion: 0,
+        outputPerMillion: 0,
+        cacheReadPerMillion: 0,
+        cacheCreationPerMillion: 0,
+        inputCost: 0,
+        outputCost: 0,
+        cacheReadCost: 0,
+        cacheCreationCost: 0,
+        totalCost: 0,
+      },
+    };
   }
 
   const cacheRatio = model.cacheRatio ?? 1;
@@ -927,6 +983,7 @@ export function calculateModelUsageBreakdown(
       pricingSource: 'ratio',
       billingExpr: model.billingExpr ?? null,
       ...(exprFallbackReason ? { exprFallback: true as const, exprFallbackReason } : {}),
+      ...(pricingFetchedAt ? { pricingFetchedAt } : {}),
     },
     breakdown: {
       inputPerMillion,
@@ -953,14 +1010,15 @@ export function calculateModelUsageCost(
     promptTokensIncludeCache?: boolean | null;
   },
   groupRatio: Record<string, number>,
+  requestGroup?: string | null,
 ): number {
-  const multiplier = resolveGroupMultiplier(model, groupRatio);
+  const multiplier = resolveGroupMultiplier(model, groupRatio, requestGroup);
 
   if (model.quotaType === 1) {
     return roundCost(calculatePerCallCost(model.modelPrice, multiplier));
   }
 
-  return calculateModelUsageBreakdown(model, usage, groupRatio)?.breakdown.totalCost ?? 0;
+  return calculateModelUsageBreakdown(model, usage, groupRatio, undefined, requestGroup)?.breakdown.totalCost ?? 0;
 }
 
 function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricingCatalog {
@@ -1064,7 +1122,7 @@ export async function estimateProxyCost(input: EstimateProxyCostInput): Promise<
   try {
     if (input.billingPricingOverride) {
       const pricingOverride = buildPricingOverrideModel(input.modelName, input.billingPricingOverride);
-      return calculateModelUsageCost(pricingOverride.model, usage, pricingOverride.groupRatio);
+      return calculateModelUsageCost(pricingOverride.model, usage, pricingOverride.groupRatio, input.group);
     }
 
     const pricingData = await getPricingDataCached(input);
@@ -1073,11 +1131,11 @@ export async function estimateProxyCost(input: EstimateProxyCostInput): Promise<
     }
 
     const model = resolveModel(input.modelName, pricingData);
-    if (!model) {
+    if (!model || model.pricingFallbackReason) {
       return fallbackTokenCost(totalTokens, input.site.platform);
     }
 
-    return calculateModelUsageCost(model, usage, pricingData.groupRatio);
+    return calculateModelUsageCost(model, usage, pricingData.groupRatio, input.group);
   } catch {
     return fallbackTokenCost(totalTokens, input.site.platform);
   }
@@ -1111,16 +1169,108 @@ export async function buildProxyBillingDetails(input: EstimateProxyCostInput): P
   try {
     if (input.billingPricingOverride) {
       const pricingOverride = buildPricingOverrideModel(input.modelName, input.billingPricingOverride);
-      return calculateModelUsageBreakdown(pricingOverride.model, usage, pricingOverride.groupRatio);
+      const overrideDetails = calculateModelUsageBreakdown(pricingOverride.model, usage, pricingOverride.groupRatio, undefined, input.group);
+      if (overrideDetails) {
+        // 标注来源为 selflog-override 并尝试与当前定价版本对比。
+        const currentPricingData = await getPricingDataCached(input);
+        const currentModel = currentPricingData ? resolveModel(input.modelName, currentPricingData) : null;
+        let overrideRelationship: string | undefined;
+        if (currentModel) {
+          const ratioChanged = currentModel.modelRatio !== pricingOverride.model.modelRatio
+            || currentModel.completionRatio !== pricingOverride.model.completionRatio
+            || (currentModel.cacheRatio ?? 1) !== pricingOverride.model.cacheRatio
+            || (currentModel.cacheCreationRatio ?? 1) !== pricingOverride.model.cacheCreationRatio;
+          if (ratioChanged) {
+            overrideRelationship = 'override_newer_than_catalog';
+          } else {
+            overrideRelationship = 'override_equals_catalog';
+          }
+        } else {
+          overrideRelationship = 'override_no_catalog_for_comparison';
+        }
+        return {
+          ...overrideDetails,
+          pricing: {
+            ...overrideDetails.pricing,
+            pricingSource: 'selflog-override',
+            overrideRelationship,
+          },
+        };
+      }
+      return null;
     }
 
     const pricingData = await getPricingDataCached(input);
-    if (!pricingData) return null;
+    if (!pricingData) {
+      // No pricing catalog available: emit a zero-cost fallback breakdown so the
+      // billing_details column is never empty, and the divisor/tokens are auditable.
+      const platform = input.site?.platform ?? 'unknown';
+      const divisor = platform === 'veloera' ? 1_000_000 : 500_000;
+      const normalizedUsage = normalizeUsageBreakdownInput(usage);
+      return {
+        quotaType: 0,
+        usage: normalizedUsage,
+        pricing: {
+          modelRatio: 0,
+          completionRatio: 0,
+          cacheRatio: 1,
+          cacheCreationRatio: 1,
+          groupRatio: 1,
+          pricingSource: 'fallback',
+          fallbackReason: 'pricing catalog unavailable',
+          fallbackDivisor: divisor,
+          fallbackTokens: normalizedUsage.totalTokens,
+        },
+        breakdown: {
+          inputPerMillion: 0,
+          outputPerMillion: 0,
+          cacheReadPerMillion: 0,
+          cacheCreationPerMillion: 0,
+          inputCost: 0,
+          outputCost: 0,
+          cacheReadCost: 0,
+          cacheCreationCost: 0,
+          totalCost: 0,
+        },
+      };
+    }
 
     const model = resolveModel(input.modelName, pricingData);
-    if (!model || model.quotaType === 1) return null;
+    if (!model || model.quotaType === 1) {
+      // Model not found in catalog or per-call model: emit a fallback breakdown.
+      const platform = input.site?.platform ?? 'unknown';
+      const divisor = platform === 'veloera' ? 1_000_000 : 500_000;
+      const normalizedUsage = normalizeUsageBreakdownInput(usage);
+      return {
+        quotaType: 0,
+        usage: normalizedUsage,
+        pricing: {
+          modelRatio: 0,
+          completionRatio: 0,
+          cacheRatio: 1,
+          cacheCreationRatio: 1,
+          groupRatio: 1,
+          pricingSource: 'fallback',
+          fallbackReason: model ? 'per-call model rejected' : 'model not found in catalog',
+          fallbackDivisor: divisor,
+          fallbackTokens: normalizedUsage.totalTokens,
+          ...(pricingData.fetchedAt ? { pricingFetchedAt: pricingData.fetchedAt } : {}),
+        },
+        breakdown: {
+          inputPerMillion: 0,
+          outputPerMillion: 0,
+          cacheReadPerMillion: 0,
+          cacheCreationPerMillion: 0,
+          inputCost: 0,
+          outputCost: 0,
+          cacheReadCost: 0,
+          cacheCreationCost: 0,
+          totalCost: 0,
+        },
+      };
+    }
 
-    return calculateModelUsageBreakdown(model, usage, pricingData.groupRatio);
+    return calculateModelUsageBreakdown(model, usage, pricingData.groupRatio, pricingData.fetchedAt, input.group);
   } catch {
     return null;
   }

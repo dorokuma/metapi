@@ -36,7 +36,7 @@ export async function collectDailySummaryMetrics(now = new Date()): Promise<Dail
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.sites.status, 'active'))
     .all();
-  const accounts = accountRows.map((row) => row.accounts);
+  const accounts = accountRows.map((row) => ({ ...row.accounts, sitePlatform: row.sites.platform }));
 
   const activeAccounts = accounts.filter((account) => account.status === 'active').length;
   const lowBalanceAccounts = accounts.filter((account) => (account.balance || 0) < 1).length;
@@ -94,6 +94,7 @@ export async function collectDailySummaryMetrics(now = new Date()): Promise<Dail
     parsedRewardCount: parsedRewardCountByAccount[account.id] || 0,
     rewardSum: rewardByAccount[account.id] || 0,
     extraConfig: account.extraConfig,
+    platform: account.sitePlatform,
   }), 0);
 
   return {

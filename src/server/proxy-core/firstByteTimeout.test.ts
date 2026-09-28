@@ -1,26 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import { buildDelayedResponse } from '../test-fixtures/delayedResponseTestUtils.js';
 import {
   fetchWithObservedFirstByte,
   getObservedResponseMeta,
   isObservedFirstByteTimeoutResponse,
 } from './firstByteTimeout.js';
-
-function buildDelayedResponse(bodyText: string, delayMs: number, status = 200): Response {
-  const encoder = new TextEncoder();
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      setTimeout(() => {
-        controller.enqueue(encoder.encode(bodyText));
-        controller.close();
-      }, delayMs);
-    },
-  });
-  return new Response(body, {
-    status,
-    headers: { 'content-type': 'text/plain; charset=utf-8' },
-  });
-}
 
 describe('fetchWithObservedFirstByte', () => {
   it('replays the first chunk and records first-byte latency when upstream responds in time', async () => {
@@ -58,5 +43,43 @@ describe('fetchWithObservedFirstByte', () => {
     const meta = getObservedResponseMeta(response);
     expect(meta?.timedOutBeforeFirstByte).toBe(true);
     expect(meta?.firstByteLatencyMs).toBeNull();
+  });
+
+  it('bounds the wait when the body cancel never settles, and still returns the timeout response', async () => {
+    // tee 分支的 cancel 只有两个分支都取消后才 settle：直接 await 会永久挂住。
+    const source = buildDelayedResponse('never delivered', 60);
+    const [teedBranch] = source.body!.tee();
+
+    const startedAt = Date.now();
+    const response = await fetchWithObservedFirstByte(
+      async () => new Response(teedBranch, { status: 200 }),
+      {
+        firstByteTimeoutMs: 10,
+        startedAtMs: Date.now(),
+      },
+    );
+    const elapsed = Date.now() - startedAt;
+
+    expect(response.status).toBe(408);
+    expect(isObservedFirstByteTimeoutResponse(response)).toBe(true);
+    expect(elapsed).toBeLessThan(2_000);
+    // 让源流的迟到写入到期，确认没有无主异常泄漏出来。
+    await new Promise((resolve) => setTimeout(resolve, 90));
+  });
+
+  it('swallows the late write of a cancelled body instead of leaking an unhandled error', async () => {
+    const response = await fetchWithObservedFirstByte(
+      async () => buildDelayedResponse('never delivered', 60),
+      {
+        firstByteTimeoutMs: 10,
+        startedAtMs: Date.now(),
+      },
+    );
+
+    expect(response.status).toBe(408);
+    // 停到 60ms 迟到写入的到期点之后：假流若不感知 cancel，这里会抛出
+    // ERR_INVALID_STATE 的无主异常，让本文件失败（而不是在 teardown 后偶发拖垮整轮）。
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(getObservedResponseMeta(response)?.timedOutBeforeFirstByte).toBe(true);
   });
 });

@@ -1261,6 +1261,24 @@ export async function refreshModelsForAccount(
   await discoverModelsWithCredential(discoveredApiToken);
   await discoverModelsWithCredential(account.accessToken);
 
+  // Account-level user model list (new-api /api/user/models): fetched once per
+  // refresh and shared across all token-level writes. null/failure degrades to
+  // the token-level discovery result only.
+  let accountUserLevelModels: string[] = [];
+  if (account.accessToken && enabledTokens.length > 0) {
+    try {
+      accountUserLevelModels = (await withTimeout(
+        () => withAccountProxyOverride(accountProxyUrl,
+          () => adapter.getUserLevelModels(site.url, account.accessToken!, platformUserId)),
+        API_TOKEN_DISCOVERY_TIMEOUT_MS,
+        `user-level model discovery timeout (${Math.round(API_TOKEN_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+      )) ?? [];
+    } catch (err) {
+      console.warn(`[model-refresh] user-level model discovery failed for account ${account.id}`, err);
+      accountUserLevelModels = [];
+    }
+  }
+
   for (const token of enabledTokens) {
     const startedAt = Date.now();
     const tokenContextScope = beginModelContextScanScope();
@@ -1285,11 +1303,18 @@ export async function refreshModelsForAccount(
 
     if (models.length === 0) continue;
 
+    // Merge the account-level user model list so models hidden from /v1/models
+    // but callable with this token become route-eligible. normalizeModels keeps
+    // the (token_id, model_name) unique key safe against dirty upstream data.
+    const persistedModels = accountUserLevelModels.length > 0
+      ? normalizeModels(models.concat(accountUserLevelModels))
+      : models;
+
     const latencyMs = Date.now() - startedAt;
     const checkedAt = new Date().toISOString();
 
     await db.insert(schema.tokenModelAvailability).values(
-      models.map((modelName) => ({
+      persistedModels.map((modelName) => ({
         tokenId: token.id,
         modelName,
         available: true,
@@ -1299,7 +1324,7 @@ export async function refreshModelsForAccount(
     ).run();
 
     scannedTokenCount++;
-    mergeDiscoveredModels(models, latencyMs);
+    mergeDiscoveredModels(persistedModels, latencyMs);
   }
 
   if (accountModels.size === 0) {

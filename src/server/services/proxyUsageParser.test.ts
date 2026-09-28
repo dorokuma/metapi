@@ -185,6 +185,47 @@ describe('proxyUsageParser', () => {
     });
   });
 
+  it('extracts 1h-TTL cache-creation when upstream reports it separately', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 120,
+          ephemeral_1h_input_tokens: 330,
+        },
+      },
+    });
+
+    // Standard cache creation still reflects the total; the 1h share is surfaced separately.
+    expect(usage.cacheCreationTokens).toBe(450);
+    expect(usage.cacheCreationTokens1h).toBe(330);
+
+    // The flat 1h field form also maps (and wins when larger).
+    const flat = parseProxyUsage({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: { ephemeral_5m_input_tokens: 50 },
+        claude_cache_creation_1_h_tokens: 800,
+      },
+    });
+    expect(flat.cacheCreationTokens1h).toBe(800);
+  });
+
+  it('leaves cc1h at 0 when the 1h share is not separately reported', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: { ephemeral_5m_input_tokens: 120 },
+      },
+    });
+
+    expect(usage.cacheCreationTokens).toBe(120);
+    expect(usage.cacheCreationTokens1h ?? 0).toBe(0);
+  });
+
   it('merges usage snapshots by keeping richer values', () => {
     const merged = mergeProxyUsage(
       {

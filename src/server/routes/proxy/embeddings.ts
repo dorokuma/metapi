@@ -173,6 +173,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
             totalTokens: finalUsage.columns.totalTokens ?? 0,
             cacheReadTokens: finalUsage.columns.cacheReadTokens ?? 0,
             cacheCreationTokens: finalUsage.columns.cacheCreationTokens ?? 0,
+            cacheCreationTokens1h: parsedUsage.cacheCreationTokens1h,
             promptTokensIncludeCache: finalUsage.columns.promptTokensIncludeCache,
             selfLogBillingMeta: resolvedUsage.selfLogBillingMeta,
             recoveredFromSelfLog: resolvedUsage.recoveredFromSelfLog,

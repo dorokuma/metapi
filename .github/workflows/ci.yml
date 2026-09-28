@@ -11,6 +11,7 @@ on:
       - 'SECURITY.md'
       - 'CODE_OF_CONDUCT.md'
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: 25
+  NODE_VERSION: 22.15
   # Non-desktop CI jobs do not need the Electron runtime binary.
   ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
 

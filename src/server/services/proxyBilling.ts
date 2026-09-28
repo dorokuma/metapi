@@ -12,6 +12,8 @@ interface ProxyBillingUsageSummary {
   totalTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** 1h-TTL cache-creation tokens, only when upstream reports them separately (drives expr cc1h). */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache: boolean | null;
   selfLogBillingMeta: SelfLogBillingMeta | null;
   recoveredFromSelfLog: boolean;
@@ -68,9 +70,11 @@ export async function resolveProxyLogBilling(
   const selfLogMeta = input.resolvedUsage.selfLogBillingMeta;
   const billingPricingOverride = toPricingOverride(selfLogMeta);
   // 归一后只消费 columns（resolveFinalUsage 已统一处理 flag/cache 语义）。
+  // cacheCreationTokens1h 不经过 normalize，直接从上游解析结果透传。
   const columns = input.resolvedUsageColumns;
   const cacheReadTokens = columns.cacheReadTokens ?? 0;
   const cacheCreationTokens = columns.cacheCreationTokens ?? 0;
+  const cacheCreationTokens1h = input.resolvedUsage.cacheCreationTokens1h;
   const promptTokensIncludeCache = columns.promptTokensIncludeCache;
 
   const billingInput = {
@@ -82,6 +86,7 @@ export async function resolveProxyLogBilling(
     totalTokens: columns.totalTokens ?? 0,
     cacheReadTokens,
     cacheCreationTokens,
+    cacheCreationTokens1h,
     promptTokensIncludeCache,
     billingPricingOverride,
   };

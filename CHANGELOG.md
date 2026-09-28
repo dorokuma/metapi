@@ -5,10 +5,45 @@
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-09-27
+
+### 修复
+
+- new-api 站点 token 级模型发现合并用户级模型列表：token 实际可调用但 `/v1/models` 不暴露的模型（经 `/api/user/models` 用户级列表发现）现会写入 token 可用模型并参与路由，修复此类模型无法被路由选择的问题。
+
+### 变更
+
+- 依赖升级：`better-sqlite3` 13、`electron-builder` 26.15。
+- Node 最低版本要求调整为 22.15（engines >=22.15.0，CI NODE_VERSION 为 22.15）。
+
+## [1.4.4] - 2026-09-27
+
+### 修复
+
+- 首字节超时清理改为有界取消：`reader.cancel()` 在 body 来自 `tee()` 分支时可能永不 settle，清理路径原先无界等待会把合成 408 响应一并挂住；现统一经 `settleReaderCancelQuietly`（默认 250ms 上限，并吞掉取消失败与迟到的 rejection）。
+
+## [1.4.3] - 2026-09-27
+
+### 修复
+
+- 启动横幅不再回显令牌明文：`startupInfo` 的 Admin/Proxy curl 示例此前把 `AUTH_TOKEN` / `PROXY_TOKEN` 明文写进 stdout 与 `docker logs`，现改为 `$AUTH_TOKEN` / `$PROXY_TOKEN` 占位，并新增「横幅不含 Bearer 明文」回归断言。
+
 ### 变更
 
 - 通知设置页：全局模板标签由「全局（兜底）」精简为「全局」。
 - 通知设置页：全局模板上下文不再显示「已定制」圆点——该层本无覆盖语义，「已定制」字样会误导；代价是全局层不再逐渠道标注是否已配置，需点开渠道查看。
+
+## [1.4.2] - 2026-09-27
+
+### 修复
+
+- 计费修复：支持上游 `tiered_expr` 表达式计费，新增安全表达式求值器替代占位 `model_ratio` 平铺多计；`billing_details` 增加 `pricingSource` 标记与可审计回退。
+
+## [1.4.1] - 2026-09-27
+
+### 修复
+
+- 修复 pi（OpenAI 流）thinking 签名回传：`reasoning_details` 闭环，消除 thinking 模式 `The content[].thinking ... must be passed back` 类 400。上游 Anthropic 流的 `signature_delta` 缓冲后随 thinking 文本以一条流式 `reasoning_details` chunk 下发（先于 `finish_reason`/`[DONE]`），pi 存储并回传，入站还原为 `thinking.signature`；涉及 transformers：`chatFormatsCore` / `openai/chat/proxyStream` / `anthropic/messages/conversion`。
 
 ## [1.4.0] - 2026-09-24
 

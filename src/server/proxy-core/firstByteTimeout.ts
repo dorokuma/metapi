@@ -1,5 +1,7 @@
 import { Headers, Response } from 'undici';
 
+import { settleReaderCancelQuietly } from './readerCancel.js';
+
 type ObservedResponseMeta = {
   firstByteLatencyMs: number | null;
   timedOutBeforeFirstByte: boolean;
@@ -34,11 +36,8 @@ function buildObservedTimeoutResponse(timeoutMs: number): Response {
 
 async function cancelReaderQuietly(reader: ReadableStreamDefaultReader<Uint8Array> | null) {
   if (!reader) return;
-  try {
-    await reader.cancel();
-  } catch {
-    // Ignore cancellation errors from already-closed streams.
-  }
+  // 有界等待：cancel 可能永不 settle（如 tee 分支），不能把超时响应一起挂住。
+  await settleReaderCancelQuietly(reader);
   try {
     reader.releaseLock();
   } catch {
@@ -90,11 +89,8 @@ function buildReplayResponse<T extends Response>(
       }
     },
     async cancel(reason) {
-      try {
-        await reader.cancel(reason);
-      } catch {
-        // Ignore cancellation failures from already-closed streams.
-      }
+      // 同上：下游取消时同样有界等待，避免把下游的 cancel promise 挂住。
+      await settleReaderCancelQuietly(reader, reason);
       releaseReader();
     },
   });

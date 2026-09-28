@@ -1,6 +1,6 @@
 {
   "name": "metapi",
-  "version": "1.4.0",
+  "version": "1.4.5",
   "description": "Meta-layer management and unified proxy for AI API aggregation platforms",
   "main": "dist/desktop/main.js",
   "keywords": [
@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "engines": {
-    "node": ">=25.0.0"
+    "node": ">=22.15.0"
   },
   "type": "module",
   "scripts": {
@@ -75,7 +75,7 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/static": "^9.0.0",
     "@visactor/react-vchart": "^2.0.22",
-    "better-sqlite3": "^12.10.0",
+    "better-sqlite3": "^13.0.3",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "electron-log": "^5.4.4",
@@ -111,7 +111,7 @@
     "cross-env": "^7.0.3",
     "drizzle-kit": "^0.31.10",
     "electron": "^42.0.1",
-    "electron-builder": "^26.0.12",
+    "electron-builder": "^26.15.3",
     "jsdom": "^29.1.1",
     "mermaid": "^11.15.0",
     "react": "^18.3.1",

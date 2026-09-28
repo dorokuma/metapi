@@ -19,6 +19,14 @@ export interface ParsedProxyUsage {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   reasoningTokens: number;
+  /**
+   * 1h-TTL cache-creation tokens, only when upstream reports them separately
+   * (e.g. cache_creation.ephemeral_1h_input_tokens / claude_cache_creation_1_h_tokens).
+   * 0/undefined when the 1h share cannot be distinguished from the 5m share — in which
+   * case the expr cc1h variable stays 0 and the 1h cost folds into the standard cache-creation
+   * figure (documented in the billing notes).
+   */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache: boolean | null;
   presence: ProxyUsagePresence;
 }
@@ -418,6 +426,20 @@ function getReasoningTokens(record: Record<string, unknown>): UsageFieldValue {
 }
 
 /**
+ * 1h-TTL cache-creation tokens, only when upstream reports them as a distinct field.
+ * Returns 0 when the 1h share is not separately reported (cannot be distinguished from
+ * the 5m share), in which case cc1h stays 0 and the 1h cost folds into the standard
+ * cache-creation figure.
+ */
+function getCacheCreationTokens1h(record: Record<string, unknown>): number {
+  return Math.max(
+    readNestedUsageField(record, ['cache_creation'], ['ephemeral_1h_input_tokens', 'ephemeral1hInputTokens']).value,
+    readNestedUsageField(record, ['cacheCreation'], ['ephemeral1hInputTokens', 'ephemeral_1h_input_tokens']).value,
+    readUsageField(record, ['claude_cache_creation_1_h_tokens', 'claudeCacheCreation1hTokens']).value,
+  );
+}
+
+/**
  * 解析单条 usage 形状记录。presence 化后：
  * - 不再用 details 求和合成缺失的 prompt / completion；
  * - 不做 total 合成、不用 total 反推 prompt / completion、不做 `Math.max(total, p+c)` 抬高；
@@ -459,6 +481,8 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
   const cacheReadTokens = getCacheReadTokens(record);
   const cacheCreationTokens = getCacheCreationTokens(record);
   const reasoningTokens = getReasoningTokens(record);
+  const cacheCreationTokens1h = getCacheCreationTokens1h(record);
+  const promptTokensIncludeCache = detectPromptTokensIncludeCache(record);
 
   let completionTokens = directCompletionTokens;
   if (thoughtsTokens.present) {
@@ -487,6 +511,7 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
   usage.presence.cacheCreationTokens = cacheCreationTokens.present;
   usage.reasoningTokens = resolvedReasoningTokens.value;
   usage.presence.reasoningTokens = resolvedReasoningTokens.present;
+  if (cacheCreationTokens1h > 0) usage.cacheCreationTokens1h = cacheCreationTokens1h;
   usage.promptTokensIncludeCache = detectPromptTokensIncludeCache(record);
 
   return usage;
@@ -582,6 +607,11 @@ export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsa
     sanitizedIncoming.promptTokensIncludeCache
     ?? sanitizedBase.promptTokensIncludeCache
   );
+  const mergedCc1h = Math.max(
+    base.cacheCreationTokens1h ?? 0,
+    incoming.cacheCreationTokens1h ?? 0,
+  );
+  if (mergedCc1h > 0) merged.cacheCreationTokens1h = mergedCc1h;
 
   return merged;
 }

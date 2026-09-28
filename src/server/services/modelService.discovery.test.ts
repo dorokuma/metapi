@@ -12,6 +12,7 @@ import {
 
 const getApiTokenMock = vi.fn();
 const getModelsMock = vi.fn();
+const userLevelModelsMock = vi.fn();
 const undiciFetchMock = vi.fn();
 const proxyAgentCtorMock = vi.fn();
 const refreshOauthAccessTokenSingleflightMock = vi.fn();
@@ -31,6 +32,7 @@ vi.mock('./platforms/index.js', () => ({
   getAdapter: () => ({
     getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
     getModels: (...args: unknown[]) => getModelsMock(...args),
+    getUserLevelModels: (...args: unknown[]) => userLevelModelsMock(...args),
   }),
 }));
 
@@ -73,6 +75,7 @@ describe('refreshModelsForAccount credential discovery', () => {
   beforeEach(async () => {
     getApiTokenMock.mockReset();
     getModelsMock.mockReset();
+    userLevelModelsMock.mockReset().mockResolvedValue(null);
     undiciFetchMock.mockReset();
     proxyAgentCtorMock.mockReset();
     refreshOauthAccessTokenSingleflightMock.mockReset();
@@ -2427,6 +2430,185 @@ describe('refreshModelsForAccount credential discovery', () => {
     expect(channels).toHaveLength(1);
     expect(channels[0]).toMatchObject({
       oauthRouteUnitId: routeUnit.id,
+    });
+  });
+
+  async function setupManagedNewApiAccount(opts: { siteName: string; username: string; tokenValue: string }) {
+    const site = await db.insert(schema.sites).values({
+      name: opts.siteName,
+      url: `https://${opts.siteName}.example.com`,
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: opts.username,
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: opts.tokenValue,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    return { site, account, token };
+  }
+
+  async function listTokenAvailabilityModels(tokenId: number): Promise<string[]> {
+    const rows = await db.select().from(schema.tokenModelAvailability)
+      .where(eq(schema.tokenModelAvailability.tokenId, tokenId))
+      .all();
+    return rows.map((row) => row.modelName);
+  }
+
+  it('merges account user-level models into token availability (59 token + 199 user-level -> 199 deduped)', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+
+    const userLevelModels = [
+      ...Array.from({ length: 198 }, (_, i) => `base-model-${i}`),
+      'Qwen3.8-27B',
+    ];
+    const tokenModels = userLevelModels.slice(0, 59);
+
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'tok-1' ? tokenModels : []
+    ));
+    userLevelModelsMock.mockResolvedValue(userLevelModels);
+
+    const { account, token } = await setupManagedNewApiAccount({
+      siteName: 'site-user-level',
+      username: 'user-level-user',
+      tokenValue: 'tok-1',
+    });
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result.status).toBe('success');
+    expect(userLevelModelsMock).toHaveBeenCalledTimes(1);
+
+    const names = await listTokenAvailabilityModels(token.id);
+    expect(names).toHaveLength(199);
+    expect(names).toContain('Qwen3.8-27B');
+    const keys = names.map((name) => name.toLowerCase());
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('keeps token-level models only when user-level discovery returns null', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'tok-1' ? ['tok-model-1', 'tok-model-2'] : []
+    ));
+    userLevelModelsMock.mockResolvedValue(null);
+
+    const { account, token } = await setupManagedNewApiAccount({
+      siteName: 'site-user-level-null',
+      username: 'user-level-null-user',
+      tokenValue: 'tok-1',
+    });
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result.status).toBe('success');
+    expect(await listTokenAvailabilityModels(token.id)).toEqual(['tok-model-1', 'tok-model-2']);
+  });
+
+  it('keeps token-level models only when user-level discovery throws', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'tok-1' ? ['tok-model-1', 'tok-model-2'] : []
+    ));
+    userLevelModelsMock.mockRejectedValue(new Error('user-level discovery exploded'));
+
+    const { account, token } = await setupManagedNewApiAccount({
+      siteName: 'site-user-level-throw',
+      username: 'user-level-throw-user',
+      tokenValue: 'tok-1',
+    });
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result.status).toBe('success');
+    expect(await listTokenAvailabilityModels(token.id)).toEqual(['tok-model-1', 'tok-model-2']);
+  });
+
+  it('writes no token availability rows when token-level discovery returns no models', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'tok-1' ? [] : ['acc-model-1']
+    ));
+    userLevelModelsMock.mockResolvedValue(['base-model-0', 'Qwen3.8-27B']);
+
+    const { account, token } = await setupManagedNewApiAccount({
+      siteName: 'site-user-level-empty',
+      username: 'user-level-empty-user',
+      tokenValue: 'tok-1',
+    });
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result.status).toBe('success');
+    expect(result.modelCount).toBe(1);
+    expect(await listTokenAvailabilityModels(token.id)).toEqual([]);
+  });
+
+  it('deduplicates dirty user-level model data (self-duplicates, case mix, blanks) without constraint errors', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'tok-1' ? ['GPT-4.1'] : ['GPT-4.1']
+    ));
+    userLevelModelsMock.mockResolvedValue(['GPT-4.1', 'gpt-4.1', 'GPT-4.1', 'Qwen3.8-27B', ' qwen3.8-27b ', '']);
+
+    const { account, token } = await setupManagedNewApiAccount({
+      siteName: 'site-user-level-dirty',
+      username: 'user-level-dirty-user',
+      tokenValue: 'tok-1',
+    });
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result.status).toBe('success');
+    expect((await listTokenAvailabilityModels(token.id)).sort()).toEqual(['GPT-4.1', 'Qwen3.8-27B']);
+  });
+
+  it('exposes user-level-only models on route channels after rebuild', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+
+    const userLevelModels = [
+      ...Array.from({ length: 20 }, (_, i) => `base-model-${i}`),
+      'Qwen3.8-27B',
+    ];
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
+      token === 'tok-1' ? userLevelModels.slice(0, 5) : []
+    ));
+    userLevelModelsMock.mockResolvedValue(userLevelModels);
+
+    const { account, token } = await setupManagedNewApiAccount({
+      siteName: 'site-user-level-route',
+      username: 'user-level-route-user',
+      tokenValue: 'tok-1',
+    });
+
+    await refreshModelsAndRebuildRoutes();
+
+    const routes = await db.select().from(schema.tokenRoutes).all();
+    const channels = await db.select().from(schema.routeChannels).all();
+
+    const qwenRoute = routes.find((route) => route.modelPattern === 'Qwen3.8-27B');
+    expect(qwenRoute).toBeDefined();
+    const qwenChannels = channels.filter((channel) => channel.routeId === qwenRoute!.id);
+    expect(qwenChannels).toHaveLength(1);
+    expect(qwenChannels[0]).toMatchObject({
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
     });
   });
 });

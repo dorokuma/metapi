@@ -323,8 +323,6 @@ try {
   const summaryLines = buildStartupSummaryLines({
     port: config.port,
     host: config.listenHost,
-    authToken: config.authToken,
-    proxyToken: config.proxyToken,
   });
   for (const line of summaryLines) {
     console.log(line);

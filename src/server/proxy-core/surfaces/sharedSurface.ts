@@ -90,6 +90,8 @@ type SurfaceUsageSummary = {
   totalTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** 1h-TTL cache-creation tokens, only when upstream reports them separately (drives expr cc1h). */
+  cacheCreationTokens1h?: number;
   promptTokensIncludeCache: boolean | null;
 };
 
@@ -549,6 +551,7 @@ export async function recordSurfaceSuccess(input: {
         totalTokens: resolvedUsage.columns.totalTokens ?? 0,
         cacheReadTokens: resolvedUsage.columns.cacheReadTokens ?? 0,
         cacheCreationTokens: resolvedUsage.columns.cacheCreationTokens ?? 0,
+        cacheCreationTokens1h: input.parsedUsage.cacheCreationTokens1h,
         promptTokensIncludeCache: resolvedUsage.columns.promptTokensIncludeCache,
         selfLogBillingMeta: resolvedUsage.selfLogBillingMeta,
         recoveredFromSelfLog: resolvedUsage.recoveredFromSelfLog,

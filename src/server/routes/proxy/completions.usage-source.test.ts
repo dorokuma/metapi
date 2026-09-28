@@ -165,6 +165,7 @@ describe('/v1/completions usage source logging', () => {
         prompt_tokens: 1,
         completion_tokens: 2,
         total_tokens: 3,
+        cache_creation: { ephemeral_5m_input_tokens: 120, ephemeral_1h_input_tokens: 330 },
       },
     }), {
       status: 200,
@@ -189,6 +190,10 @@ describe('/v1/completions usage source logging', () => {
     expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
       status: 'success',
       errorMessage: expect.stringContaining('[usage:upstream]'),
+    }));
+    // cc1h 回归：上游 1h 缓存字段必须透传到 resolveProxyLogBilling。
+    expect(resolveProxyLogBillingMock).toHaveBeenCalledWith(expect.objectContaining({
+      resolvedUsage: expect.objectContaining({ cacheCreationTokens1h: 330 }),
     }));
   });
 });

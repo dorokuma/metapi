@@ -16,7 +16,7 @@ Metapi 是 AI API 聚合平台（New API、One API、OneHub 等）的元聚合�
 
 ### Prerequisites / 前置要求
 
-- Node.js 20+ / Node.js 20 或更高版本
+- Node.js 22.15+ / Node.js 22.15 或更高版本
 - npm or compatible package manager / npm 或兼容的包管理器
 
 ### Setup Steps / 设置步骤

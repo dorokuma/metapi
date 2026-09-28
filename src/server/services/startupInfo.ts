@@ -1,8 +1,6 @@
 type StartupSummaryInput = {
   port: number;
   host: string;
-  authToken: string;
-  proxyToken: string;
 };
 
 type StartupEndpoints = {
@@ -27,13 +25,14 @@ export function buildStartupEndpoints(input: StartupSummaryInput): StartupEndpoi
   const adminApiExample = `${baseUrl}/api/stats/dashboard`;
   const proxyApiExample = `${baseUrl}/v1/chat/completions`;
 
+  // 启动摘要会进 stdout / docker logs，因此只回显 shell 变量占位，绝不回显令牌明文。
   return {
     baseUrl,
     adminDashboardUrl: baseUrl,
     adminApiExample,
     proxyApiExample,
-    adminApiCurl: `curl '${adminApiExample}' -H 'Authorization: Bearer ${input.authToken}'`,
-    proxyApiCurl: `curl '${proxyApiExample}' -H 'Authorization: Bearer ${input.proxyToken}' -H 'Content-Type: application/json' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'`,
+    adminApiCurl: `curl '${adminApiExample}' -H "Authorization: Bearer $AUTH_TOKEN"`,
+    proxyApiCurl: `curl '${proxyApiExample}' -H "Authorization: Bearer $PROXY_TOKEN" -H 'Content-Type: application/json' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'`,
   };
 }
 

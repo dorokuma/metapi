@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { config } from "../config.js";
 import { formatUtcSqlDateTime } from "./localTimeService.js";
 
@@ -41,7 +41,8 @@ describe("usageAggregationService live", () => {
     let insertedAccountId: number | undefined;
 
     try {
-      const site = await db
+      // drizzle mysql 方言没有 .returning()：insert 后按名称回读，取最新插入行（id 最大）
+      await db
         .insert(schema.sites)
         .values({
           name: `live-recompute-${dialect}-site`,
@@ -49,11 +50,17 @@ describe("usageAggregationService live", () => {
           platform: "new-api",
           status: "active",
         })
-        .returning()
+        .run();
+      const site = await db
+        .select()
+        .from(schema.sites)
+        .where(eq(schema.sites.name, `live-recompute-${dialect}-site`))
+        .orderBy(desc(schema.sites.id))
+        .limit(1)
         .get();
       insertedSiteId = site.id;
 
-      const account = await db
+      await db
         .insert(schema.accounts)
         .values({
           siteId: site.id,
@@ -61,7 +68,13 @@ describe("usageAggregationService live", () => {
           accessToken: `live-recompute-${dialect}-token`,
           status: "active",
         })
-        .returning()
+        .run();
+      const account = await db
+        .select()
+        .from(schema.accounts)
+        .where(eq(schema.accounts.username, `live-recompute-${dialect}-user`))
+        .orderBy(desc(schema.accounts.id))
+        .limit(1)
         .get();
       insertedAccountId = account.id;
 

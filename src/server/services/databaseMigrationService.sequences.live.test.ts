@@ -179,8 +179,9 @@ describe('databaseMigrationService sequence matrix (slice 14)', () => {
     await client.connect();
     try {
       const result = await client.query('SELECT last_value, is_called FROM sites_id_seq');
-      const row = result.rows[0] as { last_value: number; is_called: boolean };
-      expect(row.last_value).toBeGreaterThanOrEqual(1);
+      // pg 驱动把 BIGINT（int8）默认以字符串返回，先 Number() 归一再比较
+      const row = result.rows[0] as { last_value: number | string; is_called: boolean };
+      expect(Number(row.last_value)).toBeGreaterThanOrEqual(1);
       expect(row.is_called).toBe(true);
     } finally {
       await client.end();

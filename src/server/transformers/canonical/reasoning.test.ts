@@ -36,6 +36,20 @@ describe('canonical reasoning helpers', () => {
     });
   });
 
+  it('normalizes xhigh effort variants (case and whitespace)', () => {
+    for (const input of ['XHIGH', 'XHigh', '  xhigh  ']) {
+      const normalized = normalizeCanonicalReasoningRequest({
+        reasoning: {
+          effort: input,
+        },
+      });
+
+      expect(normalized.reasoning).toEqual({
+        effort: 'xhigh',
+      });
+    }
+  });
+
   it('returns undefined when no reasoning hints are present', () => {
     expect(normalizeCanonicalReasoningRequest({})).toEqual({});
   });

@@ -331,7 +331,7 @@ jobs:
     name: Audit Production Dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Keep PR audit informational so build/test/schema remain the merge gate.
+    # Keep audit informational on push and PR so build/test/schema remain the merge gate.
 
     steps:
       - name: Checkout
@@ -351,15 +351,46 @@ jobs:
           set +e
           npm audit --omit=dev --audit-level=high
           status=$?
-          if [ "$status" -ne 0 ] && [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "::warning::npm audit reported production dependency vulnerabilities; PR audit stays informational."
+          if [ "$status" -ne 0 ]; then
+            # 报告模式（push 与 PR 一致）：漏洞摘要保留在本步骤日志并记入 job summary，不硬挂 CI
+            echo '::warning::npm audit reported production dependency vulnerabilities; audit is report-only.'
+            {
+              echo '## npm audit (report-only)'
+              echo ''
+              echo 'Production dependency vulnerabilities are reported in the step log above; they do not gate CI on push or pull request.'
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           fi
           exit "$status"
 
+  publish-docker-guard:
+    name: Check Docker Hub Secrets
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_dockerhub: ${{ steps.check-dockerhub.outputs.has_dockerhub }}
+
+    steps:
+      - name: Check Docker Hub secrets
+        id: check-dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # GitHub 不能在 job 级 if 直接读 secrets：由 guard job 探测配置状态，
+          # publish 群 depends 上它；未配置时整群 skip 而非 failure。
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "Docker Hub secrets (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN) are not configured; Docker publish jobs will be skipped."
+            echo "has_dockerhub=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_dockerhub=true" >> "$GITHUB_OUTPUT"
+          fi
+
   publish-docker-arch:
     name: Publish Docker Image (${{ matrix.arch }})
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.publish-docker-guard.outputs.has_dockerhub == 'true'
+    needs: publish-docker-guard
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -442,9 +473,9 @@ jobs:
 
   publish-docker:
     name: Publish Docker Manifest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.publish-docker-guard.outputs.has_dockerhub == 'true'
     runs-on: ubuntu-latest
-    needs: publish-docker-arch
+    needs: [publish-docker-guard, publish-docker-arch]
     timeout-minutes: 15
     env:
       DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi

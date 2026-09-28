@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -49,6 +49,9 @@ describe('TokenRouter selection scoring', () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-token-router-selection-'));
     process.env.DATA_DIR = dataDir;
 
+    const { retainTokenRouterDumps } = await import('./tokenRouterDumpRetentionService.js');
+    retainTokenRouterDumps({ prefix: 'metapi-token-router-selection-' });
+
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
@@ -95,7 +98,11 @@ describe('TokenRouter selection scoring', () => {
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     invalidateTokenRouterCache();
     resetSiteRuntimeHealthState();
+    flushSiteRuntimeHealthPersistence();
     resetProxyChannelCoordinatorState();
+    if (dataDir && (process.env.DATA_DIR === dataDir || process.env.DATA_DIR === '')) {
+      try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
     delete process.env.DATA_DIR;
   });
 

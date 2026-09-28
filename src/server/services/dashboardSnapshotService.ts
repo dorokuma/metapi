@@ -31,6 +31,7 @@ export type DashboardSummaryPayload = {
   activeAccounts: number;
   totalAccounts: number;
   todayCheckin: { success: number; failed: number; total: number };
+  balanceAnomalyCount: number;
   proxy24h: {
     success: number;
     failed: number;
@@ -74,7 +75,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.sites.status, "active"))
     .all();
-  const accounts = accountRows.map((row) => row.accounts);
+  const accounts = accountRows.map((row) => ({ ...row.accounts, sitePlatform: row.sites.platform }));
   const totalBalance = accounts.reduce(
     (sum, account) => sum + (account.balance || 0),
     0,
@@ -82,6 +83,14 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
   const activeCount = accounts.filter(
     (account) => account.status === "active",
   ).length;
+
+  const balanceAnomalyCount = accounts.filter((account) => {
+    const raw = typeof account.extraConfig === 'string' ? account.extraConfig : JSON.stringify(account.extraConfig || {});
+    let parsed: Record<string, unknown> = {};
+    try { parsed = JSON.parse(raw); } catch {}
+    const anomalies = parsed?.balanceAnomalies;
+    return !!anomalies && typeof anomalies === 'object' && !Array.isArray(anomalies);
+  }).length;
 
   const {
     localDay: today,
@@ -217,6 +226,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
         parsedRewardCount: parsedRewardCountByAccount[account.id] || 0,
         rewardSum: rewardByAccount[account.id] || 0,
         extraConfig: account.extraConfig,
+        platform: account.sitePlatform,
       }),
     0,
   );
@@ -228,6 +238,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     todayReward: toRoundedMicroNumber(todayReward),
     activeAccounts: activeCount,
     totalAccounts: accounts.length,
+    balanceAnomalyCount,
     todayCheckin: {
       success: checkinSuccess,
       failed: checkinFailed,

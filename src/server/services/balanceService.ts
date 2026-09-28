@@ -441,7 +441,7 @@ export async function refreshBalance(accountId: number) {
     nextExtraConfig = latestAccount ? latestAccount.extraConfig : activeExtraConfig;
 
     if (hasTodayIncomeUpdate) {
-      nextExtraConfig = updateTodayIncomeSnapshot(nextExtraConfig, balanceInfo.todayIncome!);
+      nextExtraConfig = updateTodayIncomeSnapshot(nextExtraConfig, balanceInfo.todayIncome!, undefined, site.platform);
     }
     if (hasSubscriptionUpdate) {
       nextExtraConfig = mergeAccountExtraConfig(nextExtraConfig, {
@@ -454,6 +454,9 @@ export async function refreshBalance(accountId: number) {
   const existingRuntimeHealth = extractRuntimeHealth(nextExtraConfig);
   const keepUnsupportedCheckinDegraded = isUnsupportedCheckinRuntimeHealth(existingRuntimeHealth);
 
+  const balanceAnomalies: string[] = [];
+  if (balanceInfo.balance < 0) balanceAnomalies.push('negative_balance');
+  if (balanceInfo.used > balanceInfo.quota) balanceAnomalies.push('used_exceeds_quota');
   const updates: Record<string, unknown> = {
     balance: balanceInfo.balance,
     balanceUsed: balanceInfo.used,
@@ -462,6 +465,33 @@ export async function refreshBalance(accountId: number) {
     lastBalanceRefresh: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  if (balanceAnomalies.length > 0) {
+    nextExtraConfig = mergeAccountExtraConfig(nextExtraConfig, {
+      balanceAnomalies: {
+        detectedAt: new Date().toISOString(),
+        reasons: balanceAnomalies,
+        balance: balanceInfo.balance,
+        balanceUsed: balanceInfo.used,
+        quota: balanceInfo.quota,
+      },
+    });
+    updates.extraConfig = nextExtraConfig;
+  } else {
+    // 恢复时清除异常标记，保证 balanceAnomalyCount 可回落。
+    let parsed: Record<string, unknown> = {};
+    if (typeof nextExtraConfig === 'string') {
+      try { parsed = JSON.parse(nextExtraConfig); } catch { parsed = {}; }
+    } else if (nextExtraConfig && typeof nextExtraConfig === 'object') {
+      parsed = nextExtraConfig as Record<string, unknown>;
+    }
+    if (parsed && typeof parsed === 'object' && 'balanceAnomalies' in parsed) {
+      const cleaned = { ...(parsed as Record<string, unknown>) };
+      delete cleaned.balanceAnomalies;
+      nextExtraConfig = typeof nextExtraConfig === 'string' ? JSON.stringify(cleaned) : cleaned;
+      updates.extraConfig = nextExtraConfig;
+    }
+  }
+
   if (shouldPersistNextExtraConfig) {
     updates.extraConfig = nextExtraConfig;
   }

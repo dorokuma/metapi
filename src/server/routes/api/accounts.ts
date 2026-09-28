@@ -22,8 +22,6 @@ import {
 import { encryptAccountPassword } from "../../services/accountCredentialService.js";
 import { applyAccountUpdateWorkflow } from "../../services/accountUpdateWorkflow.js";
 import { startBackgroundTask } from "../../services/backgroundTaskService.js";
-import { parseCheckinRewardAmount } from "../../services/checkinRewardParser.js";
-import { estimateRewardWithTodayIncomeFallback } from "../../services/todayIncomeRewardService.js";
 import { getLocalDayRangeUtc } from "../../services/localTimeService.js";
 import {
   buildRuntimeHealthForAccount,

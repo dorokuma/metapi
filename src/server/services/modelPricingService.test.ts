@@ -25,6 +25,7 @@ describe('modelPricingService', () => {
         totalTokens: 1500,
       },
       { default: 1, vip: 2 },
+      undefined,
     );
 
     expect(cost).toBe(0.014);
@@ -48,6 +49,7 @@ describe('modelPricingService', () => {
         totalTokens: 2000,
       },
       { default: 1 },
+      undefined,
     );
 
     expect(cost).toBe(0.004);
@@ -71,6 +73,7 @@ describe('modelPricingService', () => {
         totalTokens: 0,
       },
       { default: 1, vip: 1.5 },
+      undefined,
     );
 
     expect(cost).toBe(0.45);
@@ -94,6 +97,7 @@ describe('modelPricingService', () => {
         totalTokens: 0,
       },
       { default: 1, vip: 2 },
+      undefined,
     );
 
     expect(cost).toBe(0.004);
@@ -122,6 +126,8 @@ describe('modelPricingService', () => {
         promptTokensIncludeCache: true,
       },
       { default: 1 },
+      undefined,
+      undefined,
     );
 
     expect(detail).toMatchObject({
@@ -174,6 +180,7 @@ describe('modelPricingService', () => {
         promptTokensIncludeCache: false,
       },
       { default: 1 },
+      undefined,
     );
 
     expect(cost).toBe(0.00372);
@@ -182,5 +189,34 @@ describe('modelPricingService', () => {
   it('uses platform-specific fallback token divisor', () => {
     expect(fallbackTokenCost(1500, 'new-api')).toBe(0.003);
     expect(fallbackTokenCost(1500, 'veloera')).toBe(0.0015);
+  });
+
+  it('prefers explicit request group over model enableGroups traversal', () => {
+    const model: PricingModel = {
+      modelName: 'gpt-4o',
+      quotaType: 0,
+      modelRatio: 2,
+      completionRatio: 1.5,
+      modelPrice: null,
+      enableGroups: ['vip'],
+    };
+
+    // groupRatio 中 default=1, vip=2, team=3
+    // model.enableGroups=['vip']，默认会走 vip=2
+    // 传入 requestGroup='team' 时，应优先使用 team=3
+    const cost = calculateModelUsageCost(
+      model,
+      {
+        promptTokens: 1_000_000,
+        completionTokens: 0,
+        totalTokens: 1_000_000,
+      },
+      { default: 1, vip: 2, team: 3 },
+      'team',
+    );
+
+    // inputPerMillion = model_ratio * 2 * team_ratio = 2 * 2 * 3 = 12
+    // inputCost = 1e6 / 1e6 * 12 = 12
+    expect(cost).toBe(12);
   });
 });

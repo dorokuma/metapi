@@ -41,6 +41,7 @@ function normalizeReasoningEffort(value: unknown): CanonicalReasoningEffort | un
     case 'medium':
     case 'high':
     case 'max':
+    case 'xhigh':
       return effort;
     default:
       return undefined;

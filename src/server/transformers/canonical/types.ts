@@ -80,7 +80,8 @@ export type CanonicalReasoningEffort =
   | 'low'
   | 'medium'
   | 'high'
-  | 'max';
+  | 'max'
+  | 'xhigh';
 
 export type CanonicalReasoningRequest = {
   effort?: CanonicalReasoningEffort;

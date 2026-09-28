@@ -24,6 +24,18 @@ describe('canonical reasoning helpers', () => {
     });
   });
 
+  it('preserves xhigh reasoning effort verbatim', () => {
+    const normalized = normalizeCanonicalReasoningRequest({
+      reasoning: {
+        effort: 'xhigh',
+      },
+    });
+
+    expect(normalized.reasoning).toEqual({
+      effort: 'xhigh',
+    });
+  });
+
   it('returns undefined when no reasoning hints are present', () => {
     expect(normalizeCanonicalReasoningRequest({})).toEqual({});
   });

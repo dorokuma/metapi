@@ -1,12 +1,14 @@
 import { useState, useMemo } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { useThemeLabelColor } from '../useThemeLabelColor.js';
+import { formatCompactTokenMetric } from '../../numberFormat.js';
 
 interface SiteDistributionData {
   siteName: string;
   platform: string;
   totalBalance: number;
   totalSpend: number;
+  totalTokens: number;
   accountCount: number;
 }
 
@@ -15,7 +17,7 @@ interface SiteDistributionChartProps {
   loading?: boolean;
 }
 
-type ViewMode = 'balance' | 'spend';
+type ViewMode = 'balance' | 'spend' | 'tokens';
 
 function coerceDatumRecord(datum: unknown): Record<string, unknown> {
   return datum && typeof datum === 'object' ? datum as Record<string, unknown> : {};
@@ -98,7 +100,13 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
     return data.map((item) => ({
       siteName: item.siteName,
       platform: item.platform,
-      value: safeNumber(viewMode === 'balance' ? item.totalBalance : item.totalSpend),
+      value: safeNumber(
+        viewMode === 'balance'
+          ? item.totalBalance
+          : viewMode === 'spend'
+            ? item.totalSpend
+            : item.totalTokens
+      ),
       accountCount: safeNumber(item.accountCount),
     }));
   }, [data, viewMode]);
@@ -131,6 +139,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
               value: (datum: unknown) => {
                 const item = coerceDatumRecord(datum);
                 const val = safeNumber(item.value);
+                if (viewMode === 'tokens') return formatCompactTokenMetric(val);
                 return `$${val.toFixed(2)}`;
               },
             },
@@ -159,6 +168,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
   }, [chartData, hasData, labelColor]);
 
   const formatValue = (value: number): string => {
+    if (viewMode === 'tokens') return formatCompactTokenMetric(value);
     if (value >= 1000) return `$${value.toFixed(2)}`;
     if (value >= 1) return `$${value.toFixed(3)}`;
     return `$${value.toFixed(6)}`;
@@ -255,6 +265,23 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
             }}
           >
             消耗分布
+          </button>
+          <button
+            onClick={() => setViewMode('tokens')}
+            style={{
+              padding: '5px 14px',
+              fontSize: 12,
+              fontWeight: 500,
+              border: 'none',
+              borderRadius: 'calc(var(--radius-sm) - 2px)',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              background: viewMode === 'tokens' ? 'var(--color-primary)' : 'transparent',
+              color: viewMode === 'tokens' ? '#ffffff' : 'var(--color-text-secondary)',
+              boxShadow: viewMode === 'tokens' ? 'var(--shadow-sm)' : 'none',
+            }}
+          >
+            词元分布
           </button>
         </div>
       </div>

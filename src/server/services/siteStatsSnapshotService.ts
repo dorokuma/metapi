@@ -20,11 +20,12 @@ export type SiteStatsSnapshotPayload = {
     platform: string | null;
     totalBalance: number;
     totalSpend: number;
+    totalTokens: number;
     accountCount: number;
   }>;
   trend: Array<{
     date: string;
-    sites: Record<string, { spend: number; calls: number }>;
+    sites: Record<string, { spend: number; calls: number; tokens: number }>;
   }>;
   sites: Array<typeof schema.sites.$inferSelect>;
 };
@@ -43,6 +44,7 @@ async function loadSiteStatsSnapshotPayload(
       .select({
         siteId: schema.siteDayUsage.siteId,
         totalSpend: sql<number>`coalesce(sum(${schema.siteDayUsage.totalSiteSpend}), 0)`,
+        totalTokens: sql<number>`coalesce(sum(${schema.siteDayUsage.totalTokens}), 0)`,
       })
       .from(schema.siteDayUsage)
       .groupBy(schema.siteDayUsage.siteId)
@@ -73,9 +75,11 @@ async function loadSiteStatsSnapshotPayload(
   ]);
 
   const spendBySiteId = new Map<number, number>();
+  const tokensBySiteId = new Map<number, number>();
   for (const row of spendRows) {
     if (row.siteId == null) continue;
     spendBySiteId.set(row.siteId, Number(row.totalSpend || 0));
+    tokensBySiteId.set(row.siteId, Number(row.totalTokens || 0));
   }
 
   const distribution = accountDistributionRows.map((row) => ({
@@ -84,12 +88,13 @@ async function loadSiteStatsSnapshotPayload(
     platform: row.platform,
     totalBalance: toRoundedMicroNumber(Number(row.totalBalance || 0)),
     totalSpend: toRoundedMicroNumber(spendBySiteId.get(row.siteId) || 0),
+    totalTokens: tokensBySiteId.get(row.siteId) || 0,
     accountCount: Number(row.accountCount || 0),
   }));
 
   const dayMap: Record<
     string,
-    Record<string, { spend: number; calls: number }>
+    Record<string, { spend: number; calls: number; tokens: number }>
   > = {};
   const activeSiteById = new Map<number, (typeof schema.sites.$inferSelect)>(
     sites.map((site) => [site.id, site]),
@@ -102,10 +107,11 @@ async function loadSiteStatsSnapshotPayload(
 
     if (!dayMap[date]) dayMap[date] = {};
     if (!dayMap[date][siteName])
-      dayMap[date][siteName] = { spend: 0, calls: 0 };
+      dayMap[date][siteName] = { spend: 0, calls: 0, tokens: 0 };
 
     dayMap[date][siteName].spend += Number(row.totalSiteSpend || 0);
     dayMap[date][siteName].calls += Number(row.totalCalls || 0);
+    dayMap[date][siteName].tokens += Number(row.totalTokens || 0);
   }
 
   const trend = Object.entries(dayMap)
@@ -118,6 +124,7 @@ async function loadSiteStatsSnapshotPayload(
           {
             spend: toRoundedMicroNumber(stats.spend),
             calls: stats.calls,
+            tokens: stats.tokens,
           },
         ]),
       ),

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
+import { formatCompactTokenMetric } from '../../numberFormat.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -7,7 +8,7 @@ import { VChart } from '@visactor/react-vchart';
 
 interface SiteTrendData {
   date: string;
-  sites: Record<string, { spend: number; calls: number }>;
+  sites: Record<string, { spend: number; calls: number; tokens: number }>;
 }
 
 interface SiteTrendChartProps {
@@ -19,11 +20,12 @@ interface SiteTrendChartProps {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-type Metric = 'spend' | 'calls';
+type Metric = 'spend' | 'calls' | 'tokens';
 
 const METRIC_OPTIONS: { key: Metric; label: string }[] = [
   { key: 'spend', label: '消耗趋势' },
   { key: 'calls', label: '调用趋势' },
+  { key: 'tokens', label: '词元趋势' },
 ];
 
 const COLOR_PALETTE = [
@@ -52,7 +54,7 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
       Object.entries(d.sites).map(([site, v]) => ({
         date: d.date,
         site,
-        value: metric === 'spend' ? v.spend : v.calls,
+        value: metric === 'spend' ? v.spend : metric === 'calls' ? v.calls : v.tokens,
       })),
     );
   }, [data, metric]);
@@ -118,7 +120,9 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
             key: (datum: Record<string, unknown>) => datum?.site ?? '',
             value: (datum: Record<string, unknown>) => {
               const v = Number(datum?.value ?? 0);
-              return metric === 'spend' ? `$${v.toFixed(4)}` : String(v);
+              if (metric === 'spend') return `$${v.toFixed(4)}`;
+              if (metric === 'tokens') return formatCompactTokenMetric(v);
+              return String(v);
             },
           },
         ],
@@ -130,7 +134,9 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
             key: (datum: Record<string, unknown>) => datum?.site ?? '',
             value: (datum: Record<string, unknown>) => {
               const v = Number(datum?.value ?? 0);
-              return metric === 'spend' ? `$${v.toFixed(4)}` : String(v);
+              if (metric === 'spend') return `$${v.toFixed(4)}`;
+              if (metric === 'tokens') return formatCompactTokenMetric(v);
+              return String(v);
             },
           },
         ],

@@ -152,10 +152,10 @@ describe("stats snapshot v2 routes", () => {
     });
     expect(siteDistributionResponse.statusCode).toBe(200);
     const siteDistribution = siteDistributionResponse.json() as {
-      distribution: Array<{ siteId: number; totalSpend: number }>;
+      distribution: Array<{ siteId: number; totalSpend: number; totalTokens: number }>;
     };
     expect(siteDistribution.distribution).toEqual([
-      expect.objectContaining({ siteId: site.id, totalSpend: 0.85 }),
+      expect.objectContaining({ siteId: site.id, totalSpend: 0.85, totalTokens: 220 }),
     ]);
 
     const siteTrendResponse = await app.inject({
@@ -164,9 +164,23 @@ describe("stats snapshot v2 routes", () => {
     });
     expect(siteTrendResponse.statusCode).toBe(200);
     const siteTrend = siteTrendResponse.json() as {
-      trend: Array<{ date: string }>;
+      trend: Array<{
+        date: string;
+        sites: Record<string, { spend: number; calls: number; tokens: number }>;
+      }>;
     };
     expect(siteTrend.trend.length).toBeGreaterThan(0);
+    const tokensForTrendDay = (day: {
+      sites: Record<string, { tokens: number }>;
+    }): number =>
+      Object.values(day.sites).reduce((sum, value) => sum + value.tokens, 0);
+    expect(
+      siteTrend.trend.reduce((sum, day) => sum + tokensForTrendDay(day), 0),
+    ).toBe(220);
+    const latestTrendDay = siteTrend.trend.reduce((latest, day) =>
+      day.date > latest.date ? day : latest,
+    );
+    expect(tokensForTrendDay(latestTrendDay)).toBe(180);
 
     const sitesResponse = await app.inject({
       method: "GET",

@@ -39,6 +39,7 @@ describe('SiteDistributionChart', () => {
               platform: 'demo',
               totalBalance: 12.34,
               totalSpend: 1.23,
+              totalTokens: 50000,
               accountCount: 2,
             },
           ]}

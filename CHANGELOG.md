@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-09-28
+
+### 修复
+
+- 生产依赖漏洞清零：`npm audit --omit=dev --audit-level=high` 由 13 项（其中 11 项 high）归零，覆盖 nodemailer 的 SSRF / 头注入 / TLS 校验类与 fastify / undici / ws 的 SSRF 绕过与 DoS。
+
+### 变更
+
+- 依赖升级：11 项补丁/次版本（`fastify` 5.12.5、`undici` 6.29.0、`ws` 8.22.0、`js-yaml` 4.3.2、`mysql2` 3.24.4、`ip-address` 10.7.2、`electron-updater` 6.8.9 等）。
+- 依赖升级：`@fastify/static` ^10.1.5、`nodemailer` ^10.0.12（均为大版本）。`@fastify/static` v10 的 `setHeaders` 首参由 `ServerResponse` 变为 `FastifyReply`，缓存头改用等价的 `reply.header`。
+
 ## [1.4.7] - 2026-09-28
 
 ### 新增

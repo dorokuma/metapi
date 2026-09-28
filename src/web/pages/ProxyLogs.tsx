@@ -276,6 +276,22 @@ function formatLatency(ms: number) {
   return `${ms}ms`;
 }
 
+function formatProxyLogTps(log: Pick<ProxyLogRenderItem, "completionTokens" | "latencyMs">) {
+  const completionTokens = log.completionTokens;
+  const latencyMs = log.latencyMs;
+  if (
+    (typeof completionTokens !== "number" || completionTokens <= 0) ||
+    (typeof latencyMs !== "number" || latencyMs <= 0)
+  ) {
+    return "-";
+  }
+  const tps = completionTokens / (latencyMs / 1000);
+  if (tps >= 100) {
+    return `${Math.round(tps)} t/s`;
+  }
+  return `${tps.toFixed(1)} t/s`;
+}
+
 function latencyColor(ms: number) {
   if (ms >= 3000) return "var(--color-danger)";
   if (ms >= 2000)
@@ -3401,19 +3417,34 @@ export default function ProxyLogs() {
           </div>
         ) : (
           <table className="data-table" style={{ width: "100%" }}>
+            <colgroup>
+              <col style={{ width: 28 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 148 }} />
+              <col style={{ width: 98 }} />
+              <col style={{ width: 108 }} />
+              <col style={{ width: 78 }} />
+              <col style={{ width: 68 }} />
+              <col style={{ width: 68 }} />
+              <col style={{ width: 68 }} />
+              <col style={{ width: 68 }} />
+              <col style={{ width: 78 }} />
+              <col style={{ width: 58 }} />
+            </colgroup>
             <thead>
               <tr>
-                <th style={{ width: 28 }} />
-                <th>时间</th>
-                <th>模型</th>
-                <th>站点</th>
-                <th>客户端</th>
-                <th>{tr("状态")}</th>
-                <th style={{ textAlign: "center" }}>用时</th>
-                <th style={{ textAlign: "right" }}>输入</th>
-                <th style={{ textAlign: "right" }}>输出</th>
-                <th style={{ textAlign: "right" }}>花费</th>
-                <th style={{ textAlign: "center" }}>重试</th>
+                <th />
+                <th style={{ padding: "10px 10px" }}>时间</th>
+                <th style={{ padding: "10px 10px" }}>模型</th>
+                <th style={{ padding: "10px 10px" }}>站点</th>
+                <th style={{ padding: "10px 10px" }}>客户端</th>
+                <th style={{ padding: "10px 10px" }}>{tr("状态")}</th>
+                <th style={{ padding: "10px 10px", textAlign: "center" }}>用时</th>
+                <th style={{ padding: "10px 10px", textAlign: "right" }}>输入</th>
+                <th style={{ padding: "10px 10px", textAlign: "right" }}>输出</th>
+                <th style={{ padding: "10px 10px", textAlign: "right" }}>速度</th>
+                <th style={{ padding: "10px 10px", textAlign: "right" }}>花费</th>
+                <th style={{ padding: "10px 10px", textAlign: "center" }}>重试</th>
               </tr>
             </thead>
             <tbody>
@@ -3455,7 +3486,7 @@ export default function ProxyLogs() {
                         transition: "background 0.15s",
                       }}
                     >
-                      <td style={{ padding: "8px 4px 8px 12px" }}>
+                      <td style={{ padding: "8px 4px 8px 10px" }}>
                         <svg
                           width="10"
                           height="10"
@@ -3483,11 +3514,12 @@ export default function ProxyLogs() {
                           whiteSpace: "nowrap",
                           fontVariantNumeric: "tabular-nums",
                           color: "var(--color-text-secondary)",
+                          padding: "12px 10px",
                         }}
                       >
                         {formatDateTimeLocal(log.createdAt)}
                       </td>
-                      <td>
+                      <td style={{ padding: "12px 10px" }}>
                         <div
                           style={{
                             display: "flex",
@@ -3551,6 +3583,7 @@ export default function ProxyLogs() {
                         style={{
                           fontSize: 12,
                           color: "var(--color-text-secondary)",
+                          padding: "12px 10px",
                         }}
                       >
                         <SiteBadgeLink
@@ -3565,11 +3598,12 @@ export default function ProxyLogs() {
                         style={{
                           fontSize: 12,
                           color: "var(--color-text-secondary)",
+                          padding: "12px 10px",
                         }}
                       >
                         {renderProxyLogClientCell(detailLog)}
                       </td>
-                      <td>
+                      <td style={{ padding: "12px 10px" }}>
                         <span
                           className={`badge ${log.status === "success" ? "badge-success" : "badge-error"}`}
                           style={{ fontSize: 11, fontWeight: 600 }}
@@ -3588,7 +3622,7 @@ export default function ProxyLogs() {
                           {log.status === "success" ? "成功" : "失败"}
                         </span>
                       </td>
-                      <td style={{ textAlign: "center" }}>
+                      <td style={{ textAlign: "center", padding: "12px 10px" }}>
                         <span
                           style={{
                             fontVariantNumeric: "tabular-nums",
@@ -3609,6 +3643,7 @@ export default function ProxyLogs() {
                           fontSize: 12,
                           fontVariantNumeric: "tabular-nums",
                           color: "var(--color-text-secondary)",
+                          padding: "12px 10px",
                         }}
                       >
                         {formatProxyLogTokenValue(log.promptTokens)}
@@ -3619,6 +3654,7 @@ export default function ProxyLogs() {
                           fontSize: 12,
                           fontVariantNumeric: "tabular-nums",
                           color: "var(--color-text-secondary)",
+                          padding: "12px 10px",
                         }}
                       >
                         {formatProxyLogTokenValue(log.completionTokens)}
@@ -3628,14 +3664,26 @@ export default function ProxyLogs() {
                           textAlign: "right",
                           fontSize: 12,
                           fontVariantNumeric: "tabular-nums",
+                          color: "var(--color-text-secondary)",
+                          padding: "12px 10px",
+                        }}
+                      >
+                        {formatProxyLogTps(log)}
+                      </td>
+                      <td
+                        style={{
+                          textAlign: "right",
+                          fontSize: 12,
+                          fontVariantNumeric: "tabular-nums",
                           fontWeight: 500,
+                          padding: "12px 10px",
                         }}
                       >
                         {typeof log.estimatedCost === "number"
                           ? `$${log.estimatedCost.toFixed(6)}`
                           : "-"}
                       </td>
-                      <td style={{ textAlign: "center" }}>
+                      <td style={{ textAlign: "center", padding: "12px 10px" }}>
                         {log.retryCount > 0 ? (
                           <span
                             className="badge badge-warning"
@@ -3657,7 +3705,7 @@ export default function ProxyLogs() {
                     </tr>
                     {expanded === log.id && (
                       <tr style={{ background: "var(--color-bg)" }}>
-                        <td colSpan={11} style={{ padding: 0 }}>
+                        <td colSpan={12} style={{ padding: 0 }}>
                           <div className="anim-collapse is-open">
                             <div className="anim-collapse-inner">
                               <div

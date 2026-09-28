@@ -1071,4 +1071,146 @@ describe('ProxyLogs server-driven page', () => {
       root?.unmount();
     }
   });
+
+  it('renders the speed column and falls back to - for invalid values', async () => {
+    apiMock.getProxyLogs.mockResolvedValue(buildListResponse({
+      items: [
+        {
+          id: 101,
+          createdAt: '2026-03-09 16:00:00',
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'success',
+          latencyMs: 120,
+          firstByteLatencyMs: 35,
+          isStream: true,
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          retryCount: 0,
+          estimatedCost: 1.23,
+          errorMessage: 'downstream: /v1/chat upstream: /api/chat',
+          username: 'tester',
+          siteName: 'main-site',
+          siteUrl: 'https://main-site.example.com',
+          clientFamily: 'codex',
+          clientAppId: 'cherry_studio',
+          clientAppName: 'Cherry Studio',
+          clientConfidence: 'heuristic',
+          downstreamKeyName: '移动端灰度',
+          downstreamKeyGroupName: '项目A',
+          downstreamKeyTags: ['VIP', '灰度'],
+        },
+        {
+          id: 102,
+          createdAt: '2026-03-09 16:01:00',
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'success',
+          latencyMs: 0,
+          firstByteLatencyMs: 0,
+          isStream: false,
+          promptTokens: 8,
+          completionTokens: 0,
+          totalTokens: 8,
+          retryCount: 0,
+          estimatedCost: 0.5,
+          errorMessage: '',
+          username: 'tester',
+          siteName: 'main-site',
+          siteUrl: 'https://main-site.example.com',
+          clientFamily: 'codex',
+          clientAppId: 'cherry_studio',
+          clientAppName: 'Cherry Studio',
+          clientConfidence: 'exact',
+        },
+        {
+          id: 103,
+          createdAt: '2026-03-09 16:02:00',
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'success',
+          latencyMs: 1000,
+          firstByteLatencyMs: 100,
+          isStream: true,
+          promptTokens: 20,
+          completionTokens: 250,
+          totalTokens: 270,
+          retryCount: 1,
+          estimatedCost: 2.5,
+          errorMessage: '',
+          username: 'tester',
+          siteName: 'main-site',
+          siteUrl: 'https://main-site.example.com',
+          clientFamily: 'codex',
+          clientAppId: 'cherry_studio',
+          clientAppName: 'Cherry Studio',
+          clientConfidence: 'exact',
+        },
+      ],
+      total: 3,
+      summary: {
+        totalCount: 3,
+        successCount: 3,
+        failedCount: 0,
+        totalCost: 4.23,
+        totalTokensAll: 293,
+      },
+    }));
+
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const header = root!.root.find((node) => (
+        node.type === 'th'
+        && collectText(node).trim() === '速度'
+      ));
+      expect(header).toBeDefined();
+
+      const rows = root!.root.findAll((node) => (
+        node.type === 'tr' && node.props['data-testid']?.startsWith('proxy-log-row-')
+      ));
+      expect(rows.length).toBe(3);
+
+      const firstRowText = collectText(rows[0]);
+      expect(firstRowText).toContain('41.7 t/s');
+
+      const secondRowText = collectText(rows[1]);
+      expect(secondRowText).toContain('-');
+
+      const thirdRowText = collectText(rows[2]);
+      expect(thirdRowText).toContain('250 t/s');
+
+      await act(async () => {
+        rows[2].props.onClick();
+      });
+      await flushMicrotasks();
+
+      const expandedRow = root!.root.find((node) => (
+        node.type === 'tr'
+        && node.props.style?.background === 'var(--color-bg)'
+      ));
+      expect(expandedRow).toBeDefined();
+      const expandedCell = root!.root.find((node) => (
+        node.type === 'td'
+        && node.props.colSpan === 12
+      ));
+      expect(expandedCell).toBeDefined();
+    } finally {
+      await act(async () => {
+        root?.unmount();
+      });
+    }
+  });
 });

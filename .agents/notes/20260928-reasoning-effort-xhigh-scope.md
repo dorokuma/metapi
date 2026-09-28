@@ -37,5 +37,5 @@ canonical 层（`CanonicalReasoningEffort` 联合类型 + `normalizeReasoningEff
 - 用户裁决：维持范围、记录遗留、照常提交（豁免记录见「被放弃的方案」）。
 - 遗留观察项：
   1. Anthropic 表面 `xhigh` 语义（入站 400 / 出站不映射）与 Gemini 降级——将来需要时单独设计。
-  2. 可选测试增强：`reasoning.test.ts` 可补「大写/带空白」变体用例（reviewer consider，非阻断）。
-  3. 基线观察：`src/server/index.ts:271,275` 两条 TS2339（@fastify/static 升级提交 `98942bd0` 遗留），与本改动无关，值得单独跟进。
+  2. 测试增强：`reasoning.test.ts` 已补「大写/空白」变体用例（reviewer consider，已闭合）。
+  3. 基线观察：`src/server/index.ts:271,275` 两条 TS2339 经复核为依赖目录陈旧假象（@fastify/static 升级 `98942bd0` 后 node_modules 未与 lockfile 同步，旧类型与新代码暂不匹配）；依赖刷新后全家桶 typecheck 全绿（web/web:test/server/desktop，EXIT 0），无需修复，再遇同类报错先查依赖同步。

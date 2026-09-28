@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-09-28
+
+### 新增
+
+- 站点分布与趋势图新增「词元」维度：`site_day_usage.totalTokens` 接入站点级分布/趋势 API 与前端图表，支持「词元趋势」「词元分布」切换展示。
+
+### 修复
+
+- MySQL 长文本列不再生成 DEFAULT 子句（TEXT 列带 DEFAULT 违反 MySQL 约束致 schema 门禁必红），并修 live 测试方言兼容（`.returning()`）与 BIGINT 断言类型。
+
+### 变更
+
+- CI：未配置 Docker Hub secrets 时发布 job 自动跳过（guard job 模式）；`npm audit` 在 push 路径降级为报告输出，不再阻断（跟进责任已登记 .agents/notes）。
+
 ## [1.4.6] - 2026-09-28
 
 ### 新增

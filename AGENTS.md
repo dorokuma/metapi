@@ -13,9 +13,9 @@ make small, consistent changes without re-learning the codebase each time.
 
 ## 运行实例与数据 / Runtime Instance And Data
 
-- **生产实例**：本机 Docker 容器 `metapi`（host 网络，`127.0.0.1:4000`，重启策略 `unless-stopped`）。**镜像 tag 规则：发版镜像 = `metapi:<版本号>`**（如 `metapi:1.4.2`）；历史镜像本地保留（`metapi:local-*`、`-bak-*`、旧版本号 tag），都是回滚位。
+- **生产实例**：本机 Docker 容器 `metapi`（host 网络，`127.0.0.1:4000`，重启策略 `unless-stopped`）。**镜像 tag 规则：发版镜像 = `metapi:<版本号>`**（如 `metapi:1.4.2`）；镜像不做长期保留——只常驻当前发版版本，旧版本号 tag 与陈旧 tag 在发版收尾时清理，需要回滚旧版时从对应提交重建（见「发版与无痛上线」第④条）。
 - **生产的唯一真相是 compose 文件**：`/var/lib/metapi/docker-compose.yml`（compose project `metapi`、service/container `metapi`、`network_mode: host`、卷 `/var/lib/metapi/data:/app/data`、`env_file: /var/lib/metapi/.env`）。**现役镜像由该文件的 `image:` 行决定**；用 compose 命令前先 `cd /var/lib/metapi`。核对实际在跑的 tag 用 `docker inspect metapi --format '{{.Config.Image}}'`——两者不一致说明容器被人绕过 compose 动过，属异常；恢复方式是让 compose 重新接管（见「发版与无痛上线」）。
-- **真实数据位置**：宿主 `/var/lib/metapi/data`（容器内挂载为 `/app/data`）；核心库 `/var/lib/metapi/data/hub.db`（SQLite）。站点/账号/路由/设置（`sites`/`accounts`/`token_routes`/`settings`）、代理日志 `proxy_logs`、调试抓取 `proxy_debug_*` 等运行期数据都在此库；运行日志在 `docker logs metapi`。同目录 `data.bak-*-pre-*.db` 是历史切换快照（回滚用），`deploy-logs/` 是既往切换日志。
+- **真实数据位置**：宿主 `/var/lib/metapi/data`（容器内挂载为 `/app/data`）；核心库 `/var/lib/metapi/data/hub.db`（SQLite）。站点/账号/路由/设置（`sites`/`accounts`/`token_routes`/`settings`）、代理日志 `proxy_logs`、调试抓取 `proxy_debug_*` 等运行期数据都在此库；运行日志在 `docker logs metapi`。同目录 `data.bak-*-pre-*.db` 是历史切换快照（回滚用，**只保留最新 7 个**），`deploy-logs/` 是既往切换日志。
 - **仓库内的 `docker/docker-compose.yml`、`docker/docker-compose.override.yml`、`update-and-restart.sh`、`data/` 都是本地开发件，不是生产**：它们的数据卷指向仓库目录、override 会用本地代码构建、端口写成映射式 `127.0.0.1:4000:4000`。**禁止用它们操作生产**，排查线上问题也不要读这里的 `data/`。
 - **排查原则**：先读运行实例的事实（hub.db 只读打开，如 `sqlite3 "file:/var/lib/metapi/data/hub.db?mode=ro"`；必要时 `docker logs` / `docker inspect`），弄清「发生了什么」；需要解释机制、定位实现时再读源码（它回答「为什么」）。只读源码往往查不到运行期问题，两者结合使用；对生产数据/配置/容器的任何写操作须先经用户批准。
 
@@ -38,6 +38,10 @@ make small, consistent changes without re-learning the codebase each time.
   - 在用判据写死：分支满足任一即视为在用、不删——被任何 worktree 检出（`git worktree list`）、关联工作区有未提交/未跟踪改动、有未合并进 main 的 commit。
   - 禁止强制：删除只用 `git branch -d` 与 `git worktree remove`；git 拒绝时停下报告，严禁 `-D`、严禁 `worktree remove --force`、严禁对 worktree 目录 `rm -rf`（避免主仓库 worktree 元数据变脏）。
   - 顺序：先回收 worktree → 再删本地分支 → 最后删远程分支。
+- **④ 存量裁剪（每次发版都做，判据写死、不靠记忆）**：
+  - **DB 快照只留最新 7 个**：`/var/lib/metapi/data.bak-*.db` 按 mtime 倒序保留前 7 个（本次发版新增的那一个必落在保留集内），其余逐个 `rm -f -- <文件>` 删除；禁止对 `/var/lib/metapi/data` 做目录级删除。
+  - **镜像只留当前发版版本**：删掉更旧的 `metapi:<版本号>` 与陈旧 tag；删前先核无人使用（`docker ps -a --filter ancestor=<镜像>` 为空）；需要旧版作即时回滚位时先向用户确认，确认删后从对应提交重建（`git checkout <版本提交> && docker build -t metapi:<版本号> -f docker/Dockerfile .`）。
+  - **清理前先看发版窗口**：`/var/lib/metapi/deploy-logs/` 有正在进行的 deploy（或 `.deploy.lock` 被持有）时，删除类清理一律让位；发版脚本的 `data-canary/` 暂存区属在跑流程的部件，不当作残留清理。
 - **红线**：
   - **生产容器只由 compose 管**：不 `docker stop/rm metapi`、不手搓 `docker run` 替换它、不把切换拆成「先删后建」两步——任何时刻都不得让生产容器处于「已删除且无替代」状态。
   - **切换中途被打断时，第一优先级是「容器在不在」**（`docker ps -a --filter name=metapi`）：不在就立刻 `cd /var/lib/metapi && docker compose up -d` 恢复，之后才排查原因。

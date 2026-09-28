@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-09-28
+
+### 新增
+
+- 词元用量重建与聚合投影：`proxy_logs` 用量列语义重构，presence 化解析与六写入点归一接线；聚合投影层落地，支持站点级用量统计。
+- 单站点守卫收紧、快照 backup 七键三态、SQLite 哨兵 -1 自增语义断言、站点序列三方言矩阵 live 接线。
+
+### 修复
+
+- SQLite bootstrap 缺失 `AUTOINCREMENT`：`sqlite` 引擎初始化时未加 `AUTOINCREMENT` 导致 ID 不自增，现已修复。
+- Drizzle journal 0005 断档与快照链头刷新：journal 序号跳号致 migrate 断档，0005 补齐；快照链头未刷新致 upgrade 误判，已修正。
+- Upgrade 产物空步归正：upgrade 生成器在空迁移步骤时输出空文件，现归正为跳过空步。
+
+### 变更
+
+- 集成 main 分支 1h 缓存列（cc1h）：`cache_creation_tokens_1h` 列贯通四调用点（completions 流式/非流式、embeddings、sharedSurface），保持既有口径。
+
 ## [1.4.5] - 2026-09-27
 
 ### 修复

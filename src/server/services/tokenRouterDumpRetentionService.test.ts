@@ -5,7 +5,6 @@ import { join, basename } from 'node:path';
 import { retainTokenRouterDumps, TokenRouterDumpRetentionDeps } from './tokenRouterDumpRetentionService.js';
 
 const PREFIX = 'metapi-token-router-selection-';
-const LOCK_PATH = join(tmpdir(), '.metapi-token-router-dump-retention.lock');
 
 // Each test run gets its own private root directory so parallel test files
 // that also touch tmpdir() cannot race and delete our dump directories
@@ -17,6 +16,10 @@ function ensurePrivateRoot(): string {
     privateRoot = mkdtempSync(join(tmpdir(), 'metapi-token-router-dump-retention-root-'));
   }
   return privateRoot;
+}
+
+function getLockPath(): string {
+  return join(ensurePrivateRoot(), '.metapi-token-router-dump-retention.lock');
 }
 
 describe('tokenRouterDumpRetentionService', () => {
@@ -55,7 +58,7 @@ describe('tokenRouterDumpRetentionService', () => {
         }
       }
     } catch { /* ignore */ }
-    try { rmSync(LOCK_PATH, { force: true }); } catch { /* ignore */ }
+    try { rmSync(getLockPath(), { force: true }); } catch { /* ignore */ }
   });
 
   afterAll(() => {
@@ -63,7 +66,7 @@ describe('tokenRouterDumpRetentionService', () => {
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
     createdDirs = [];
-    try { rmSync(LOCK_PATH, { force: true }); } catch { /* ignore */ }
+    try { rmSync(getLockPath(), { force: true }); } catch { /* ignore */ }
     // Clean up the private root used for retainTokenRouterDumps calls.
     if (privateRoot) {
       try { rmSync(privateRoot, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -193,11 +196,12 @@ describe('tokenRouterDumpRetentionService', () => {
     const beforeCount = countMatchingDirs(root);
 
     // Pre-create the lock file to simulate another holder.
+    const lockPath = join(root, '.metapi-token-router-dump-retention.lock');
     try {
-      rmSync(LOCK_PATH, { force: true });
+      rmSync(lockPath, { force: true });
     } catch { /* ignore */ }
     try {
-      require('node:fs').writeFileSync(LOCK_PATH, '');
+      require('node:fs').writeFileSync(lockPath, '');
     } catch { /* ignore */ }
 
     const result = retainTokenRouterDumps({
@@ -207,12 +211,29 @@ describe('tokenRouterDumpRetentionService', () => {
       maxCount: 10,
     });
 
-    try { rmSync(LOCK_PATH, { force: true }); } catch { /* ignore */ }
+    try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
 
     const afterCount = countMatchingDirs(root);
     expect(afterCount).toBe(beforeCount);
     expect(result.deletedExpired).toBe(0);
     expect(result.deletedExcess).toBe(0);
+  });
+
+  it('falls back to tmpdir lock when rootDir is not provided', () => {
+    const uniquePrefix = `metapi-token-router-default-fallback-${process.pid}-${Date.now()}-`;
+    const dir = mkdtempSync(join(tmpdir(), uniquePrefix));
+    try {
+      const result = retainTokenRouterDumps({
+        prefix: uniquePrefix,
+        ttlMinutes: 0,
+        maxCount: 10,
+      });
+
+      expect(require('node:fs').existsSync(dir)).toBe(false);
+      expect(result.deletedExpired).toBeGreaterThanOrEqual(1);
+    } finally {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   });
 
   it('warns on rmSync failure without breaking the main flow', () => {

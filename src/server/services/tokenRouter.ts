@@ -1018,20 +1018,6 @@ export function getSiteRuntimeHealthMultiplier(siteId: number, nowMs = Date.now(
   return getRuntimeHealthMultiplier(state, nowMs);
 }
 
-export function isSiteRuntimeBreakerOpen(siteId: number, nowMs = Date.now()): boolean {
-  const state = siteRuntimeHealthStates.get(siteId);
-  return isRuntimeHealthBreakerOpen(state, nowMs);
-}
-
-export function filterSiteRuntimeBrokenCandidates<T extends { site: { id: number } }>(
-  candidates: T[],
-  nowMs = Date.now(),
-): T[] {
-  if (candidates.length <= 1) return candidates;
-  const healthy = candidates.filter((candidate) => !isSiteRuntimeBreakerOpen(candidate.site.id, nowMs));
-  return healthy.length > 0 ? healthy : candidates;
-}
-
 function buildRuntimeBreakerReason(blockedByToken: boolean, details: SiteRuntimeHealthDetails): string {
   if (blockedByToken && details.modelBreakerOpen) {
     return '渠道熔断中，模型熔断中，优先避让';

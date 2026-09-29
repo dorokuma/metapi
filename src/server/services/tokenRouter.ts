@@ -243,6 +243,7 @@ type StableFirstObservationProgressState = {
 
 const siteRuntimeHealthStates = new Map<number, SiteRuntimeHealthState>();
 const siteModelRuntimeHealthStates = new Map<number, Map<string, SiteRuntimeHealthState>>();
+const tokenRuntimeHealthStates = new Map<number, SiteRuntimeHealthState>();
 const stableFirstLastSelectedSiteByKey = new Map<string, number>();
 const MAX_STABLE_FIRST_ROTATION_KEYS = 1024;
 const stableFirstObservationProgressByKey = new Map<string, StableFirstObservationProgressState>();
@@ -664,6 +665,22 @@ function getOrCreateSiteModelRuntimeHealthState(
   return getOrCreateRuntimeHealthState(modelStates, modelKey, nowMs);
 }
 
+function getOrCreateTokenRuntimeHealthState(tokenId: number | null | undefined, nowMs = Date.now()): SiteRuntimeHealthState | null {
+  if (!Number.isFinite(tokenId) || (tokenId ?? 0) <= 0) return null;
+  return getOrCreateRuntimeHealthState(tokenRuntimeHealthStates, tokenId, nowMs);
+}
+
+function isTokenRuntimeBreakerOpen(tokenId: number, nowMs = Date.now()): boolean {
+  const state = tokenRuntimeHealthStates.get(tokenId);
+  return isRuntimeHealthBreakerOpen(state, nowMs);
+}
+
+// Exported for tests: check if a token's breaker is open.
+export function __isTokenRuntimeBreakerOpenForTest(tokenId: number | null | undefined, nowMs = Date.now()): boolean {
+  if (!Number.isFinite(tokenId) || (tokenId ?? 0) <= 0) return false;
+  return isTokenRuntimeBreakerOpen(tokenId as number, nowMs);
+}
+
 function isRuntimeHealthBreakerOpen(state: SiteRuntimeHealthState | null | undefined, nowMs = Date.now()): boolean {
   if (!state) return false;
   return typeof state.breakerUntilMs === 'number' && state.breakerUntilMs > nowMs;
@@ -891,20 +908,41 @@ async function ensureSiteRuntimeHealthStateLoaded(): Promise<void> {
   await siteRuntimeHealthLoadPromise;
 }
 
-function recordSiteRuntimeFailure(siteId: number, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
+function recordSiteRuntimeFailure(
+  siteId: number,
+  context: SiteRuntimeFailureContext = {},
+  tokenId: number | null | undefined = undefined,
+  nowMs = Date.now(),
+): void {
   applyRuntimeHealthFailure(getOrCreateSiteRuntimeHealthState(siteId, nowMs), context, nowMs);
-  const modelState = getOrCreateSiteModelRuntimeHealthState(siteId, context.modelName, nowMs);
-  if (modelState) {
-    applyRuntimeHealthFailure(modelState, context, nowMs);
+  if (isModelScopedRuntimeFailure(context)) {
+    const modelState = getOrCreateSiteModelRuntimeHealthState(siteId, context.modelName, nowMs);
+    if (modelState) {
+      applyRuntimeHealthFailure(modelState, context, nowMs);
+    }
+  }
+  const tokenState = getOrCreateTokenRuntimeHealthState(tokenId, nowMs);
+  if (tokenState) {
+    applyRuntimeHealthFailure(tokenState, context, nowMs);
   }
   scheduleSiteRuntimeHealthPersistence();
 }
 
-function recordSiteRuntimeSuccess(siteId: number, latencyMs: number, modelName?: string | null, nowMs = Date.now()): void {
+function recordSiteRuntimeSuccess(
+  siteId: number,
+  latencyMs: number,
+  modelName?: string | null,
+  tokenId: number | null | undefined = undefined,
+  nowMs = Date.now(),
+): void {
   applyRuntimeHealthSuccess(getOrCreateSiteRuntimeHealthState(siteId, nowMs), latencyMs, nowMs);
   const modelState = getOrCreateSiteModelRuntimeHealthState(siteId, modelName, nowMs);
   if (modelState) {
     applyRuntimeHealthSuccess(modelState, latencyMs, nowMs);
+  }
+  const tokenState = getOrCreateTokenRuntimeHealthState(tokenId, nowMs);
+  if (tokenState) {
+    applyRuntimeHealthSuccess(tokenState, latencyMs, nowMs);
   }
   scheduleSiteRuntimeHealthPersistence();
 }
@@ -912,6 +950,7 @@ function recordSiteRuntimeSuccess(siteId: number, latencyMs: number, modelName?:
 export function resetSiteRuntimeHealthState(): void {
   siteRuntimeHealthStates.clear();
   siteModelRuntimeHealthStates.clear();
+  tokenRuntimeHealthStates.clear();
   stableFirstObservationProgressByKey.clear();
   stableFirstObservationSiteCooldownByKey.clear();
   siteRuntimeHealthLoaded = false;
@@ -993,7 +1032,13 @@ export function filterSiteRuntimeBrokenCandidates<T extends { site: { id: number
   return healthy.length > 0 ? healthy : candidates;
 }
 
-function buildRuntimeBreakerReason(details: SiteRuntimeHealthDetails): string {
+function buildRuntimeBreakerReason(blockedByToken: boolean, details: SiteRuntimeHealthDetails): string {
+  if (blockedByToken && details.modelBreakerOpen) {
+    return '渠道熔断中，模型熔断中，优先避让';
+  }
+  if (blockedByToken) {
+    return '渠道熔断中，优先避让';
+  }
   if (details.globalBreakerOpen && details.modelBreakerOpen) {
     return '站点熔断中，模型熔断中，优先避让';
   }
@@ -1026,12 +1071,16 @@ function filterSiteRuntimeBrokenCandidatesByModel(
     : (() => modelName);
   const avoided: Array<{ candidate: RouteChannelCandidate; reason: string }> = [];
   const healthy = candidates.filter((candidate) => {
+    const rawTokenId = candidate.token?.id;
+    const tokenBreakerOpen = typeof rawTokenId === 'number' && rawTokenId > 0
+      ? isTokenRuntimeBreakerOpen(rawTokenId, nowMs)
+      : false;
     const details = getSiteRuntimeHealthDetails(candidate.site.id, resolveModelName(candidate), nowMs);
-    const blocked = details.globalBreakerOpen || details.modelBreakerOpen;
+    const blocked = tokenBreakerOpen || details.modelBreakerOpen;
     if (blocked) {
       avoided.push({
         candidate,
-        reason: buildRuntimeBreakerReason(details),
+        reason: buildRuntimeBreakerReason(tokenBreakerOpen, details),
       });
     }
     return !blocked;
@@ -1043,8 +1092,8 @@ function filterSiteRuntimeBrokenCandidatesByModel(
       avoided,
     }
     : {
-      candidates,
-      avoided: [],
+      candidates: [],
+      avoided,
     };
 }
 
@@ -2495,13 +2544,13 @@ export class TokenRouter {
           cooldownLevel: 0,
           updatedAt: nowIso,
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
-        recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName);
+        recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName, ch.tokenId ?? undefined);
       } else {
-        recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+        recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName, ch.tokenId ?? undefined);
       }
       invalidateRouteScopedCache(ch.routeId);
     } else {
-      recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+      recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName, ch.tokenId ?? undefined);
     }
 
     await db.update(schema.routeChannels).set({
@@ -2567,9 +2616,9 @@ export class TokenRouter {
           cooldownLevel: 0,
           updatedAt: nowIso,
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
-        recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName);
+        recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName, ch.tokenId ?? undefined);
       } else {
-        recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+        recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName, ch.tokenId ?? undefined);
       }
 
       await db.update(schema.routeChannels).set({
@@ -2608,7 +2657,7 @@ export class TokenRouter {
       });
     }
 
-    recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+    recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName, ch.tokenId ?? undefined);
   }
 
   /**
@@ -2729,7 +2778,7 @@ export class TokenRouter {
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
         // 用量限流属于凭据/渠道级状态，不把单个成员的冷却扩散到整个站点。
         if (!shortWindowLimitCooldownUntil) {
-          recordSiteRuntimeFailure(memberRow.account.siteId, normalizedContext, nowMs);
+          recordSiteRuntimeFailure(memberRow.account.siteId, normalizedContext, ch.tokenId ?? undefined, nowMs);
         }
         invalidateRouteScopedCache(route.id);
         return;
@@ -2783,7 +2832,7 @@ export class TokenRouter {
     }
 
     if (!shortWindowLimitCooldownUntil) {
-      recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
+      recordSiteRuntimeFailure(account.siteId, normalizedContext, ch.tokenId ?? undefined, nowMs);
     }
   }
 

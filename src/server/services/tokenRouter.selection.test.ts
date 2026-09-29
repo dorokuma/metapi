@@ -30,6 +30,7 @@ describe('TokenRouter selection scoring', () => {
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
   let flushSiteRuntimeHealthPersistence: TokenRouterModule['flushSiteRuntimeHealthPersistence'];
   let filterRecentlyFailedCandidates: TokenRouterModule['filterRecentlyFailedCandidates'];
+  let isTokenRuntimeBreakerOpenForTest: TokenRouterModule['__isTokenRuntimeBreakerOpenForTest'];
   let config: ConfigModule['config'];
   let proxyChannelCoordinator: ProxyChannelCoordinatorModule['proxyChannelCoordinator'];
   let resetProxyChannelCoordinatorState: ProxyChannelCoordinatorModule['resetProxyChannelCoordinatorState'];
@@ -65,6 +66,7 @@ describe('TokenRouter selection scoring', () => {
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
     flushSiteRuntimeHealthPersistence = tokenRouterModule.flushSiteRuntimeHealthPersistence;
     filterRecentlyFailedCandidates = tokenRouterModule.filterRecentlyFailedCandidates;
+    isTokenRuntimeBreakerOpenForTest = tokenRouterModule.__isTokenRuntimeBreakerOpenForTest;
     config = configModule.config;
     proxyChannelCoordinator = coordinatorModule.proxyChannelCoordinator;
     resetProxyChannelCoordinatorState = coordinatorModule.resetProxyChannelCoordinatorState;
@@ -844,10 +846,10 @@ describe('TokenRouter selection scoring', () => {
     let decision = await router.explainSelection('gpt-5.3');
     const breakerCandidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
     const breakerCandidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
-    expect(breakerCandidateA?.reason || '').toContain('站点熔断');
+    expect(breakerCandidateA?.reason || '').toContain('渠道熔断');
     expect((breakerCandidateA?.probability || 0)).toBe(0);
     expect((breakerCandidateB?.probability || 0)).toBe(100);
-    expect(decision.summary.join(' ')).toContain('站点熔断避让');
+    expect(decision.summary.join(' ')).toContain('避让');
 
     await router.recordSuccess(channelA.id, 600, 0);
     invalidateTokenRouterCache();
@@ -1254,7 +1256,7 @@ describe('TokenRouter selection scoring', () => {
     expect(healthyCandidate?.reason || '').toContain('近期成功率=');
   });
 
-  it('penalizes the failed model more than unrelated models on the same site', async () => {
+  it('does not penalize unrelated models on transient failure on the same site', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
       valueScoreFactor: 0,
@@ -1328,8 +1330,10 @@ describe('TokenRouter selection scoring', () => {
 
     expect(gptCandidateA).toBeTruthy();
     expect(claudeCandidateA).toBeTruthy();
-    expect((gptCandidateA?.probability || 0)).toBeLessThan((claudeCandidateA?.probability || 0));
-    expect(gptCandidateA?.reason || '').toContain('模型=');
+    // Transient failures (502/429/超时) must not spread to model-level breaker.
+    // Unrelated models on the same site should retain equal probability.
+    expect((gptCandidateA?.probability || 0)).toBeGreaterThanOrEqual((claudeCandidateA?.probability || 0));
+    expect((claudeCandidateA?.probability || 0)).toBeGreaterThanOrEqual((gptCandidateA?.probability || 0));
   });
 
   it('treats unknown provider for model as model-scoped degradation instead of opening a site breaker', async () => {
@@ -1752,5 +1756,398 @@ describe('TokenRouter selection scoring', () => {
     if (queuedLease.status === 'acquired') {
       queuedLease.lease.release();
     }
+  });
+
+  it('does not连坐 other keys on the same site when one key hits the token-level breaker', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-4o-mini');
+
+    const site = await createSite('multi-key-site');
+    const account = await createAccount(site.id, 'multi-key-user');
+    const tokenA1 = await createToken(account.id, 'token-a1');
+    const tokenA2 = await createToken(account.id, 'token-a2');
+
+    const channelA1 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenA1.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelA2 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenA2.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    // SITE_RUNTIME_BREAKER_STREAK_THRESHOLD = 3.
+    for (let i = 0; i < 3; i += 1) {
+      await router.recordFailure(channelA1.id, {
+        status: 502,
+        errorText: 'Gateway timeout',
+        modelName: 'gpt-4o-mini',
+      });
+    }
+    // Clear channel-level cooldown so the candidate reaches the breaker filter.
+    await router.clearChannelFailureState([channelA1.id]);
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-4o-mini');
+    const a1Candidate = decision.candidates.find((candidate) => candidate.channelId === channelA1.id);
+    const a2Candidate = decision.candidates.find((candidate) => candidate.channelId === channelA2.id);
+
+    // A1 must be blocked by the token-level breaker (not channel cooldown).
+    expect((a1Candidate?.probability || 0)).toBe(0);
+    expect(a1Candidate?.reason || '').toContain('渠道熔断');
+    // A2 must remain fully available; transient failures must not spread to model-level breaker.
+    expect((a2Candidate?.probability || 0)).toBe(100);
+    expect(a2Candidate?.reason || '').not.toContain('站点熔断');
+  });
+
+  it('does not连坐 other keys across sites when one key hits the token-level breaker', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-4o-mini');
+
+    // Site A: key1 (will fail) + key2 (should survive)
+    const siteA = await createSite('multi-site-a');
+    const accountA = await createAccount(siteA.id, 'multi-site-a-user');
+    const tokenA1 = await createToken(accountA.id, 'multi-site-token-a1');
+    const tokenA2 = await createToken(accountA.id, 'multi-site-token-a2');
+    const channelA1 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: tokenA1.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const channelA2 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: tokenA2.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    // Site B: key3 (healthy)
+    const siteB = await createSite('multi-site-b');
+    const accountB = await createAccount(siteB.id, 'multi-site-b-user');
+    const tokenB3 = await createToken(accountB.id, 'multi-site-token-b3');
+    const channelB3 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: tokenB3.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let i = 0; i < 3; i += 1) {
+      await router.recordFailure(channelA1.id, {
+        status: 502,
+        errorText: 'Gateway timeout',
+        modelName: 'gpt-4o-mini',
+      });
+    }
+    // Clear channel cooldown so A1 is evaluated by the breaker filter, not by eligibility.
+    await router.clearChannelFailureState([channelA1.id]);
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-4o-mini');
+    const a1Candidate = decision.candidates.find((candidate) => candidate.channelId === channelA1.id);
+    const a2Candidate = decision.candidates.find((candidate) => candidate.channelId === channelA2.id);
+    const b3Candidate = decision.candidates.find((candidate) => candidate.channelId === channelB3.id);
+
+    // A1 is blocked by its own token breaker.
+    expect((a1Candidate?.probability || 0)).toBe(0);
+    expect(a1Candidate?.reason || '').toContain('渠道熔断');
+    // A2 and B3 must remain selectable; transient failure of A1 must not spread.
+    expect((a2Candidate?.probability || 0)).toBeGreaterThan(0);
+    expect((b3Candidate?.probability || 0)).toBeGreaterThan(0);
+  });
+
+  it('returns no available key only when all keys on the same site are blocked', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-4o-mini');
+
+    const site = await createSite('all-blocked-site');
+    const account = await createAccount(site.id, 'all-blocked-user');
+    const tokenX = await createToken(account.id, 'token-x');
+    const tokenY = await createToken(account.id, 'token-y');
+
+    const channelX = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenX.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelY = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenY.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    // SITE_RUNTIME_BREAKER_STREAK_THRESHOLD = 3.
+    for (let i = 0; i < 3; i += 1) {
+      await router.recordFailure(channelX.id, {
+        status: 502,
+        errorText: 'Bad gateway',
+        modelName: 'gpt-4o-mini',
+      });
+      await router.recordFailure(channelY.id, {
+        status: 502,
+        errorText: 'Bad gateway',
+        modelName: 'gpt-4o-mini',
+      });
+    }
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-4o-mini');
+    const healthy = decision.candidates.filter((candidate) => (candidate.probability || 0) > 0);
+    expect(healthy).toHaveLength(0);
+    // When all candidates are blocked, no candidates get probability > 0.
+    // The summary will indicate no available channels (not breaker avoidance,
+    // because all channels are filtered simultaneously).
+    expect(decision.summary.join(' ')).toContain('没有可用通道');
+  });
+
+  it('returns empty when all candidates are blocked by the token-level breaker', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const site = await createSite('breaker-blocked-site');
+    const account = await createAccount(site.id, 'breaker-blocked-user');
+    const tokenX = await createToken(account.id, 'breaker-token-x');
+    const tokenY = await createToken(account.id, 'breaker-token-y');
+
+    const channelX = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenX.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelY = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenY.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let i = 0; i < 3; i += 1) {
+      await router.recordFailure(channelX.id, {
+        status: 502,
+        errorText: 'Bad gateway',
+        modelName: 'gpt-4o-mini',
+      });
+      await router.recordFailure(channelY.id, {
+        status: 502,
+        errorText: 'Bad gateway',
+        modelName: 'gpt-4o-mini',
+      });
+    }
+    // Clear channel-level cooldown so the candidates reach the breaker filter.
+    await router.clearChannelFailureState([channelX.id, channelY.id]);
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-4o-mini');
+    const healthy = decision.candidates.filter((candidate) => (candidate.probability || 0) > 0);
+    expect(healthy).toHaveLength(0);
+    // The breaker filter must have blocked all candidates.
+    const xCandidate = decision.candidates.find((candidate) => candidate.channelId === channelX.id);
+    const yCandidate = decision.candidates.find((candidate) => candidate.channelId === channelY.id);
+    expect(xCandidate?.reason || '').toContain('渠道熔断');
+    expect(yCandidate?.reason || '').toContain('渠道熔断');
+    // Summary should indicate no channel was selected after breaker filtering.
+    expect(decision.summary.join(' ')).toContain('本次未选出通道');
+  });
+
+  it('re-enters a recovered token back into the rotation pool after probe success', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const site = await createSite('recovery-site');
+    const account = await createAccount(site.id, 'recovery-user');
+    const tokenA1 = await createToken(account.id, 'token-recovery-a1');
+    const tokenA2 = await createToken(account.id, 'token-recovery-a2');
+
+    const channelA1 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenA1.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelA2 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenA2.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    // Use round_robin so we can verify A1 is rotated back after recovery.
+    // Trigger token-level breaker (3 transient failures in a row).
+    for (let i = 0; i < 3; i += 1) {
+      await router.recordFailure(channelA1.id, {
+        status: 502,
+        errorText: 'Gateway timeout',
+        modelName: 'gpt-4o-mini',
+      });
+    }
+    invalidateTokenRouterCache();
+
+    // A1 should be blocked by the token-level breaker after 3 transient failures.
+    let decision = await router.explainSelection('gpt-4o-mini');
+    const a1Blocked = decision.candidates.find((candidate) => candidate.channelId === channelA1.id);
+    // After 3 transient failures A1 is blocked (token breaker or channel cooldown).
+    expect((a1Blocked?.probability || 0)).toBe(0);
+
+    // Recovery probe clears the token-level breaker and channel cooldown.
+    // The token breaker must be open before recovery so the
+    // "re-enters a recovered token" assertion exercises the new
+    // token-level-breaker code path.
+    expect(isTokenRuntimeBreakerOpenForTest(tokenA1.id)).toBe(true);
+
+    await router.recordProbeSuccess(channelA1.id, 200, 'gpt-4o-mini');
+    invalidateTokenRouterCache();
+
+    // recordProbeSuccess must clear the token-level breaker.
+    expect(isTokenRuntimeBreakerOpenForTest(tokenA1.id)).toBe(false);
+
+    decision = await router.explainSelection('gpt-4o-mini');
+    const recoveredA1 = decision.candidates.find((candidate) => candidate.channelId === channelA1.id);
+    expect((recoveredA1?.probability || 0)).toBeGreaterThan(0);
+
+    // Confirm A1 can be dispatched again after recovery.
+    const selections = new Set<number>();
+    for (let i = 0; i < 4; i += 1) {
+      const selected = await router.selectChannel('gpt-4o-mini');
+      if (selected) selections.add(selected.channel.id);
+    }
+    expect(selections.has(channelA1.id)).toBe(true);
+    expect(selections.has(channelA2.id)).toBe(true);
+  });
+
+  it('stable_first does not连坐 other keys on the same site when one key fails', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const site = await createSite('stable-multi-key-site');
+    const account = await createAccount(site.id, 'stable-multi-key-user');
+    const tokenA1 = await createToken(account.id, 'stable-token-a1');
+    const tokenA2 = await createToken(account.id, 'stable-token-a2');
+
+    const channelA1 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenA1.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelA2 = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenA2.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const first = await router.selectChannel('gpt-4o-mini');
+    expect(first?.channel.id).toBe(channelA1.id);
+
+    for (let i = 0; i < 3; i += 1) {
+      await router.recordFailure(channelA1.id, {
+        status: 502,
+        errorText: 'Gateway timeout',
+        modelName: 'gpt-4o-mini',
+      });
+    }
+    invalidateTokenRouterCache();
+
+    const second = await router.selectChannel('gpt-4o-mini');
+    expect(second?.channel.id).toBe(channelA2.id);
   });
 });

@@ -202,5 +202,6 @@ cat <<EOF
     （同时删除 hub.db-wal / hub.db-shm）→ compose up -d
   3 发布收尾：显式 git push origin <branch> → merge --ff-only 进 main → git push origin main
   4 分支清理：按 AGENTS.md「发版与无痛上线」节「脚本跑完还要做的」第③条执行：只删本次 ff-only 合入的一支（其余 ref 不删）、顺序 worktree→本地→远程、只用 git branch -d / git worktree remove、禁 -D / --force / rm -rf
+  5 存量裁剪（每次发版必做，判据写死）：DB 快照 /var/lib/metapi/data.bak-*.db 按 mtime 倒序只留最新 7 个（本次发版新增必留），其余逐个 rm -f -- <文件> 删除，禁止对 /var/lib/metapi/data 做目录级删除；镜像只保留当前发版版本，删掉更旧的 metapi:<版本号> 与陈旧 tag，删前先核无人使用（docker ps -a --filter ancestor=<镜像> 为空），需要旧版作即时回滚位时先向用户确认后从对应提交重建；清理前先看发版窗口（deploy-logs/ 有进行中 deploy 或 .deploy.lock 被持有时让位），data-canary/ 暂存区不当作残留清理
 镜像级回滚：cp -f $COMPOSE_BAK $COMPOSE_FILE && cd $COMPOSE_DIR && docker compose up -d
 EOF

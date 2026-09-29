@@ -1,9 +1,8 @@
 import { openSync, closeSync, unlinkSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join } from 'node:path';
 
 const TOKEN_ROUTER_DUMP_PREFIX = 'metapi-token-router-';
-const CLEANUP_LOCK_PATH = join(tmpdir(), '.metapi-token-router-dump-retention.lock');
 
 export interface TokenRouterDumpRetentionOptions {
   rootDir?: string;
@@ -40,25 +39,26 @@ function getDirectoryStats(
   }
 }
 
-function acquireCleanupLock(): number | null {
+function acquireCleanupLock(lockPath: string): number | null {
   try {
-    return openSync(CLEANUP_LOCK_PATH, 'wx');
+    return openSync(lockPath, 'wx');
   } catch {
     return null;
   }
 }
 
-function releaseCleanupLock(fd: number | null): void {
+function releaseCleanupLock(fd: number | null, lockPath: string): void {
   if (fd == null) return;
   try { closeSync(fd); } catch {}
-  try { unlinkSync(CLEANUP_LOCK_PATH); } catch {}
+  try { unlinkSync(lockPath); } catch {}
 }
 
 export function retainTokenRouterDumps(
   options: TokenRouterDumpRetentionOptions = {},
   deps: TokenRouterDumpRetentionDeps = {},
 ): TokenRouterDumpRetentionResult {
-  const lockFd = acquireCleanupLock();
+  const lockPath = join(options.rootDir ?? tmpdir(), '.metapi-token-router-dump-retention.lock');
+  const lockFd = acquireCleanupLock(lockPath);
   if (lockFd === null) {
     return { deletedExpired: 0, deletedExcess: 0, remaining: 0 };
   }
@@ -114,6 +114,6 @@ export function retainTokenRouterDumps(
       remaining: dumpDirs.length - deletedExpired - deletedExcess,
     };
   } finally {
-    releaseCleanupLock(lockFd);
+    releaseCleanupLock(lockFd, lockPath);
   }
 }

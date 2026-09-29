@@ -6,6 +6,7 @@ const TOKEN_ROUTER_DUMP_PREFIX = 'metapi-token-router-';
 const CLEANUP_LOCK_PATH = join(tmpdir(), '.metapi-token-router-dump-retention.lock');
 
 export interface TokenRouterDumpRetentionOptions {
+  rootDir?: string;
   prefix?: string;
   ttlMinutes?: number;
   maxCount?: number;
@@ -67,9 +68,9 @@ export function retainTokenRouterDumps(
     const ttlMinutes = Math.max(0, options.ttlMinutes ?? 60);
     const maxCount = Math.max(0, options.maxCount ?? 10);
     const statImpl = deps.statSync ?? statSync;
-  const rmImpl = deps.rmSync ?? rmSync;
+    const rmImpl = deps.rmSync ?? rmSync;
 
-    const tempDir = tmpdir();
+    const tempDir = options.rootDir ?? tmpdir();
     let entries: string[] = [];
     try {
       entries = readdirSync(tempDir);

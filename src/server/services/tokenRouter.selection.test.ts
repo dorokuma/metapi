@@ -51,7 +51,9 @@ describe('TokenRouter selection scoring', () => {
     process.env.DATA_DIR = dataDir;
 
     const { retainTokenRouterDumps } = await import('./tokenRouterDumpRetentionService.js');
-    retainTokenRouterDumps({ prefix: 'metapi-token-router-selection-' });
+    // Scope cleanup to this test's own dataDir to avoid racing with other
+    // parallel test files that also touch tmpdir() with overlapping prefixes.
+    retainTokenRouterDumps({ prefix: 'metapi-token-router-selection-', rootDir: dataDir });
 
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');

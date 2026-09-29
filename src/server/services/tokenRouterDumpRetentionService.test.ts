@@ -7,13 +7,25 @@ import { retainTokenRouterDumps, TokenRouterDumpRetentionDeps } from './tokenRou
 const PREFIX = 'metapi-token-router-selection-';
 const LOCK_PATH = join(tmpdir(), '.metapi-token-router-dump-retention.lock');
 
+// Each test run gets its own private root directory so parallel test files
+// that also touch tmpdir() cannot race and delete our dump directories
+// before retainTokenRouterDumps processes them.
+let privateRoot: string;
+
+function ensurePrivateRoot(): string {
+  if (!privateRoot || !require('node:fs').existsSync(privateRoot)) {
+    privateRoot = mkdtempSync(join(tmpdir(), 'metapi-token-router-dump-retention-root-'));
+  }
+  return privateRoot;
+}
+
 describe('tokenRouterDumpRetentionService', () => {
   let createdDirs: string[] = [];
 
-  function countMatchingDirs(): number {
+  function countMatchingDirs(root: string): number {
     let count = 0;
     try {
-      const entries = require('node:fs').readdirSync(tmpdir());
+      const entries = require('node:fs').readdirSync(root);
       for (const name of entries) {
         if (name.startsWith(PREFIX) && name.length > PREFIX.length) {
           count += 1;
@@ -25,19 +37,21 @@ describe('tokenRouterDumpRetentionService', () => {
     return count;
   }
 
-  function createDumpDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), PREFIX));
+  function createDumpDir(root: string): string {
+    const dir = mkdtempSync(join(root, PREFIX));
     createdDirs.push(dir);
     return dir;
   }
 
   beforeEach(() => {
     createdDirs = [];
+    const root = ensurePrivateRoot();
+    // Clean up any leftover dump dirs in our private root from previous tests.
     try {
-      const entries = require('node:fs').readdirSync(tmpdir());
+      const entries = require('node:fs').readdirSync(root);
       for (const name of entries) {
         if (name.startsWith(PREFIX) && name.length > PREFIX.length) {
-          try { rmSync(join(tmpdir(), name), { recursive: true, force: true }); } catch { /* ignore */ }
+          try { rmSync(join(root, name), { recursive: true, force: true }); } catch { /* ignore */ }
         }
       }
     } catch { /* ignore */ }
@@ -50,43 +64,53 @@ describe('tokenRouterDumpRetentionService', () => {
     }
     createdDirs = [];
     try { rmSync(LOCK_PATH, { force: true }); } catch { /* ignore */ }
+    // Clean up the private root used for retainTokenRouterDumps calls.
+    if (privateRoot) {
+      try { rmSync(privateRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      privateRoot = '';
+    }
   });
 
   it('does not delete matching dirs when under maxCount and within TTL', () => {
-    const dir = createDumpDir();
-    const beforeCount = countMatchingDirs();
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
+    const beforeCount = countMatchingDirs(root);
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 60,
       maxCount: 10,
     });
 
-    const afterCount = countMatchingDirs();
+    const afterCount = countMatchingDirs(root);
     expect(afterCount).toBe(beforeCount);
     expect(result.deletedExpired).toBe(0);
     expect(result.deletedExcess).toBe(0);
   });
 
   it('deletes expired directories when TTL is 0', () => {
-    const dir = createDumpDir();
-    const beforeCount = countMatchingDirs();
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
+    const beforeCount = countMatchingDirs(root);
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 0,
       maxCount: 10,
     });
 
-    const afterCount = countMatchingDirs();
+    const afterCount = countMatchingDirs(root);
     expect(afterCount).toBeLessThan(beforeCount);
     expect(result.deletedExpired).toBeGreaterThanOrEqual(1);
   });
 
   it('deletes oldest directories when over maxCount (FIFO)', () => {
-    const oldest = createDumpDir();
-    const middle = createDumpDir();
-    const newest = createDumpDir();
+    const root = ensurePrivateRoot();
+    const oldest = createDumpDir(root);
+    const middle = createDumpDir(root);
+    const newest = createDumpDir(root);
 
     // Ensure distinct mtimes so FIFO order is deterministic.
     const now = Date.now();
@@ -97,15 +121,16 @@ describe('tokenRouterDumpRetentionService', () => {
       fs.utimesSync(newest, new Date(now), new Date(now));
     } catch { /* ignore on platforms where utimes is restricted */ }
 
-    const beforeCount = countMatchingDirs();
+    const beforeCount = countMatchingDirs(root);
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 1440,
       maxCount: 2,
     });
 
-    const afterCount = countMatchingDirs();
+    const afterCount = countMatchingDirs(root);
     expect(afterCount).toBeLessThan(beforeCount);
     expect(afterCount).toBeLessThanOrEqual(2);
     expect(result.deletedExcess).toBeGreaterThanOrEqual(1);
@@ -116,15 +141,17 @@ describe('tokenRouterDumpRetentionService', () => {
   });
 
   it('ignores directories that do not match the prefix', () => {
-    const otherDir = mkdtempSync(join(tmpdir(), 'metapi-other-'));
+    const root = ensurePrivateRoot();
+    const otherDir = mkdtempSync(join(root, 'metapi-other-'));
 
-    const beforeOtherCount = countMatchingDirs();
+    const beforeOtherCount = countMatchingDirs(root);
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 1440,
       maxCount: 10,
     });
-    const afterOtherCount = countMatchingDirs();
+    const afterOtherCount = countMatchingDirs(root);
 
     try { rmSync(otherDir, { recursive: true, force: true }); } catch { /* ignore */ }
 
@@ -134,7 +161,8 @@ describe('tokenRouterDumpRetentionService', () => {
   });
 
   it('is fault-tolerant when stat fails on a matching entry', () => {
-    const dir = createDumpDir();
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
     const targetName = basename(dir);
     const originalStatSync = statSync;
 
@@ -150,6 +178,7 @@ describe('tokenRouterDumpRetentionService', () => {
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 1440,
       maxCount: 10,
     }, deps);
@@ -159,8 +188,9 @@ describe('tokenRouterDumpRetentionService', () => {
   });
 
   it('skips cleanup when another process holds the lock', () => {
-    const dir = createDumpDir();
-    const beforeCount = countMatchingDirs();
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
+    const beforeCount = countMatchingDirs(root);
 
     // Pre-create the lock file to simulate another holder.
     try {
@@ -172,21 +202,23 @@ describe('tokenRouterDumpRetentionService', () => {
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 0,
       maxCount: 10,
     });
 
     try { rmSync(LOCK_PATH, { force: true }); } catch { /* ignore */ }
 
-    const afterCount = countMatchingDirs();
+    const afterCount = countMatchingDirs(root);
     expect(afterCount).toBe(beforeCount);
     expect(result.deletedExpired).toBe(0);
     expect(result.deletedExcess).toBe(0);
   });
 
   it('warns on rmSync failure without breaking the main flow', () => {
-    const dir = createDumpDir();
-    const beforeCount = countMatchingDirs();
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
+    const beforeCount = countMatchingDirs(root);
 
     const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -202,6 +234,7 @@ describe('tokenRouterDumpRetentionService', () => {
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
+      rootDir: root,
       ttlMinutes: 0,
       maxCount: 10,
     }, deps);

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { retainTokenRouterDumps, TokenRouterDumpRetentionDeps } from './tokenRouterDumpRetentionService.js';
@@ -95,6 +95,12 @@ describe('tokenRouterDumpRetentionService', () => {
   it('deletes expired directories when TTL is 0', () => {
     const root = ensurePrivateRoot();
     const dir = createDumpDir(root);
+    // Age the directory so the mtime is unambiguously in the past,
+    // eliminating the clock-tick race where mkdtemp + retain can fall
+    // within the same millisecond and mtimeMs > nowMs on fast CI.
+    try {
+      utimesSync(dir, new Date(Date.now() - 2000), new Date(Date.now() - 2000));
+    } catch { /* ignore on platforms where utimes is restricted */ }
     const beforeCount = countMatchingDirs(root);
 
     const result = retainTokenRouterDumps({
@@ -222,6 +228,12 @@ describe('tokenRouterDumpRetentionService', () => {
   it('falls back to tmpdir lock when rootDir is not provided', () => {
     const uniquePrefix = `metapi-token-router-default-fallback-${process.pid}-${Date.now()}-`;
     const dir = mkdtempSync(join(tmpdir(), uniquePrefix));
+    // Age the directory so the mtime is unambiguously in the past,
+    // eliminating the clock-tick race where mkdtemp + retain can fall
+    // within the same millisecond and mtimeMs > nowMs on fast CI.
+    try {
+      utimesSync(dir, new Date(Date.now() - 2000), new Date(Date.now() - 2000));
+    } catch { /* ignore on platforms where utimes is restricted */ }
     try {
       const result = retainTokenRouterDumps({
         prefix: uniquePrefix,
@@ -239,6 +251,12 @@ describe('tokenRouterDumpRetentionService', () => {
   it('warns on rmSync failure without breaking the main flow', () => {
     const root = ensurePrivateRoot();
     const dir = createDumpDir(root);
+    // Age the directory so the mtime is unambiguously in the past,
+    // eliminating the clock-tick race where mkdtemp + retain can fall
+    // within the same millisecond and mtimeMs > nowMs on fast CI.
+    try {
+      utimesSync(dir, new Date(Date.now() - 2000), new Date(Date.now() - 2000));
+    } catch { /* ignore on platforms where utimes is restricted */ }
     const beforeCount = countMatchingDirs(root);
 
     const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});

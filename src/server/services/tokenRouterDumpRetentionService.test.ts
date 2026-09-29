@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
+import { spawn } from 'node:child_process';
 import { retainTokenRouterDumps, TokenRouterDumpRetentionDeps } from './tokenRouterDumpRetentionService.js';
 
 const PREFIX = 'metapi-token-router-selection-';
@@ -44,6 +45,10 @@ describe('tokenRouterDumpRetentionService', () => {
     const dir = mkdtempSync(join(root, PREFIX));
     createdDirs.push(dir);
     return dir;
+  }
+
+  function baseDeps(): TokenRouterDumpRetentionDeps {
+    return { lockPath: getLockPath() };
   }
 
   beforeEach(() => {
@@ -196,19 +201,44 @@ describe('tokenRouterDumpRetentionService', () => {
     expect(result.deletedExcess).toBe(0);
   });
 
-  it('skips cleanup when another process holds the lock', () => {
+  it('warns and skips cleanup when another process holds an exclusive lock', async () => {
     const root = ensurePrivateRoot();
     const dir = createDumpDir(root);
     const beforeCount = countMatchingDirs(root);
+    const lockPath = getLockPath();
 
-    // Pre-create the lock file to simulate another holder.
-    const lockPath = join(root, '.metapi-token-router-dump-retention.lock');
-    try {
-      rmSync(lockPath, { force: true });
-    } catch { /* ignore */ }
-    try {
-      require('node:fs').writeFileSync(lockPath, '');
-    } catch { /* ignore */ }
+    // Spawn a detached child that holds an exclusive flock on lockPath.
+    // The child echoes LOCKED once it has acquired the lock, so we can
+    // deterministically wait for that marker instead of polling pkill.
+    const child = spawn('/usr/bin/flock', ['-x', lockPath, '-c', 'echo LOCKED; sleep 1000'], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (!child.pid) {
+      throw new Error('spawn flock child failed');
+    }
+
+    // Wait for the child to signal that it holds the lock (up to ~5s).
+    let childReady = false;
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => resolve(), 5000);
+      child.stdout?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        if (text.includes('LOCKED')) {
+          childReady = true;
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+    if (!childReady) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+      throw new Error('flock child did not acquire lock within 5s');
+    }
+
+    const originalWarn = console.warn;
+    const warnSpy = vi.fn((...args: unknown[]) => originalWarn(...args));
+    (console as { warn: typeof warnSpy }).warn = warnSpy;
 
     const result = retainTokenRouterDumps({
       prefix: PREFIX,
@@ -217,12 +247,21 @@ describe('tokenRouterDumpRetentionService', () => {
       maxCount: 10,
     });
 
-    try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+    expect(warnSpy.mock.calls.length).toBeGreaterThan(0);
+    expect(warnSpy.mock.calls.some((args) =>
+      typeof args[0] === 'string' && args[0].includes('token-router-dump-retention'),
+    )).toBe(true);
+
+    (console as { warn: typeof originalWarn }).warn = originalWarn;
 
     const afterCount = countMatchingDirs(root);
     expect(afterCount).toBe(beforeCount);
     expect(result.deletedExpired).toBe(0);
     expect(result.deletedExcess).toBe(0);
+
+    // Cleanup: kill child and remove lock file
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+    try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
   });
 
   it('falls back to tmpdir lock when rootDir is not provided', () => {
@@ -287,5 +326,112 @@ describe('tokenRouterDumpRetentionService', () => {
     expect(result.deletedExpired).toBeGreaterThanOrEqual(0);
     expect(result.deletedExcess).toBeGreaterThanOrEqual(0);
     expect(warned).toBe(true);
+  });
+
+  it('writes pid and timestamp into the lock file during cleanup', () => {
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
+    const lockPath = getLockPath();
+
+    const fixedNow = 1234567890;
+    let lockFileContent = '';
+    const mockRmSync = vi.fn((...args: Parameters<typeof rmSync>) => {
+      const path = typeof args[0] === 'string' ? args[0] : String(args[0]);
+      if (path === lockPath) {
+        // Ignore attempts to remove the lock path during cleanup.
+        return;
+      }
+      // Capture lock file content during the first removal attempt.
+      try {
+        lockFileContent = require('node:fs').readFileSync(lockPath, 'utf8');
+      } catch { /* ignore */ }
+      return rmSync(...args);
+    });
+
+    const deps: TokenRouterDumpRetentionDeps = {
+      ...baseDeps(),
+      now: () => fixedNow,
+      rmSync: mockRmSync,
+    };
+
+    const result = retainTokenRouterDumps({
+      prefix: PREFIX,
+      rootDir: root,
+      ttlMinutes: 0,
+      maxCount: 10,
+    }, deps);
+
+    expect(result.deletedExpired).toBeGreaterThanOrEqual(1);
+    expect(lockFileContent).toBe(`${process.pid}\t${fixedNow}\n`);
+  });
+
+  it('recovers immediately after lock holder is SIGKILLd', async () => {
+    const root = ensurePrivateRoot();
+    const dir = createDumpDir(root);
+    const lockPath = getLockPath();
+
+    // Spawn a detached child that holds an exclusive flock on lockPath.
+    // The child echoes LOCKED once it has acquired the lock.
+    const child = spawn('/usr/bin/flock', ['-x', lockPath, '-c', 'echo LOCKED; sleep 1000'], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (!child.pid) {
+      throw new Error('spawn flock child failed');
+    }
+
+    // Wait for the child to signal that it holds the lock (up to ~5s).
+    let childReady = false;
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => resolve(), 5000);
+      child.stdout?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        if (text.includes('LOCKED')) {
+          childReady = true;
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+    if (!childReady) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+      throw new Error('flock child did not acquire lock within 5s');
+    }
+
+    // First call should skip (lock held)
+    const blockedResult = retainTokenRouterDumps({
+      prefix: PREFIX,
+      rootDir: root,
+      ttlMinutes: 0,
+      maxCount: 10,
+    });
+    expect(blockedResult.deletedExpired).toBe(0);
+
+    // SIGKILL the child — kernel closes fd, lock released immediately
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+
+    // Wait for child to die (async once on 'exit', with ~5s fallback)
+    const deathPromise = new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => resolve(), 5000);
+      child.once('exit', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    await deathPromise;
+
+    // Second call should succeed (lock released by kernel on child death)
+    const recoveredResult = retainTokenRouterDumps({
+      prefix: PREFIX,
+      rootDir: root,
+      ttlMinutes: 0,
+      maxCount: 10,
+    });
+
+    expect(recoveredResult.deletedExpired).toBeGreaterThanOrEqual(1);
+    expect(require('node:fs').existsSync(dir)).toBe(false);
+
+    // Cleanup
+    try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
   });
 });

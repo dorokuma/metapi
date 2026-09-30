@@ -19,6 +19,7 @@ import {
   type BackupExportType,
 } from '../../services/backupService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { collectErrorChain } from '../../services/errorChain.js';
 import {
   maskConnectionString,
   migrateCurrentDatabase,
@@ -220,20 +221,9 @@ function toPositiveNumberOrFallback(value: unknown, fallback: number) {
 }
 
 function extractNestedErrorMessages(error: unknown): string[] {
-  const messages: string[] = [];
-  const visited = new Set<unknown>();
-  let current: any = error;
-
-  while (current && !visited.has(current)) {
-    visited.add(current);
-    const message = typeof current?.message === 'string' ? current.message.trim() : '';
-    if (message) {
-      messages.push(message);
-    }
-    current = current?.cause;
-  }
-
-  return messages;
+  return collectErrorChain(error)
+    .map((entry) => (typeof entry.message === 'string' ? entry.message.trim() : ''))
+    .filter((message) => message.length > 0);
 }
 
 function describeSystemProxyTestFailure(error: unknown): string {

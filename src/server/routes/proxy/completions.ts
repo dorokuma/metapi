@@ -8,6 +8,7 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
 import { resolveFinalUsage } from '../../services/proxyUsageNormalize.js';
+import { formatErrorCause } from '../../services/errorChain.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
@@ -421,7 +422,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         return reply.send(data);
       } catch (err: any) {
         const status = err instanceof SiteApiEndpointRequestError ? (err.status || 0) : 0;
-        const errorText = err?.message || 'network failure';
+        const errorText = formatErrorCause(err) || 'network failure';
         const firstByteLatencyMs = err instanceof SiteApiEndpointRequestError ? err.firstByteLatencyMs : null;
         await recordTokenRouterEventBestEffort('record channel failure', () => tokenRouter.recordFailure(selected.channel.id, {
           status,

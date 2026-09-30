@@ -24,6 +24,7 @@ import {
 } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
+import { formatErrorCause } from '../../services/errorChain.js';
 import {
   createUpstreamProviderObservationCollector,
   observeUpstreamProviderObservationSseText,
@@ -1395,7 +1396,7 @@ export async function handleChatSurfaceRequest(
         selected,
         requestedModel,
         modelName,
-        errorMessage: err?.message || 'network failure',
+        errorMessage: formatErrorCause(err) || 'network failure',
         isStream,
         latencyMs: Date.now() - startTime,
         retryCount,
@@ -1403,7 +1404,7 @@ export async function handleChatSurfaceRequest(
       const terminalFailureOutcome = failureOutcome.action === 'retry'
         ? (canRetryChannelSelection(retryCount, forcedChannelId)
           ? null
-          : finalizeRetryAsExecutionFailure(err?.message || 'network failure'))
+          : finalizeRetryAsExecutionFailure(formatErrorCause(err) || 'network failure'))
         : failureOutcome;
       if (!terminalFailureOutcome) {
         retryCount += 1;
@@ -1859,7 +1860,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         selected,
         requestedModel,
         modelName,
-        errorMessage: error?.message || 'network failure',
+        errorMessage: formatErrorCause(error) || 'network failure',
         isStream: false,
         latencyMs: Date.now() - startTime,
         retryCount,
@@ -1867,7 +1868,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       const terminalFailureOutcome = failureOutcome.action === 'retry'
         ? (canRetryChannelSelection(retryCount, forcedChannelId)
           ? null
-          : finalizeRetryAsExecutionFailure(error?.message || 'network failure'))
+          : finalizeRetryAsExecutionFailure(formatErrorCause(error) || 'network failure'))
         : failureOutcome;
       if (!terminalFailureOutcome) {
         retryCount += 1;

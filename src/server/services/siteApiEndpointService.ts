@@ -4,6 +4,7 @@ import { db, schema } from '../db/index.js';
 import { RETRYABLE_TIMEOUT_PATTERNS } from './proxyRetryPolicy.js';
 import { proxyChannelCoordinator, type ProxySiteLease } from './proxyChannelCoordinator.js';
 import { copyObservedResponseMeta } from '../proxy-core/firstByteTimeout.js';
+import { formatErrorCause } from './errorChain.js';
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 404, 422]);
@@ -215,8 +216,8 @@ function isEndpointCoolingDown(endpoint: SiteApiEndpointRow, nowIso: string): bo
 function extractFailureMessage(input: SiteApiEndpointFailureInput): string {
   const direct = typeof input.message === 'string' ? input.message.trim() : '';
   if (direct) return direct;
-  const errorMessage = input.error instanceof Error ? input.error.message.trim() : '';
-  return errorMessage;
+  // 只取 .message 会丢掉 `.cause` 链里的 ECONNRESET / ETIMEDOUT 等，交由 util 摊平。
+  return formatErrorCause(input.error);
 }
 
 function formatFailureReason(status: number | null, message: string): string {
@@ -411,7 +412,8 @@ export async function runWithSiteApiEndpointPool<T>(
 
         const recordedFailure = await recordSiteApiEndpointFailure(target.endpointId, {
           status: error instanceof SiteApiEndpointRequestError ? error.status : undefined,
-          message: error instanceof Error ? error.message : String(error ?? ''),
+          // 带上 `.cause` 链，让 NETWORK_FAILURE_PATTERNS 能吃到 ECONNRESET 等。
+          message: formatErrorCause(error),
           error,
         });
         if (!recordedFailure.rotateToNextEndpoint) {

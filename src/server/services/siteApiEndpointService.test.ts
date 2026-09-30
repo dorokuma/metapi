@@ -403,4 +403,73 @@ describe('siteApiEndpointService', () => {
     const second = await secondPromise;
     expect(await (second as { upstream: Response }).upstream.text()).toBe('second');
   });
+
+  it('surfaces the cause chain of a network failure into the recorded reason', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'network-failure-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-network-failure.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    // undici 的网络失败形状：外层只有 `fetch failed`，真实 errno 藏在 `.cause` 里。
+    const networkFailure = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connection reset by peer'), { code: 'ECONNRESET' }),
+    });
+
+    await expect((await import('./siteApiEndpointService.js')).runWithSiteApiEndpointPool(
+      site,
+      async () => {
+        throw networkFailure;
+      },
+    )).rejects.toBe(networkFailure);
+
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+    expect(stored?.lastFailureReason).toBe('fetch failed (cause: ECONNRESET connection reset by peer)');
+    expect(stored?.cooldownUntil).not.toBeNull();
+  });
+
+  it('lets a `.cause`-only errno flip the failure classification', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cause-classification-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-cause-classification.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    // 外层 message（`socket closed`）不命中任何 NETWORK_FAILURE_PATTERN，
+    // 只有 `.cause` 里的 ECONNRESET 能把它推成网络失败分类。
+    const networkFailure = new TypeError('socket closed', {
+      cause: Object.assign(new Error('connection reset by peer'), { code: 'ECONNRESET' }),
+    });
+
+    await expect((await import('./siteApiEndpointService.js')).runWithSiteApiEndpointPool(
+      site,
+      async () => {
+        throw networkFailure;
+      },
+    )).rejects.toBe(networkFailure);
+
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+    expect(stored?.lastFailureReason).toBe('socket closed (cause: ECONNRESET connection reset by peer)');
+    expect(stored?.cooldownUntil).not.toBeNull();
+  });
 });

@@ -19,6 +19,7 @@ import { getSiteInitializationPreset } from '../../../shared/siteInitializationP
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
 import { probeSiteModels } from '../../services/modelService.js';
+import { collectErrorChain } from '../../services/errorChain.js';
 
 function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
   try { raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
@@ -117,12 +118,6 @@ function normalizeOptionalExternalCheckinUrl(input: unknown): {
   }
   return { valid: true, present: true, url: parsed.toString().replace(/\/+$/, '') };
 }
-
-type ErrorLike = {
-  message?: string;
-  code?: string | number;
-  cause?: unknown;
-};
 
 function normalizeCanonicalSiteUrl(value: string): string {
   return analyzePrimarySiteUrl(value).persistedUrl;
@@ -296,20 +291,8 @@ async function loadSiteWithApiEndpoints(siteId: number) {
   return hydrated || null;
 }
 
-function getErrorChain(error: unknown): ErrorLike[] {
-  const chain: ErrorLike[] = [];
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    chain.push(current as ErrorLike);
-    current = (current as ErrorLike).cause;
-  }
-  return chain;
-}
-
 function isSitesPlatformUrlConflict(error: unknown): boolean {
-  return getErrorChain(error).some((entry) => {
+  return collectErrorChain(error).some((entry) => {
     const message = String(entry.message || '');
     const lowered = message.toLowerCase();
     const code = String(entry.code || '');

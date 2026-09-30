@@ -22,6 +22,7 @@ import {
   parseDownstreamApiKeyBatchPayload,
   parseDownstreamApiKeyPayload,
 } from '../../contracts/downstreamApiKeyRoutePayloads.js';
+import { collectErrorChain } from '../../services/errorChain.js';
 
 function parseRouteId(raw: string): number | null {
   const id = Number.parseInt(raw, 10);
@@ -33,26 +34,8 @@ function validateKeyShape(key: string): boolean {
   return key.startsWith('sk-') && key.length >= 6;
 }
 
-type ErrorLike = {
-  message?: string;
-  code?: string | number;
-  cause?: unknown;
-};
-
-function getErrorChain(error: unknown): ErrorLike[] {
-  const chain: ErrorLike[] = [];
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    chain.push(current as ErrorLike);
-    current = (current as ErrorLike).cause;
-  }
-  return chain;
-}
-
 function looksLikeUniqueViolation(error: unknown): boolean {
-  const chain = getErrorChain(error);
+  const chain = collectErrorChain(error);
   if (runtimeDbDialect === 'postgres') {
     return chain.some((entry) => {
       const message = entry.message || '';

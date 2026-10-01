@@ -74,6 +74,7 @@ vi.mock('../../db/index.js', () => ({
           orderBy: () => ({
             all: async () => siteApiEndpointRows,
           }),
+          get: async () => siteApiEndpointRows[0],
         }),
       }),
     }),

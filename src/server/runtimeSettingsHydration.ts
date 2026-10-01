@@ -8,6 +8,7 @@ import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPi
 import { normalizeUpstreamPinAdapterMap } from './services/upstreamProviderPin/adapterMap.js';
 import { normalizeUpstreamParamCompatRules } from './services/upstreamParamCompat/rules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
+import { normalizeSiteApiEndpointCooldownSec } from './shared/siteApiEndpointCooldownSec.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
   const raw = settingsMap.get(key);
@@ -233,6 +234,12 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const normalizedFailureCooldownMaxSec = normalizeTokenRouterFailureCooldownMaxSec(tokenRouterFailureCooldownMaxSec);
   if (normalizedFailureCooldownMaxSec != null) {
     config.tokenRouterFailureCooldownMaxSec = normalizedFailureCooldownMaxSec;
+  }
+
+  const siteApiEndpointCooldownSec = parseSettingFromMap<number>(settingsMap, 'site_api_endpoint_cooldown_sec');
+  const normalizedSiteApiEndpointCooldownSec = normalizeSiteApiEndpointCooldownSec(siteApiEndpointCooldownSec);
+  if (normalizedSiteApiEndpointCooldownSec != null) {
+    config.siteApiEndpointCooldownSec = normalizedSiteApiEndpointCooldownSec;
   }
 
   const webhookUrl = parseSettingFromMap<string>(settingsMap, 'webhook_url');

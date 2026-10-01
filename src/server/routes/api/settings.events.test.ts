@@ -66,6 +66,7 @@ describe('settings and auth events', () => {
     (config as any).proxyDebugMaxBodyBytes = 262144;
     config.routingFallbackUnitCost = 1;
     (config as any).proxyFirstByteTimeoutSec = 0;
+    (config as any).siteApiEndpointCooldownSec = 60;
     (config as any).tokenRouterFailureCooldownMaxSec = 30 * 24 * 60 * 60;
     (config as any).disableCrossProtocolFallback = false;
     (config as any).payloadRules = {
@@ -611,6 +612,51 @@ describe('settings and auth events', () => {
 
     const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_failure_cooldown_max_sec')).get();
     expect(saved?.value).toBe(JSON.stringify(thirtyDaysSec));
+  });
+
+  it('persists, clamps and returns the site api endpoint cooldown from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        siteApiEndpointCooldownSec: 120,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { siteApiEndpointCooldownSec?: number };
+    expect(updated.siteApiEndpointCooldownSec).toBe(120);
+    expect((config as any).siteApiEndpointCooldownSec).toBe(120);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'site_api_endpoint_cooldown_sec')).get();
+    expect(saved?.value).toBe(JSON.stringify(120));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { siteApiEndpointCooldownSec?: number };
+    expect(runtime.siteApiEndpointCooldownSec).toBe(120);
+
+    const clampedResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        siteApiEndpointCooldownSec: 99 * 60 * 60,
+      },
+    });
+    expect(clampedResponse.statusCode).toBe(200);
+    expect((clampedResponse.json() as { siteApiEndpointCooldownSec?: number }).siteApiEndpointCooldownSec).toBe(60 * 60);
+
+    const rejectedResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        siteApiEndpointCooldownSec: 0,
+      },
+    });
+    expect(rejectedResponse.statusCode).toBe(400);
   });
 
   it('persists and returns first-byte timeout from runtime settings', async () => {

@@ -5,6 +5,10 @@ import { normalizeUpstreamProviderDetectSiteIds } from './services/upstreamProvi
 import { normalizeUpstreamProviderPinRules } from './services/upstreamProviderPin/rules.js';
 import { normalizeUpstreamPinAdapterMap } from './services/upstreamProviderPin/adapterMap.js';
 import { normalizeUpstreamParamCompatRules } from './services/upstreamParamCompat/rules.js';
+import {
+  normalizeSiteApiEndpointCooldownSec,
+  SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT,
+} from './shared/siteApiEndpointCooldownSec.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -127,6 +131,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     tokenRouterFailureCooldownMaxSec: normalizeTokenRouterFailureCooldownMaxSec(
       parseNumber(env.TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC, TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING),
     ) ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
+    // 端点冷却时长（秒）：非法 env 回落默认 60 秒，合法值统一夹到 [1, ceiling]。
+    siteApiEndpointCooldownSec: normalizeSiteApiEndpointCooldownSec(env.SITE_API_ENDPOINT_COOLDOWN_SEC)
+      ?? SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT,
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),

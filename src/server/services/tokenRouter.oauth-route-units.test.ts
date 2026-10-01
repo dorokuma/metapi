@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
@@ -472,5 +473,207 @@ describe('TokenRouter oauth route units', () => {
     const failover = await router.selectNextChannel('gpt-5.4', [channel.id]);
 
     expect(failover).toBeNull();
+  });
+
+  it('keeps the existing member cooldown when a failure lands during member cooldown', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cooling-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-cooling-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-cooling-member-a', email: 'cooling-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Sticky Pool',
+      strategy: 'stick_until_unavailable',
+      enabled: true,
+    }).returning().get();
+    const seededCooldownUntil = new Date(Date.now() + 9_000).toISOString();
+    const member = await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+      failCount: 3,
+      cooldownUntil: seededCooldownUntil,
+    }).returning().get();
+    await db.insert(schema.modelAvailability).values([
+      { accountId: accountA.id, modelName: 'gpt-5.4', available: true },
+    ]).run();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, { status: 503, errorText: 'upstream unavailable' }, accountA.id);
+
+    const updatedMember = await db.select().from(schema.oauthRouteUnitMembers)
+      .where(eq(schema.oauthRouteUnitMembers.id, member.id))
+      .get();
+
+    // 成员冷却期内到账的失败只更新观测字段，不把当前冷却窗口往后推（fibonacci 递增留给下一次冷却起点）。
+    expect(updatedMember?.cooldownUntil).toBe(seededCooldownUntil);
+    expect(updatedMember?.failCount).toBe(4);
+    expect(updatedMember?.lastFailAt).toBeTruthy();
+  });
+
+  it('keeps an active round robin member cooldown below the consecutive failure threshold', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'rr-cooling-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-rr-cooling-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-rr-cooling-member-a', email: 'rr-cooling-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Round Robin Pool',
+      strategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+    const seededCooldownUntil = new Date(Date.now() + 9 * 60 * 1000).toISOString();
+    const member = await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+      failCount: 3,
+      consecutiveFailCount: 0,
+      cooldownUntil: seededCooldownUntil,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, { status: 503, errorText: 'upstream unavailable' }, accountA.id);
+
+    const updatedMember = await db.select().from(schema.oauthRouteUnitMembers)
+      .where(eq(schema.oauthRouteUnitMembers.id, member.id))
+      .get();
+
+    // round_robin 未跨阈值时也必须复用已有窗口：成员冷却期内到账的失败不得把 cooldown_until 写成 NULL。
+    expect(updatedMember?.cooldownUntil).toBe(seededCooldownUntil);
+    expect(updatedMember?.consecutiveFailCount).toBe(1);
+    expect(updatedMember?.cooldownLevel).toBe(0);
+  });
+
+  it('keeps an active round robin member cooldown when a failure crosses the consecutive failure threshold', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'rr-cross-threshold-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-rr-cross-threshold-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-rr-cross-threshold-member-a', email: 'rr-cross-threshold-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Round Robin Cross Threshold Pool',
+      strategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+    const seededCooldownUntil = new Date(Date.now() + 3 * 60 * 1000).toISOString();
+    const member = await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+      failCount: 3,
+      // 已在冷却中，且 consecutiveFailCount 已达阈值：本次失败会走跨阈值阶梯分支。
+      consecutiveFailCount: 3,
+      cooldownLevel: 0,
+      cooldownUntil: seededCooldownUntil,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, { status: 503, errorText: 'upstream unavailable' }, accountA.id);
+
+    const updatedMember = await db.select().from(schema.oauthRouteUnitMembers)
+      .where(eq(schema.oauthRouteUnitMembers.id, member.id))
+      .get();
+
+    // 跨阈值也必须复用已有窗口：阶梯只递增等级并清零连续计数，不得重算或清空 cooldown_until。
+    expect(updatedMember?.cooldownUntil).toBe(seededCooldownUntil);
+    expect(updatedMember?.consecutiveFailCount).toBe(0);
+    expect(updatedMember?.cooldownLevel).toBe(1);
   });
 });

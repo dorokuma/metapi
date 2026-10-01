@@ -40,6 +40,7 @@ import { extractClientIp, findInvalidIpAllowlistEntries, isIpAllowed } from '../
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
+import { normalizeSiteApiEndpointCooldownSec } from '../../shared/siteApiEndpointCooldownSec.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 import {
   startModelAvailabilityProbeScheduler,
@@ -141,6 +142,7 @@ interface RuntimeSettingsBody {
   routingFallbackUnitCost?: number;
   proxyFirstByteTimeoutSec?: number;
   tokenRouterFailureCooldownMaxSec?: number;
+  siteApiEndpointCooldownSec?: number;
   routingWeights?: Partial<RoutingWeights>;
   proxyErrorKeywords?: string[] | string;
   proxyEmptyContentFailEnabled?: boolean;
@@ -786,6 +788,12 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.tokenRouterFailureCooldownMaxSec = normalized;
       return;
     }
+    case 'site_api_endpoint_cooldown_sec': {
+      const normalized = normalizeSiteApiEndpointCooldownSec(value);
+      if (normalized == null) return;
+      config.siteApiEndpointCooldownSec = normalized;
+      return;
+    }
     case 'post_refresh_probe_enabled':
     case 'post_refresh_probe_model':
     case 'post_refresh_probe_scope':
@@ -841,6 +849,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
+    siteApiEndpointCooldownSec: config.siteApiEndpointCooldownSec,
     routingWeights: config.routingWeights,
     webhookUrl: config.webhookUrl,
     barkUrl: config.barkUrl,
@@ -2039,6 +2048,18 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.tokenRouterFailureCooldownMaxSec = normalized;
       upsertSetting('token_router_failure_cooldown_max_sec', normalized);
+    }
+
+    if (body.siteApiEndpointCooldownSec !== undefined) {
+      const normalized = normalizeSiteApiEndpointCooldownSec(body.siteApiEndpointCooldownSec);
+      if (normalized == null) {
+        return reply.code(400).send({ success: false, message: '端点冷却时长必须是大于 0 的数字（秒）' });
+      }
+      if (normalized !== config.siteApiEndpointCooldownSec) {
+        changedLabels.push(`端点冷却时长（${config.siteApiEndpointCooldownSec}s -> ${normalized}s）`);
+      }
+      config.siteApiEndpointCooldownSec = normalized;
+      upsertSetting('site_api_endpoint_cooldown_sec', normalized);
     }
 
     if (pendingPayloadRules !== undefined) {

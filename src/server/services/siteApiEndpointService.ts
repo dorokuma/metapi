@@ -1,10 +1,15 @@
 import { asc, eq } from 'drizzle-orm';
 import { Headers, Response } from 'undici';
+import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { RETRYABLE_TIMEOUT_PATTERNS } from './proxyRetryPolicy.js';
 import { proxyChannelCoordinator, type ProxySiteLease } from './proxyChannelCoordinator.js';
 import { copyObservedResponseMeta } from '../proxy-core/firstByteTimeout.js';
 import { formatErrorCause } from './errorChain.js';
+import {
+  normalizeSiteApiEndpointCooldownSec,
+  SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT,
+} from '../shared/siteApiEndpointCooldownSec.js';
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 404, 422]);
@@ -20,7 +25,11 @@ const NETWORK_FAILURE_PATTERNS = [
   ...RETRYABLE_TIMEOUT_PATTERNS,
 ];
 
-export const SITE_API_ENDPOINT_COOLDOWN_MS = 5 * 60 * 1000;
+/** 端点冷却时长（毫秒）：以 settings 的 `site_api_endpoint_cooldown_sec` 为准，非法值回落默认 60 秒。 */
+function resolveSiteApiEndpointCooldownMs(): number {
+  const normalized = normalizeSiteApiEndpointCooldownSec(config.siteApiEndpointCooldownSec);
+  return (normalized ?? SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT) * 1000;
+}
 
 type SiteRow = typeof schema.sites.$inferSelect;
 type SiteApiEndpointRow = typeof schema.siteApiEndpoints.$inferSelect;
@@ -41,8 +50,17 @@ export interface SiteApiEndpointFailureInput {
 }
 
 export interface SiteApiEndpointFailureDisposition {
+  /** 是否值得在其它端点上重试（429/5xx/网络失败等瞬时失败）。 */
   retryable: boolean;
+  /** 是否可以从当前端点换到下一个端点重试。 */
   rotateToNextEndpoint: boolean;
+  /**
+   * 是否允许把这次失败记为该端点的冷却起因。
+   * 任何 4xx 都不写端点冷却（含边缘返回的 429、408）：站点只有 1 个端点时，
+   * 写冷却等于把唯一出口拉黑，全站 503 且无法自愈。
+   * 其中 408/429 仍可重试并可轮换；400/401/403/404/422 等认证/校验类 4xx 直接失败、不轮换。
+   */
+  triggersEndpointCooldown: boolean;
   failureReason: string;
 }
 
@@ -209,8 +227,16 @@ function compareNullableTimeAsc(left?: string | null, right?: string | null): nu
   return left.localeCompare(right);
 }
 
+function isCooldownActive(cooldownUntil: string | null | undefined, nowIso: string): boolean {
+  return !!cooldownUntil && cooldownUntil > nowIso;
+}
+
 function isEndpointCoolingDown(endpoint: SiteApiEndpointRow, nowIso: string): boolean {
-  return !!endpoint.cooldownUntil && endpoint.cooldownUntil > nowIso;
+  return isCooldownActive(endpoint.cooldownUntil, nowIso);
+}
+
+function isClientErrorStatus(status: number): boolean {
+  return status >= 400 && status < 500;
 }
 
 function extractFailureMessage(input: SiteApiEndpointFailureInput): string {
@@ -249,18 +275,39 @@ export function classifySiteApiEndpointFailure(
 
   if (status !== null) {
     if (RETRYABLE_STATUS_CODES.has(status)) {
-      return { retryable: true, rotateToNextEndpoint: true, failureReason };
+      return {
+        retryable: true,
+        rotateToNextEndpoint: true,
+        triggersEndpointCooldown: !isClientErrorStatus(status),
+        failureReason,
+      };
     }
     if (NON_RETRYABLE_STATUS_CODES.has(status)) {
-      return { retryable: false, rotateToNextEndpoint: false, failureReason };
+      return {
+        retryable: false,
+        rotateToNextEndpoint: false,
+        triggersEndpointCooldown: false,
+        failureReason,
+      };
     }
   }
 
   if (NETWORK_FAILURE_PATTERNS.some((pattern) => pattern.test(message))) {
-    return { retryable: true, rotateToNextEndpoint: true, failureReason };
+    return {
+      retryable: true,
+      rotateToNextEndpoint: true,
+      // 文案匹配分支不看 status，故这里显式兜底：任何 4xx（表外的 402/405/409 等）一律不写端点冷却。
+      triggersEndpointCooldown: !(status !== null && isClientErrorStatus(status)),
+      failureReason,
+    };
   }
 
-  return { retryable: false, rotateToNextEndpoint: false, failureReason };
+  return {
+    retryable: false,
+    rotateToNextEndpoint: false,
+    triggersEndpointCooldown: false,
+    failureReason,
+  };
 }
 
 export async function selectSiteApiEndpointTarget(
@@ -331,9 +378,19 @@ export async function recordSiteApiEndpointFailure(
 ): Promise<RecordedSiteApiEndpointFailure> {
   const nowIso = toIsoTimestamp(now);
   const disposition = classifySiteApiEndpointFailure(input);
-  const cooldownUntil = disposition.retryable
-    ? new Date(Date.parse(nowIso) + SITE_API_ENDPOINT_COOLDOWN_MS).toISOString()
-    : null;
+
+  // 已有冷却必须原样保留：非重试失败（4xx 校验/鉴权等）不得把端点从冷却里放出来，
+  // 冷却期内的失败也不得把窗口往后推（否则冷却期内并发在途的失败会把窗口无限往后推）。
+  // 取舍：triggersEndpointCooldown 为 false 时保留已有冷却（含已过期时间戳）⇒ 4xx 不再提前解除已有端点冷却；
+  // 代价是 4xx 期间最多多等一个窗口、期间零流量（详见 .agents/notes/20260930-fetch-failed-fingerprints.md 遗留 K）。
+  const current = await db.select().from(schema.siteApiEndpoints)
+    .where(eq(schema.siteApiEndpoints.id, endpointId))
+    .get();
+  const existingCooldownUntil = current?.cooldownUntil ?? null;
+  const cooldownUntil = disposition.triggersEndpointCooldown
+    && !isCooldownActive(existingCooldownUntil, nowIso)
+    ? new Date(Date.parse(nowIso) + resolveSiteApiEndpointCooldownMs()).toISOString()
+    : existingCooldownUntil;
 
   await db.update(schema.siteApiEndpoints).set({
     cooldownUntil,

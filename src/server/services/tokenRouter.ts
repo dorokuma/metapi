@@ -2731,7 +2731,11 @@ export class TokenRouter {
         const routeUnitStrategy = memberRow.unit.strategy === 'stick_until_unavailable'
           ? 'stick_until_unavailable'
           : 'round_robin';
-        let cooldownUntil: string | null = null;
+        // 与通道级同口径：成员已在冷却中时，冷却期内到账的失败不得把窗口往后推，
+        // 只更新 failCount / lastFailAt 等观测字段，原样复用已有 cooldownUntil。配额型分支不受影响。
+        const memberCoolingDown = !!memberRow.member.cooldownUntil && memberRow.member.cooldownUntil > nowIso;
+        // 统一初值：round_robin 未跨阈值时也复用已有窗口，避免把冷却中的成员提前放出来。
+        let cooldownUntil: string | null = memberCoolingDown ? memberRow.member.cooldownUntil : null;
         let consecutiveFailCount = Math.max(0, memberRow.member.consecutiveFailCount ?? 0) + 1;
         let cooldownLevel = Math.max(0, memberRow.member.cooldownLevel ?? 0);
 
@@ -2743,13 +2747,17 @@ export class TokenRouter {
           if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
             cooldownLevel = Math.min(cooldownLevel + 1, ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1);
             const cooldownSec = resolveRoundRobinCooldownSec(cooldownLevel);
-            cooldownUntil = cooldownSec > 0
-              ? new Date(nowMs + clampFailureCooldownMs(cooldownSec * 1000)).toISOString()
-              : null;
+            cooldownUntil = memberCoolingDown
+              ? memberRow.member.cooldownUntil
+              : cooldownSec > 0
+                ? new Date(nowMs + clampFailureCooldownMs(cooldownSec * 1000)).toISOString()
+                : null;
             consecutiveFailCount = 0;
           }
         } else {
-          cooldownUntil = new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
+          cooldownUntil = memberCoolingDown
+            ? memberRow.member.cooldownUntil
+            : new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
           consecutiveFailCount = 0;
           cooldownLevel = 0;
         }
@@ -2774,9 +2782,13 @@ export class TokenRouter {
     const shortWindowLimitCooldownUntil = resolveShortWindowLimitCooldown(account, normalizedContext, nowMs);
     const failCount = shortWindowLimitCooldownUntil ? 0 : ((ch.failCount ?? 0) + 1);
     const routeStrategy = resolveRouteStrategy(route);
+    // 冷却期内到账的失败不得把窗口往后推：只更新 failCount / lastFailAt 等观测字段，
+    // 复用已有 cooldownUntil（否则冷却期内并发在途的失败会把通道冷却无限往后推）。配额型分支不受影响。
+    const channelCoolingDown = !!ch.cooldownUntil && ch.cooldownUntil > nowIso;
     // 每次失败只更新实际请求的通道，避免一个凭据的限流状态覆盖其他独立渠道。
     const affectedChannelIds = [channelId];
-    let cooldownUntil: string | null = null;
+    // 统一初值：round_robin 未跨阈值时也复用已有窗口，避免把冷却中的通道提前放出来。
+    let cooldownUntil: string | null = channelCoolingDown ? ch.cooldownUntil : null;
     let consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
     let cooldownLevel = Math.max(0, ch.cooldownLevel ?? 0);
 
@@ -2788,13 +2800,17 @@ export class TokenRouter {
       if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
         cooldownLevel = Math.min(cooldownLevel + 1, ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1);
         const cooldownSec = resolveRoundRobinCooldownSec(cooldownLevel);
-        cooldownUntil = cooldownSec > 0
-          ? new Date(nowMs + clampFailureCooldownMs(cooldownSec * 1000)).toISOString()
-          : null;
+        cooldownUntil = channelCoolingDown
+          ? ch.cooldownUntil
+          : cooldownSec > 0
+            ? new Date(nowMs + clampFailureCooldownMs(cooldownSec * 1000)).toISOString()
+            : null;
         consecutiveFailCount = 0;
       }
     } else {
-      cooldownUntil = new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
+      cooldownUntil = channelCoolingDown
+        ? ch.cooldownUntil
+        : new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
       consecutiveFailCount = 0;
       cooldownLevel = 0;
     }

@@ -6,15 +6,18 @@ import { asc, eq } from 'drizzle-orm';
 import { resetProxyChannelCoordinatorState } from './proxyChannelCoordinator.js';
 
 type DbModule = typeof import('../db/index.js');
+type ConfigModule = typeof import('../config.js');
 type SiteApiEndpointServiceModule = typeof import('./siteApiEndpointService.js');
 
 describe('siteApiEndpointService', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
+  let config: ConfigModule['config'];
   let selectSiteApiEndpointTarget: SiteApiEndpointServiceModule['selectSiteApiEndpointTarget'];
   let recordSiteApiEndpointFailure: SiteApiEndpointServiceModule['recordSiteApiEndpointFailure'];
   let recordSiteApiEndpointSuccess: SiteApiEndpointServiceModule['recordSiteApiEndpointSuccess'];
   let dataDir = '';
+  let originalEndpointCooldownSec = 60;
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-site-api-endpoint-service-'));
@@ -22,10 +25,13 @@ describe('siteApiEndpointService', () => {
 
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
+    const configModule = await import('../config.js');
     const serviceModule = await import('./siteApiEndpointService.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
+    config = configModule.config;
+    originalEndpointCooldownSec = config.siteApiEndpointCooldownSec;
     selectSiteApiEndpointTarget = serviceModule.selectSiteApiEndpointTarget;
     recordSiteApiEndpointFailure = serviceModule.recordSiteApiEndpointFailure;
     recordSiteApiEndpointSuccess = serviceModule.recordSiteApiEndpointSuccess;
@@ -33,11 +39,13 @@ describe('siteApiEndpointService', () => {
 
   beforeEach(async () => {
     resetProxyChannelCoordinatorState();
+    config.siteApiEndpointCooldownSec = originalEndpointCooldownSec;
     await db.delete(schema.siteApiEndpoints).run();
     await db.delete(schema.sites).run();
   });
 
   afterAll(() => {
+    config.siteApiEndpointCooldownSec = originalEndpointCooldownSec;
     delete process.env.DATA_DIR;
   });
 
@@ -207,7 +215,7 @@ describe('siteApiEndpointService', () => {
     expect(selected).toBeNull();
   });
 
-  it('records retryable failures with a 5-minute cooldown', async () => {
+  it('records retryable failures with the configured endpoint cooldown', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'retryable-site',
       url: 'https://panel.example.com',
@@ -230,7 +238,8 @@ describe('siteApiEndpointService', () => {
     expect(result).toMatchObject({
       retryable: true,
       rotateToNextEndpoint: true,
-      cooldownUntil: '2026-03-31T12:05:00.000Z',
+      triggersEndpointCooldown: true,
+      cooldownUntil: '2026-03-31T12:01:00.000Z',
       failureReason: 'HTTP 502: Bad gateway',
     });
 
@@ -238,7 +247,7 @@ describe('siteApiEndpointService', () => {
       .where(eq(schema.siteApiEndpoints.id, endpoint.id))
       .get();
     expect(stored).toMatchObject({
-      cooldownUntil: '2026-03-31T12:05:00.000Z',
+      cooldownUntil: '2026-03-31T12:01:00.000Z',
       lastFailedAt: '2026-03-31T12:00:00.000Z',
       lastFailureReason: 'HTTP 502: Bad gateway',
     });
@@ -266,12 +275,153 @@ describe('siteApiEndpointService', () => {
     expect(result).toMatchObject({
       retryable: true,
       rotateToNextEndpoint: true,
-      cooldownUntil: '2026-03-31T12:05:00.000Z',
+      cooldownUntil: '2026-03-31T12:01:00.000Z',
       failureReason: 'HTTP 502: upstream temporarily unavailable',
     });
   });
 
-  it('records auth and validation failures without triggering cooldown rotation', async () => {
+  it('does not cool down or extend an endpoint cooldown for client-error statuses such as 429', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'client-error-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-client-error.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    const result = await recordSiteApiEndpointFailure(endpoint.id, {
+      status: 429,
+      message: 'Too Many Requests',
+    }, '2026-03-31T12:00:00.000Z');
+
+    expect(result).toMatchObject({
+      retryable: true,
+      rotateToNextEndpoint: true,
+      triggersEndpointCooldown: false,
+      cooldownUntil: null,
+      failureReason: 'HTTP 429: Too Many Requests',
+    });
+
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+    expect(stored).toMatchObject({
+      cooldownUntil: null,
+      lastFailedAt: '2026-03-31T12:00:00.000Z',
+      lastFailureReason: 'HTTP 429: Too Many Requests',
+    });
+  });
+
+  it('does not trigger endpoint cooldown for a 4xx status outside both status tables', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'unlisted-client-error-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-unlisted-client-error.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    // 402 既不在 RETRYABLE_STATUS_CODES 也不在 NON_RETRYABLE_STATUS_CODES，
+    // 会落到按文案匹配的分支；该分支不看 status，因此必须显式兜底为 4xx 不写端点冷却。
+    const result = await recordSiteApiEndpointFailure(endpoint.id, {
+      status: 402,
+      message: 'network error while contacting upstream',
+    }, '2026-03-31T12:00:00.000Z');
+
+    expect(result).toMatchObject({
+      retryable: true,
+      rotateToNextEndpoint: true,
+      triggersEndpointCooldown: false,
+      cooldownUntil: null,
+      failureReason: 'HTTP 402: network error while contacting upstream',
+    });
+
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+    expect(stored).toMatchObject({
+      cooldownUntil: null,
+      lastFailedAt: '2026-03-31T12:00:00.000Z',
+      lastFailureReason: 'HTTP 402: network error while contacting upstream',
+    });
+  });
+
+  it('keeps the existing cooldown when a retryable failure lands during cooldown', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cooling-endpoint-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-cooling-endpoint.example.com',
+      enabled: true,
+      sortOrder: 0,
+      cooldownUntil: '2026-03-31T12:03:00.000Z',
+    }).returning().get();
+
+    const result = await recordSiteApiEndpointFailure(endpoint.id, {
+      status: 502,
+      message: 'Bad gateway',
+    }, '2026-03-31T12:00:00.000Z');
+
+    expect(result).toMatchObject({
+      retryable: true,
+      rotateToNextEndpoint: true,
+      triggersEndpointCooldown: true,
+      cooldownUntil: '2026-03-31T12:03:00.000Z',
+    });
+
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+    expect(stored).toMatchObject({
+      cooldownUntil: '2026-03-31T12:03:00.000Z',
+      lastFailedAt: '2026-03-31T12:00:00.000Z',
+      lastFailureReason: 'HTTP 502: Bad gateway',
+    });
+  });
+
+  it('honors the configured endpoint cooldown seconds', async () => {
+    config.siteApiEndpointCooldownSec = 120;
+
+    const site = await db.insert(schema.sites).values({
+      name: 'configured-cooldown-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-configured-cooldown.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    const result = await recordSiteApiEndpointFailure(endpoint.id, {
+      status: 502,
+      message: 'Bad gateway',
+    }, '2026-03-31T12:00:00.000Z');
+
+    expect(result.cooldownUntil).toBe('2026-03-31T12:02:00.000Z');
+  });
+
+  it('records auth and validation failures without triggering cooldown rotation or clearing an existing cooldown', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'non-retryable-site',
       url: 'https://panel.example.com',
@@ -284,7 +434,7 @@ describe('siteApiEndpointService', () => {
       url: 'https://api-auth.example.com',
       enabled: true,
       sortOrder: 0,
-      cooldownUntil: '2026-03-31T11:00:00.000Z',
+      cooldownUntil: '2026-03-31T12:05:00.000Z',
     }).returning().get();
 
     const result = await recordSiteApiEndpointFailure(endpoint.id, {
@@ -295,7 +445,8 @@ describe('siteApiEndpointService', () => {
     expect(result).toMatchObject({
       retryable: false,
       rotateToNextEndpoint: false,
-      cooldownUntil: null,
+      triggersEndpointCooldown: false,
+      cooldownUntil: '2026-03-31T12:05:00.000Z',
       failureReason: 'HTTP 401: Invalid token',
     });
 
@@ -303,7 +454,7 @@ describe('siteApiEndpointService', () => {
       .where(eq(schema.siteApiEndpoints.id, endpoint.id))
       .get();
     expect(stored).toMatchObject({
-      cooldownUntil: null,
+      cooldownUntil: '2026-03-31T12:05:00.000Z',
       lastFailedAt: '2026-03-31T12:00:00.000Z',
       lastFailureReason: 'HTTP 401: Invalid token',
     });

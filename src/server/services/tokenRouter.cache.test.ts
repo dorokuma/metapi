@@ -60,6 +60,17 @@ describe('TokenRouter runtime cache', () => {
     delete process.env.DATA_DIR;
   });
 
+  /**
+   * 模拟「冷却已到期、通道重新被选中后又失败」：冷却期内的失败不再续期，
+   * 因此 fibonacci 递增只能在跨过冷却窗口之后才体现。
+   */
+  async function expireChannelCooldown(channelId: number) {
+    await db.update(schema.routeChannels)
+      .set({ cooldownUntil: new Date(Date.now() - 1_000).toISOString() })
+      .where(eq(schema.routeChannels.id, channelId))
+      .run();
+  }
+
   it('keeps route snapshot inside TTL until explicit invalidation', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'cache-site',
@@ -163,6 +174,7 @@ describe('TokenRouter runtime cache', () => {
     expect(firstCooldownMs).toBeLessThanOrEqual(20_000);
 
     const secondStartedAt = Date.now();
+    await expireChannelCooldown(channel.id);
     await router.recordFailure(channel.id);
     const secondRecord = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.id, channel.id))
@@ -172,6 +184,7 @@ describe('TokenRouter runtime cache', () => {
     expect(secondCooldownMs).toBeLessThanOrEqual(20_000);
 
     const thirdStartedAt = Date.now();
+    await expireChannelCooldown(channel.id);
     await router.recordFailure(channel.id);
     const thirdRecord = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.id, channel.id))
@@ -225,7 +238,9 @@ describe('TokenRouter runtime cache', () => {
     const router = new TokenRouter();
 
     await router.recordFailure(channel.id);
+    await expireChannelCooldown(channel.id);
     await router.recordFailure(channel.id);
+    await expireChannelCooldown(channel.id);
 
     const startedAt = Date.now();
     await router.recordFailure(channel.id);
@@ -246,6 +261,171 @@ describe('TokenRouter runtime cache', () => {
       failCount: 3,
       lastFailAt: new Date(recentFailureCheckAt - 21_000).toISOString(),
     }, recentFailureCheckAt)).toBe(false);
+  });
+
+  it('keeps the existing channel cooldown when a failure lands during cooldown', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cooling-channel-site',
+      url: 'https://cooling-channel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cooling-channel-user',
+      accessToken: 'cooling-channel-access-token',
+      apiToken: 'cooling-channel-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'cooling-channel-token',
+      token: 'fixture-token-cooldown-active',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      routingStrategy: 'weighted',
+      enabled: true,
+    }).returning().get();
+
+    const seededCooldownUntil = new Date(Date.now() + 5_000).toISOString();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      cooldownUntil: seededCooldownUntil,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id);
+
+    const record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+
+    // 冷却期内的失败只更新观测字段，不把当前冷却窗口往后推（fibonacci 递增仍作用于下一次冷却起点）。
+    expect(record?.cooldownUntil).toBe(seededCooldownUntil);
+    expect(record?.failCount).toBe(1);
+    expect(record?.lastFailAt).toBeTruthy();
+  });
+
+  it('keeps an active round robin channel cooldown below the consecutive failure threshold', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'round-robin-cooling-channel-site',
+      url: 'https://round-robin-cooling-channel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'round-robin-cooling-channel-user',
+      accessToken: 'round-robin-cooling-channel-access-token',
+      apiToken: 'round-robin-cooling-channel-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'round-robin-cooling-channel-token',
+      token: 'fixture-token-round-robin-a',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const seededCooldownUntil = new Date(Date.now() + 9 * 60 * 1000).toISOString();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      cooldownUntil: seededCooldownUntil,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id);
+
+    const record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+
+    // round_robin 未跨阈值时也必须复用已有窗口：冷却期内到账的失败不得把 cooldown_until 写成 NULL。
+    expect(record?.cooldownUntil).toBe(seededCooldownUntil);
+    expect(record?.consecutiveFailCount).toBe(1);
+    expect(record?.cooldownLevel).toBe(0);
+  });
+
+  it('keeps an active round robin channel cooldown when a failure crosses the consecutive failure threshold', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'round-robin-cross-threshold-site',
+      url: 'https://round-robin-cross-threshold.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'round-robin-cross-threshold-user',
+      accessToken: 'round-robin-cross-threshold-access-token',
+      apiToken: 'round-robin-cross-threshold-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'round-robin-cross-threshold-token',
+      token: 'fixture-token-round-robin-cross',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const seededCooldownUntil = new Date(Date.now() + 3 * 60 * 1000).toISOString();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      // 已在冷却中，且 consecutiveFailCount 已达阈值：本次失败会走跨阈值阶梯分支。
+      consecutiveFailCount: 3,
+      cooldownLevel: 0,
+      cooldownUntil: seededCooldownUntil,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id);
+
+    const record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+
+    // 跨阈值也必须复用已有窗口：阶梯只递增等级并清零连续计数，不得重算或清空 cooldown_until。
+    expect(record?.cooldownUntil).toBe(seededCooldownUntil);
+    expect(record?.consecutiveFailCount).toBe(0);
+    expect(record?.cooldownLevel).toBe(1);
   });
 
   it('uses codex oauth reset hints for usage-limit cooldowns', async () => {

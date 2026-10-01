@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.4.13] - 2026-10-01
+
 ### 修复
 
 - 重试耗尽不再一律回 503 `No available channels for this model`，改为回传最后一轮失败的真实原因（真实状态码 + 上游/本地报错原文，message 截断至 1000 字符并附 `...(truncated)`，按码点截断；截断应用于 **7 处**末轮 message 出口——两条 surface 各自的 finalize 两档（`chatSurface.ts:278`/`:295`，改后 `:279`/`:296`；`openAiResponsesSurface.ts:229`/`:246`，改后 `:230`/`:247`）与共享工具包三个终态 respond 出口（`handleUpstreamFailure`/`handleDetectedFailure`/`handleExecutionError`，`sharedSurface.ts:821`/`:878`/`:927`，改后 `:878`/`:935`/`:984`）；**这一枚举不等于「全部客户端可见末轮出口」**：`chat` 面 4 处流式失败 502（`chatSurface.ts:947`/`:1007`/`:1112`/`:1190`；**已由同批补上封顶，见下条**）与 `geminiSurface.ts:1434-1437`/`:807` 当时仍原样透传、未封顶（详见笔记第 5 节与「遗留与跟进」））：覆盖 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`。错误 `type` 按「有无真实上游 HTTP 响应」分流——有 ⇒ `upstream_error` + 真实状态码（上游 401/403 原样回传），无 ⇒ `server_error` + 合成 502/503；首轮即无可用通道仍保持原 503 文案。

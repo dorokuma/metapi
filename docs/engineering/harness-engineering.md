@@ -110,6 +110,13 @@ checks for:
   baseline
 - new top-level page-to-page imports in the admin UI beyond the current debt
   baseline
+- inline copies of the reserved retry-exhausted `events` title outside
+  `src/server/shared/eventTitles.ts` (import `RETRY_EXHAUSTED_EVENT_TITLE`
+  instead). Scope and exemptions: only `src/` non-test source with a
+  `.ts`/`.tsx`/`.js`/`.jsx` extension is scanned; the definition file itself,
+  test files and comments are exempt, and comment recognition is a per-line
+  heuristic (whole-line comments, same-line `/* */`, trailing `//`), so a
+  block-comment continuation line without a `*` prefix may still be flagged.
 
 These checks live in `scripts/dev/repo-drift-check.ts` and are wired into CI.
 

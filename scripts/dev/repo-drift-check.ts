@@ -101,6 +101,52 @@ function isTopLevelPageFile(file: string): boolean {
     && isNonTestSource(file);
 }
 
+// Reserved "retry exhausted" events title (the ops marker). It is reconstructed
+// from code points so the literal never appears in this file. That is *not*
+// self-protection: this rule lives in `scripts/` while its fileFilter requires a
+// `src/` prefix, so the check can never scan its own source anyway. The only
+// real gain is keeping `rg <title> scripts/dev/` output free of noise. The
+// single legal source is the definition file below.
+const RESERVED_RETRY_EXHAUSTED_TITLE = String.fromCharCode(0x4ee3, 0x7406, 0x91cd, 0x8bd5, 0x8017, 0x5c3d);
+
+const RESERVED_RETRY_TITLE_DEFINITION_FILE = 'src/server/shared/eventTitles.ts';
+
+// Documentation quotes the reserved title in comments (SQL discriminators, JSDoc),
+// so a comment-only line is not treated as an inline literal.
+function isCommentOnlyLine(line: string): boolean {
+  const trimmed = line.trimStart();
+  return trimmed.startsWith('//')
+    || trimmed.startsWith('/*')
+    || trimmed.startsWith('*');
+}
+
+// Removes same-line /* ... */ spans (and the tail of a block comment that runs
+// past this line) so a literal inside an inline comment is not counted.
+function stripInlineBlockComments(line: string): string {
+  let result = '';
+  let index = 0;
+  while (index < line.length) {
+    if (line[index] === '/' && line[index + 1] === '*') {
+      const end = line.indexOf('*/', index + 2);
+      if (end === -1) return result;
+      index = end + 2;
+      continue;
+    }
+    result += line[index];
+    index += 1;
+  }
+  return result;
+}
+
+// Drops everything from the first `//` on, so a trailing line comment
+// (`const x = 1; // <title>`) is not counted as an inline literal. Heuristic:
+// this does not parse string literals, so a `//` inside a string (e.g. a URL
+// such as 'https://host/path') truncates the line early as well. Accepted.
+function stripTrailingLineComment(line: string): string {
+  const index = line.indexOf('//');
+  return index === -1 ? line : line.slice(0, index);
+}
+
 function createRules(): RuleSpec[] {
   return [
     {
@@ -145,6 +191,30 @@ function createRules(): RuleSpec[] {
         return `top-level page imports ${imported}`;
       },
       allowlistedFiles: TOP_LEVEL_PAGE_IMPORT_ALLOWLIST,
+    },
+    {
+      id: 'event-title-single-source',
+      description: 'The reserved retry-exhausted events title must be single-sourced from '
+        + 'src/server/shared/eventTitles.ts; inlining the literal is banned because a rename or '
+        + 'wording change would silently miss the other copies. Scope: .ts/.tsx/.js/.jsx files '
+        + 'under src/ only, excluding test files (isNonTestSource) and the definition file '
+        + 'itself, so fixtures and the definition stay legal. Comment recognition is a per-line '
+        + 'heuristic: whole-line comments, same-line /* */ and a trailing // are exempt, while a '
+        + 'block-comment continuation line without a * prefix may still be flagged (a documented '
+        + 'loud false positive). Known false negatives: titles built at runtime are not '
+        + 'detected (string concatenation, template interpolation, \\u escapes, '
+        + 'String.fromCharCode, or a literal following an unterminated /* inside a string); a '
+        + 'line whose `//` sits inside a string literal is truncated by the trailing-comment '
+        + 'strip, so a title later on that line is missed (e.g. `const u = \'https://x\'; '
+        + 'const t = \'<title>\';`); and a line whose first non-space characters are `//`, `/*` '
+        + 'or `*` is exempt wholesale, so a literal right after a closing `*/` on such a line is '
+        + 'never reported (e.g. `/* note */ export const t = \'<title>\';`).',
+      fileFilter: (file) => file.startsWith('src/')
+        && isNonTestSource(file)
+        && file !== RESERVED_RETRY_TITLE_DEFINITION_FILE,
+      lineMatch: (line) => !isCommentOnlyLine(line)
+        && stripTrailingLineComment(stripInlineBlockComments(line)).includes(RESERVED_RETRY_EXHAUSTED_TITLE),
+      message: 'reserved retry-exhausted title is inlined; import RETRY_EXHAUSTED_EVENT_TITLE from src/server/shared/eventTitles.ts',
     },
   ];
 }

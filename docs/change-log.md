@@ -312,6 +312,33 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、测试、`.agents/notes` 决策记录、`CHANGELOG.md` 与本条持续变更日志。
 - **状态**：已完成，随 `v1.4.0` 发布。
 
+## 2026-10-01
+
+### 17. 重试耗尽回传真实原因（片 1：类型分流 + 503 观测口径收窄）
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：`/v1/chat/completions`、`/v1/messages`、`/v1/responses` 在重试耗尽（本轮失败后重试仍可继续、但下一轮已选不出通道）时不再一律回 503 `No available channels for this model`，改为回传最后一轮失败的真实信息；错误 `type` 按「有无真实上游 HTTP 响应」分流（有 ⇒ `upstream_error` + 真实状态码，无 ⇒ `server_error` + 合成 502/503）；首轮即无可用通道保持原 503 文案；报错 message 截断到 1000 字符（含 `...(truncated)`，按码点不切半）。
+- **实现范围**：
+  - 两个 surface（chat / responses）各自新增「本轮终态失败」留存并在选不出通道的出口回传真实状态码 + payload + upstreamPath，`events` 原因写为 `retry exhausted: HTTP <status>: <message>`；首轮无通道与固定通道模式的 503 文案不变。
+  - 截断器 `truncateUpstreamErrorMessage`（上限 1000、含截断标记、按 Unicode 码点截断）与留存类型 `SurfaceRetryTerminalFailure` 落在共享工具包，避免两面各写一份；并同口径应用到共享工具包的三个终态 respond 出口（`handleUpstreamFailure` / `handleDetectedFailure` / `handleExecutionError`）的 message，使「≤1000 截断」的应用点达到 **7 处**（两条 surface 各自的 finalize 两档 + 三个工具包终态出口），而不只重试耗尽出口；**但并非「全部客户端可见末轮出口」**：`chatSurface.ts:947`/`:1007`/`:1112`/`:1190` 四处流式失败 502 与 `geminiSurface.ts:1434-1437`/`:807` 仍原样透传（未封顶），embeddings / images / completions / videos / search / rerank 的错误体同样未封顶（详见笔记 §5 与「遗留与跟进」）。
+  - 范围外一致性修复（1 处）：共享工具包执行失败终态（网络层失败，无真实上游响应）由 `upstream_error` 改为 `server_error`（状态码沿用 502），与两条 surface 出口同口径；核对全部 3 个调用点确认均属「无真实上游响应」，`handleUpstreamFailure` / `handleDetectedFailure` 仅 message 做 ≤1000 封顶、`type` 保持 `upstream_error` 不动。
+  - **未覆盖（已知）**：`count_tokens` 分支与其它 route（`embeddings` / `images` / `completions` / `videos` / `search` / `rerank`）的**重试耗尽口径**仍是旧 503，逐条已列入笔记「未覆盖面」。**注意 `count_tokens` 非「完全未变」**：其最后一轮执行失败终端（`chatSurface.ts:1909`）共用上述共享工具包出口，故该终端的 `error.type` 随本批由 `upstream_error` 变为 `server_error`。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/chatSurface.ts`
+  - `src/server/proxy-core/surfaces/openAiResponsesSurface.ts`
+  - `src/server/proxy-core/surfaces/sharedSurface.ts`
+  - `src/server/proxy-core/surfaces/sharedSurface.test.ts`
+  - `src/server/routes/proxy/chat.singleChannelFailure.test.ts`（新增）
+  - `.agents/notes/20261001-retry-exhaustion-real-upstream-error.md`
+  - `CHANGELOG.md`、`docs/change-log.md`
+- **验证**：
+  - `npm run typecheck` 全绿；`npx vitest run --root . src/server/routes/proxy/ src/server/proxy-core/` = 54 文件 / 579 用例全绿；`npm run repo:drift-check` = 0 违规。
+  - 反向对照（真跑并已还原）：出口条件改 `if (false && retryFailure)` ⇒ 新增集成用例 8/10 失败；工具包终态 `type` 还原 `upstream_error` ⇒ 单测 1/30 失败。
+  - **未验证（如实标注）**：生产侧 503 数量/分布变化、下游客户端行为（含上游 401/403 是否被误报为「你的 key 失效」）、canary 笔记 §4.1 形态的复现——均为未知，本片未做生产实验。
+- **交付物**：代码、测试、`.agents/notes` 决策记录、`CHANGELOG.md` 与本条持续变更日志。
+- **状态**：已完成（未提交）；观测口径收窄与旧笔记条目的对应关系见上述笔记第 3 节。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

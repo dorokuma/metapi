@@ -38,7 +38,8 @@ type SurfaceFailureResponse = {
   payload: {
     error: {
       message: string;
-      type: 'upstream_error';
+      // 有真实上游 HTTP 响应 ⇒ `upstream_error`；无（网络层执行失败）⇒ `server_error` + 合成状态码。
+      type: 'upstream_error' | 'server_error';
     };
   };
 };
@@ -640,6 +641,51 @@ export async function recordSurfaceSuccess(input: {
   };
 }
 
+/**
+ * 上游报错体 message 的长度上限（字符，含截断省略标记）。
+ * 上游可以把整段 HTML/JSON 报错塞进 message，原样回传给下游会把响应体撑大，故统一在此封顶。
+ */
+export const UPSTREAM_ERROR_MESSAGE_MAX_LENGTH = 1000;
+
+/** 截断省略标记（与上限同处定义，避免魔法字符串散落）。 */
+export const UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER = '...(truncated)';
+
+/**
+ * 上游报错体 message 截断：总长封顶 `UPSTREAM_ERROR_MESSAGE_MAX_LENGTH`，截断处带明确省略标记。
+ * 按 Unicode 码点截断（代理对整体取舍），不会切出孤立代理对；纯 ASCII 场景结果长度正好等于上限。
+ */
+export function truncateUpstreamErrorMessage(message: string): string {
+  const normalized = typeof message === 'string' ? message : '';
+  if (normalized.length <= UPSTREAM_ERROR_MESSAGE_MAX_LENGTH) return normalized;
+
+  const marker = UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER;
+  // 上限口径是 UTF-16 长度（既有断言 `result.length === 1000` 依赖它），故按码点累加时
+  // 用码点自身的 UTF-16 宽度做预算：代理对放不下就整体停在它之前，长度与码点数双双不越界。
+  const budget = UPSTREAM_ERROR_MESSAGE_MAX_LENGTH - marker.length;
+  let kept = '';
+  let used = 0;
+  for (const codePoint of normalized) {
+    if (used + codePoint.length > budget) break;
+    kept += codePoint;
+    used += codePoint.length;
+  }
+  return `${kept}${marker}`;
+}
+
+/**
+ * 「本轮终态失败」留存结构：重试耗尽（重试仍可继续但已无通道可选）时按它回传真实上游原因。
+ */
+export type SurfaceRetryTerminalFailure = {
+  status: number;
+  payload: {
+    error: {
+      message: string;
+      type: 'upstream_error' | 'server_error';
+    };
+  };
+  upstreamPath: string | null;
+};
+
 export function createSurfaceFailureToolkit(input: {
   warningScope: SurfaceWarningScope;
   downstreamPath: string;
@@ -770,7 +816,9 @@ export function createSurfaceFailureToolkit(input: {
         status: args.status,
         payload: {
           error: {
-            message: args.errText,
+            // errText 来自 readRuntimeResponseText（无大小上限），上游可整段塞入报错体，故与两条
+            // 重试耗尽出口同口径封顶（≤1000，含尾标），不改前缀与语义。
+            message: truncateUpstreamErrorMessage(args.errText),
             type: 'upstream_error',
           },
         },
@@ -827,7 +875,7 @@ export function createSurfaceFailureToolkit(input: {
         status: args.failure.status,
         payload: {
           error: {
-            message: args.failure.reason,
+            message: truncateUpstreamErrorMessage(args.failure.reason),
             type: 'upstream_error',
           },
         },
@@ -868,13 +916,16 @@ export function createSurfaceFailureToolkit(input: {
         reason: args.errorMessage || 'network failure',
       }));
 
+      // 本出口的调用方（chatSurface 两处 / openAiResponsesSurface 一处）都在「排除掉端点池失败与
+      // 站点并发超时之后」的 catch 兜底分支里，即从未拿到真实上游 HTTP 响应（网络层执行失败）。
+      // 按「有无真实上游响应」的分流规则：无 ⇒ `server_error` + 合成 502（状态码沿用 502）。
       return {
         action: 'respond',
         status: 502,
         payload: {
           error: {
-            message: `Upstream error: ${args.errorMessage || 'network failure'}`,
-            type: 'upstream_error',
+            message: truncateUpstreamErrorMessage(`Upstream error: ${args.errorMessage || 'network failure'}`),
+            type: 'server_error',
           },
         },
       };

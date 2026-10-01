@@ -749,7 +749,8 @@ describe('selectSurfaceChannelForAttempt', () => {
       payload: {
         error: {
           message: 'Upstream error: socket hang up',
-          type: 'upstream_error',
+          // 无真实上游 HTTP 响应 ⇒ server_error + 合成 502（与两条 surf 侧出口同口径）。
+          type: 'server_error',
         },
       },
     });
@@ -1488,5 +1489,38 @@ describe('selectSurfaceChannelForAttempt', () => {
       '[proxy/chat] failed to write proxy log',
       expect.any(Error),
     );
+  });
+});
+
+describe('truncateUpstreamErrorMessage', () => {
+  it('caps ASCII messages at the shared limit and marks the cut', async () => {
+    const {
+      truncateUpstreamErrorMessage,
+      UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
+    } = await import('./sharedSurface.js');
+
+    const result = truncateUpstreamErrorMessage('y'.repeat(5000));
+
+    expect(result.length).toBe(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
+    expect(result.endsWith(UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER)).toBe(true);
+  });
+
+  it('truncates by code point so astral characters are never cut in half', async () => {
+    const {
+      truncateUpstreamErrorMessage,
+      UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
+    } = await import('./sharedSurface.js');
+
+    const result = truncateUpstreamErrorMessage('\u{1F600}'.repeat(2000));
+    const kept = result.slice(0, result.length - UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER.length);
+
+    expect(result.length).toBeLessThanOrEqual(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
+    expect(Array.from(result).length).toBeLessThanOrEqual(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
+    expect(result.endsWith(UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER)).toBe(true);
+    // 保留部分必须整码点收尾：孤立代理对会让下游 JSON 序列化出 U+FFFD / 非法 UTF-8。
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(result)).toBe(false);
+    expect(kept.length % 2).toBe(0);
   });
 });

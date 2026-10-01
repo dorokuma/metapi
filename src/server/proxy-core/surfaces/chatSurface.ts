@@ -74,7 +74,9 @@ import {
   getSurfaceStickyPreferredChannelId,
   recordSurfaceSuccess,
   selectSurfaceChannelForAttempt,
+  truncateUpstreamErrorMessage,
   trySurfaceOauthRefreshRecovery,
+  type SurfaceRetryTerminalFailure,
 } from './sharedSurface.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
@@ -266,27 +268,32 @@ function createGeminiNativeOpenAiStreamReader(
   };
 }
 
+/** 确有真实上游 HTTP 响应（含上游 401/403）的终态：保持 `upstream_error` + 真实状态码原样回传。 */
 function finalizeRetryAsUpstreamFailure(status: number, message: string) {
   return {
     action: 'respond' as const,
     status,
     payload: {
       error: {
-        message,
+        message: truncateUpstreamErrorMessage(message),
         type: 'upstream_error' as const,
       },
     },
   };
 }
 
+/**
+ * 本地/网关侧执行失败的终态（网络层执行失败、站点端点池全冷却等，从未拿到真实上游 HTTP 响应）：
+ * 按“有无真实上游响应”分流为 `server_error` + 合成 502；三类调用点均为无上游响应场景，可在此统一定型。
+ */
 function finalizeRetryAsExecutionFailure(message: string) {
   return {
     action: 'respond' as const,
     status: 502,
     payload: {
       error: {
-        message: `Upstream error: ${message}`,
-        type: 'upstream_error' as const,
+        message: truncateUpstreamErrorMessage(`Upstream error: ${message}`),
+        type: 'server_error' as const,
       },
     },
   };
@@ -407,6 +414,10 @@ export async function handleChatSurfaceRequest(
 
   const excludeChannelIds: number[] = [];
   let retryCount = 0;
+  // 本轮终态失败的真实原因：在确定「继续重试」之前留存（真实 status / 报错体 / 上游路径）。
+  // 重试仍可继续、但下一轮已无通道可选（重试耗尽）时，据此向客户端回传上游真实原因，
+  // 而不是用 503「No available channels」掩盖它；首轮真无可用通道时它仍为 null，保持原 503 文案。
+  let lastRetryFailure: SurfaceRetryTerminalFailure | null = null;
 
   while (retryCount <= maxRetries) {
     const stickyPreferredChannelId = retryCount === 0
@@ -422,6 +433,15 @@ export async function handleChatSurfaceRequest(
     });
 
     if (!selected) {
+      const retryFailure = lastRetryFailure;
+      if (retryFailure) {
+        await reportProxyAllFailed({
+          model: requestedModel,
+          reason: `retry exhausted: HTTP ${retryFailure.status}: ${retryFailure.payload.error.message}`,
+        });
+        await finalizeDebugFailure(retryFailure.status, retryFailure.payload, retryFailure.upstreamPath);
+        return reply.code(retryFailure.status).send(retryFailure.payload);
+      }
       const noChannelMessage = buildForcedChannelUnavailableMessage(forcedChannelId);
       await reportProxyAllFailed({
         model: requestedModel,
@@ -731,6 +751,11 @@ export async function handleChatSurfaceRequest(
         retryCount,
       });
       if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+        lastRetryFailure = {
+          status: 503,
+          payload: { error: { message: busyMessage, type: 'server_error' } },
+          upstreamPath: null,
+        };
         retryCount += 1;
         continue;
       }
@@ -1042,6 +1067,11 @@ export async function handleChatSurfaceRequest(
                 : finalizeRetryAsUpstreamFailure(failure.status, failure.reason))
               : failureOutcome;
             if (!terminalFailureOutcome) {
+              lastRetryFailure = {
+                status: failure.status,
+                payload: finalizeRetryAsUpstreamFailure(failure.status, failure.reason).payload,
+                upstreamPath: successfulUpstreamPath,
+              };
               retryCount += 1;
               continue;
             }
@@ -1267,6 +1297,11 @@ export async function handleChatSurfaceRequest(
             : finalizeRetryAsUpstreamFailure(failure.status, failure.reason))
           : failureOutcome;
         if (!terminalFailureOutcome) {
+          lastRetryFailure = {
+            status: failure.status,
+            payload: finalizeRetryAsUpstreamFailure(failure.status, failure.reason).payload,
+            upstreamPath: successfulUpstreamPath,
+          };
           retryCount += 1;
           continue;
         }
@@ -1335,6 +1370,11 @@ export async function handleChatSurfaceRequest(
           retryCount,
         });
         if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+          lastRetryFailure = {
+            status: failure.status,
+            payload: { error: { message: failure.message, type: 'server_error' } },
+            upstreamPath: null,
+          };
           retryCount += 1;
           continue;
         }
@@ -1382,6 +1422,11 @@ export async function handleChatSurfaceRequest(
             : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error'))
           : failureOutcome;
         if (!terminalFailureOutcome) {
+          lastRetryFailure = {
+            status: endpointFailureStatus || 502,
+            payload: finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error').payload,
+            upstreamPath: null,
+          };
           retryCount += 1;
           continue;
         }
@@ -1407,6 +1452,11 @@ export async function handleChatSurfaceRequest(
           : finalizeRetryAsExecutionFailure(formatErrorCause(err) || 'network failure'))
         : failureOutcome;
       if (!terminalFailureOutcome) {
+        lastRetryFailure = {
+          status: 502,
+          payload: finalizeRetryAsExecutionFailure(formatErrorCause(err) || 'network failure').payload,
+          upstreamPath: null,
+        };
         retryCount += 1;
         continue;
       }

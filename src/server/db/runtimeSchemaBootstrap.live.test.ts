@@ -10,6 +10,13 @@ import { bootstrapRuntimeDatabaseSchema } from './runtimeSchemaBootstrap.js';
 const mysqlRuntime = process.env.DB_PARITY_MYSQL_URL ? it : it.skip;
 const postgresRuntime = process.env.DB_PARITY_POSTGRES_URL ? it : it.skip;
 
+// MySQL 方言 live 用例在真实容器上串行执行「清库 + 基线 DDL + runtime bootstrap + information_schema 内省」，
+// 常态 1.2–2.3s、耗时全在串行往返回合上，对 runner I/O 与 MySQL 元数据延迟敏感：本用例与同族
+// parity / upgrade 用例都曾在 CI 被 vitest 默认 5000ms 预算击穿（本用例 2026-09-28 run 36387260031，
+// 5009ms → Test timed out in 5000ms；明细见 .agents/notes/20261001-ci-mysql-live-schema-timeout.md）。
+// 只放宽本用例预算；同族其余用例仍用 vitest 默认值。
+const MYSQL_LIVE_SCHEMA_TIMEOUT_MS = 30_000;
+
 async function resetMySqlSchema(connectionString: string): Promise<void> {
   const connection = await mysql.createConnection({ uri: connectionString });
   try {
@@ -73,25 +80,29 @@ async function applyPostgresStatements(connectionString: string, statements: str
 }
 
 describe('runtime schema bootstrap live upgrade path', () => {
-  mysqlRuntime('upgrades mysql runtime schemas from an older live contract', async () => {
-    const connectionString = process.env.DB_PARITY_MYSQL_URL!;
-    const baselineStatements = __schemaIntrospectionTestUtils.splitSqlStatements(
-      generateBootstrapSql('mysql', baselineContract),
-    );
+  mysqlRuntime(
+    'upgrades mysql runtime schemas from an older live contract',
+    async () => {
+      const connectionString = process.env.DB_PARITY_MYSQL_URL!;
+      const baselineStatements = __schemaIntrospectionTestUtils.splitSqlStatements(
+        generateBootstrapSql('mysql', baselineContract),
+      );
 
-    await resetMySqlSchema(connectionString);
-    await applyMySqlStatements(connectionString, baselineStatements);
+      await resetMySqlSchema(connectionString);
+      await applyMySqlStatements(connectionString, baselineStatements);
 
-    await bootstrapRuntimeDatabaseSchema({
-      dialect: 'mysql',
-      connectionString,
-    });
+      await bootstrapRuntimeDatabaseSchema({
+        dialect: 'mysql',
+        connectionString,
+      });
 
-    const live = await introspectLiveSchema({ dialect: 'mysql', connectionString });
-    // MySQL/MariaDB 物理 TEXT 列不能携带 DEFAULT（errno 1101）：比对前从 contract 回填
-    // 该类列的默认值（见 alignMySqlTextDefaultsWithContract），其余字段照常校验。
-    expect(alignMySqlTextDefaultsWithContract(live, currentContract)).toEqual(currentContract);
-  });
+      const live = await introspectLiveSchema({ dialect: 'mysql', connectionString });
+      // MySQL/MariaDB 物理 TEXT 列不能携带 DEFAULT（errno 1101）：比对前从 contract 回填
+      // 该类列的默认值（见 alignMySqlTextDefaultsWithContract），其余字段照常校验。
+      expect(alignMySqlTextDefaultsWithContract(live, currentContract)).toEqual(currentContract);
+    },
+    MYSQL_LIVE_SCHEMA_TIMEOUT_MS,
+  );
 
   postgresRuntime('upgrades postgres runtime schemas from an older live contract', async () => {
     const connectionString = process.env.DB_PARITY_POSTGRES_URL!;

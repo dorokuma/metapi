@@ -193,6 +193,8 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
 
     resetUpstreamEndpointRuntimeState();
     await db.delete(schema.proxyLogs).run();
+    // 重试耗尽的运维标记现在落在 events（独立 title 直查）；清空以免用例间串味。
+    await db.delete(schema.events).run();
     // 站点与其 API 端点地址由单个用例按需写入，避免用例间串味。
     await db.delete(schema.siteApiEndpoints).run();
     await db.delete(schema.sites).run();
@@ -465,6 +467,56 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
         finalHttpStatus: 429,
       }),
     );
+  });
+
+  it('writes exactly one retry-exhausted events row carrying the real status + retry-exhausted prefix', async () => {
+    // 判别器（方案 A）：重试耗尽出口直插一条自己的 `events`（独立 title），使「重试耗尽」可被
+    // `SELECT * FROM events WHERE title = '代理重试耗尽'` 1:1 直查——不再新增 `proxy_logs` 行、
+    // 不再依赖 events 正文串（「代理全部失败」那条仍受聚合器保留集/文本规范化约束）。
+    const { RETRY_EXHAUSTED_EVENT_TITLE } = await import('../../shared/eventTitles.js');
+    fetchMock.mockImplementation(async () => upstreamErrorResponse(429, 'rate limited: upstream quota exceeded'));
+
+    const response = await injectChat();
+
+    expect(response.statusCode).toBe(429);
+    // 出口不再新增任何带判别串的 `proxy_logs` 行（本批已拆除该写入）。
+    // 注：此处仍会有该 attempt 自己的失败行（`failureToolkit.log` 在重试前就写了它），故不断言 proxy_logs 为空。
+    const proxyLogRows = await db.select().from(schema.proxyLogs).all();
+    expect(proxyLogRows.filter((row) => String(row.errorMessage || '').includes('retry exhausted:')).length).toBe(0);
+
+    const rows = await db.select().from(schema.events).all();
+    const exhaustedRows = rows.filter((row) => row.title === RETRY_EXHAUSTED_EVENT_TITLE);
+    // 每轮重试耗尽只写一条。
+    expect(exhaustedRows.length).toBe(1);
+    const row = exhaustedRows[0];
+    // 体例：`type='proxy'`（与 reportProxyAllFailed 的 eventType 同）+ `level='error'`；relatedType 按
+    // 代理域既有体例挂 'route'（与 reportProxyAllFailed 一致；events 侧无 route id 可挂）。
+    expect(row.type).toBe('proxy');
+    expect(row.level).toBe('error');
+    expect(row.relatedType).toBe('route');
+    // 已从通知中心口径摘除（服务端排除该 title）；标记行仍可 SQL 直查。
+    // 落库仍显式置已读（`read: true`）——本断言即锁该写入语义。
+    expect(row.read).toBe(true);
+    // 真实状态码 + 判别串都在 message 文本里（events 无结构化列）。
+    expect(String(row.message)).toContain('retry exhausted: HTTP 429: ');
+    expect(String(row.message)).toContain('rate limited: upstream quota exceeded');
+    // 当时可得的上下文：模型 / 上游路径 / 轮次 / 试过的通道。该形态下 `retryFailure.upstreamPath` 为 null
+    //（上游 429 经 `SiteApiEndpointRequestError` 分支进来，该分支只写 `upstreamPath: null`），故落 `upstream=-`；
+    // 上游路径仍在 payload message 自带的 `[upstream:…]` 前缀里。
+    expect(String(row.message)).toContain('model=gpt-4o-mini');
+    expect(String(row.message)).toMatch(/; upstream=\S+; stream=false; attempt=1; tried_channels=\[11\]; forced_channel=-$/);
+  });
+
+  it('does not write a retry-exhausted events row for the first-round no-channel shape', async () => {
+    // A 形态（首轮真无通道，lastRetryFailure 为 null）保持原行为：不新增 events 行。
+    const { RETRY_EXHAUSTED_EVENT_TITLE } = await import('../../shared/eventTitles.js');
+    selectChannelMock.mockReturnValue(null);
+
+    const response = await injectChat();
+
+    expect(response.statusCode).toBe(503);
+    const rows = await db.select().from(schema.events).all();
+    expect(rows.filter((row) => row.title === RETRY_EXHAUSTED_EVENT_TITLE).length).toBe(0);
   });
 
   it('truncates an oversized upstream error message to the shared 1000-char cap', async () => {

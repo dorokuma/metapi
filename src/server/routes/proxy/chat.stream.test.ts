@@ -5130,4 +5130,105 @@ describe('chat proxy stream behavior', () => {
     expect(firstUrl).toContain('/v1/chat/completions');
     expect(secondUrl).toContain('/v1/messages');
   });
+
+  it('keeps the streamed failure 502 message within the shared upstream-error cap', async () => {
+    // chat 主 handler 的 4 处流式失败 502 出口（`!streamStarted` 分支）现在统一把 message 交给共享封顶
+    // （`truncateUpstreamErrorMessage`，≤1000）。本用例锁住该出口对外的不变量：502 + `upstream_error`
+    // + 非 SSE，且客户端拿到的 message 不超过共享上限、不带截断标记、文案保持原样。
+    //
+    // 为什么不断言「上游超长原文被截断」：**夹具内不可构造**——上游的 error/response.failed 帧会被
+    // `proxyStream` 以 `force` 立刻写成 SSE 帧（`streamStarted` 变 true），响应成为 200 SSE 流，
+    // 到不了这 4 处 `!streamStarted` 出口；夹具里唯一可达的失败源是本地生成的
+    // `Upstream returned empty content`（需 `proxyEmptyContentFailEnabled=true`）。实测 13 种上游错误形态
+    // （openai/claude × {type:error,type:response.failed} × {SSE,JSON,裸串}）全部 200；给这 4 处出口加临时
+    // 探针后，整份流式用例（本条加入前 102 条、加入后 103 条）里探针只命中 3 次、message 全是本地串。
+    //
+    // **生产未证实可达、也未证实不可达**：2xx + JSON + `type:'error'` 体在 `PROXY_EMPTY_CONTENT_FAIL` 默认
+    // false 且 `proxyErrorKeywords` 默认空时会走 `consumeUpstreamFinalPayload → markFailed(上游 payload)`，
+    // 其 message 为上游原文（→ 确认封顶保留，但本夹具不构成对它可达性的证据）。
+    const {
+      UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
+    } = await import('../../proxy-core/surfaces/sharedSurface.js');
+    config.proxyEmptyContentFailEnabled = true;
+
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-cap-502","choices":[{"delta":{}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.headers['content-type']).not.toContain('text/event-stream');
+    expect(response.json()?.error?.type).toBe('upstream_error');
+    const message = String(response.json()?.error?.message ?? '');
+    // 出口封顶：客户端拿到的 message 不得超过共享上限。
+    expect(message.length).toBeLessThanOrEqual(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
+    // 文案保持原样；未触发截断（长度未顶到上限）时不得带截断标记。
+    expect(message).toContain('empty content');
+    if (message.length < UPSTREAM_ERROR_MESSAGE_MAX_LENGTH) {
+      expect(message).not.toContain(UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER);
+    }
+  });
+
+  it('serves an oversized upstream error frame as a 200 SSE stream instead of the capped 502 exits', async () => {
+    // 锁 A 组的**结构性结论**：上游 `error` 帧（message 5000 字符 > 共享封顶 1000）**不会**走 chat 主 handler
+    // 的 4 处流式失败 502 出口——`proxyStream` 收到错误帧后立即以 `force` 写出 SSE 帧（`streamStarted` 变 true），
+    // 响应固定为 200 SSE，客户端拿不到那 4 处出口的 `<1000` 封顶 JSON。⇒ 那 4 处出口的封顶**夹具内不可构造**：
+    // 上游 `error`/`response.failed` 帧被 force 成 SSE ⇒ `streamStarted=true` ⇒ 4 处 `!streamStarted` 出口不可达
+    // （夹具唯一可达源是本地 `Upstream returned empty content`）；**生产未证实可达、也未证实不可达**。
+    // 封顶保留；这与上面那条「出口不变量」用例是同一结论的正反两面。
+    const oversizedMessage = 'y'.repeat(5000);
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: oversizedMessage, type: 'server_error' } })}\n\n`));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // 没走 4 处 502 JSON 出口 ⇒ 200 + SSE。
+    expect(response.statusCode).toBe(200);
+    expect(String(response.headers['content-type'] || '')).toContain('text/event-stream');
+    // 终止于 SSE 的 `[DONE]`，而不是被封顶过的 502 JSON。
+    expect(response.body).toContain('data: [DONE]');
+    // 实测（真跑确认）：这条上游 error 帧的正文（含超长 message）**根本不下发**——客户端拿到的是
+    // `delta:{}` + `finish_reason:"stop"` 的空成功流（`proxyStream` 吞掉错误帧、不转发其文本）。
+    // ⇒ 「上游超长 message 被 4 处出口封顶到 ≤1000」**夹具内不可构造**；**生产未证实可达、也未证实不可达**；**封顶保留**。
+    expect(response.body).not.toContain('y'.repeat(50));
+  });
 });

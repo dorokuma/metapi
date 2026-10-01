@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
+import { RETRY_EXHAUSTED_EVENT_TITLE } from '../../shared/eventTitles.js';
 
 export async function eventsRoutes(app: FastifyInstance) {
   // List events
@@ -15,10 +16,13 @@ export async function eventsRoutes(app: FastifyInstance) {
     if (readQuery === 'true') filters.push(eq(schema.events.read, true));
     if (readQuery === 'false') filters.push(eq(schema.events.read, false));
 
+    // 通知中心口径：按 title 排除「重试耗尽」运维标记（该行仍落库、仍可 SQL 直查）。
+    const notificationCenterExclusion = ne(schema.events.title, RETRY_EXHAUSTED_EVENT_TITLE);
+
     const base = db.select().from(schema.events);
     if (filters.length > 0) {
       return await base
-        .where(and(...filters))
+        .where(and(notificationCenterExclusion, ...filters))
         .orderBy(desc(schema.events.createdAt))
         .limit(limit)
         .offset(offset)
@@ -26,6 +30,7 @@ export async function eventsRoutes(app: FastifyInstance) {
     }
 
     return await base
+      .where(notificationCenterExclusion)
       .orderBy(desc(schema.events.createdAt))
       .limit(limit)
       .offset(offset)
@@ -35,7 +40,11 @@ export async function eventsRoutes(app: FastifyInstance) {
   // Unread count
   app.get('/api/events/count', async () => {
     const result = await db.select({ count: sql<number>`count(*)` }).from(schema.events)
-      .where(eq(schema.events.read, false)).get();
+      .where(and(
+        eq(schema.events.read, false),
+        // 通知中心口径：未读计数同样排除「重试耗尽」运维标记。
+        ne(schema.events.title, RETRY_EXHAUSTED_EVENT_TITLE),
+      )).get();
     return { count: result?.count || 0 };
   });
 

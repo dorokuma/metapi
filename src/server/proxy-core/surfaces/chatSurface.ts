@@ -67,6 +67,7 @@ import {
   bindSurfaceStickyChannel,
   buildSurfaceConcurrencyBusyMessage,
   getSurfaceRequestFailure,
+  insertRetryExhaustedEvent,
   buildSurfaceStickySessionKey,
   clearSurfaceStickyChannel,
   createSurfaceFailureToolkit,
@@ -299,6 +300,14 @@ function finalizeRetryAsExecutionFailure(message: string) {
   };
 }
 
+/**
+ * 流式失败 502 出口的 message 封顶（≤1000）：`streamResult.errorMessage` 是 `string | null`，
+ * 仅对非空串套用 `truncateUpstreamErrorMessage`，空值保持原样（不把 null 改写成空串）。
+ */
+function truncateStreamFailureMessage(message: string | null): string | null {
+  return message === null ? null : truncateUpstreamErrorMessage(message);
+}
+
 export async function handleChatSurfaceRequest(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -435,9 +444,22 @@ export async function handleChatSurfaceRequest(
     if (!selected) {
       const retryFailure = lastRetryFailure;
       if (retryFailure) {
+        const reason = `retry exhausted: HTTP ${retryFailure.status}: ${retryFailure.payload.error.message}`;
         await reportProxyAllFailed({
           model: requestedModel,
-          reason: `retry exhausted: HTTP ${retryFailure.status}: ${retryFailure.payload.error.message}`,
+          reason,
+        });
+        // 重试耗尽运维标记：独立 title 直插 events（不推送、不进聚合器），判别器
+        // `SELECT * FROM events WHERE title = '代理重试耗尽'`。每轮重试耗尽只写这一条；
+        // A 形态（首轮真无通道，retryFailure 为 null）不写。写失败不影响本出口的响应路径。
+        await insertRetryExhaustedEvent({
+          reason,
+          modelRequested: requestedModel,
+          isStream,
+          upstreamPath: retryFailure.upstreamPath,
+          attempt: retryCount,
+          triedChannelIds: excludeChannelIds,
+          forcedChannelId,
         });
         await finalizeDebugFailure(retryFailure.status, retryFailure.payload, retryFailure.upstreamPath);
         return reply.code(retryFailure.status).send(retryFailure.payload);
@@ -946,7 +968,7 @@ export async function handleChatSurfaceRequest(
             if (!streamStarted) {
               return reply.code(502).send({
                 error: {
-                  message: streamResult.errorMessage,
+                  message: truncateStreamFailureMessage(streamResult.errorMessage),
                   type: 'upstream_error',
                 },
               });
@@ -1006,7 +1028,7 @@ export async function handleChatSurfaceRequest(
               if (!streamStarted) {
                 return reply.code(502).send({
                   error: {
-                    message: streamResult.errorMessage,
+                    message: truncateStreamFailureMessage(streamResult.errorMessage),
                     type: 'upstream_error',
                   },
                 });
@@ -1111,7 +1133,7 @@ export async function handleChatSurfaceRequest(
             if (!streamStarted) {
               return reply.code(502).send({
                 error: {
-                  message: streamResult.errorMessage,
+                  message: truncateStreamFailureMessage(streamResult.errorMessage),
                   type: 'upstream_error',
                 },
               });
@@ -1189,7 +1211,7 @@ export async function handleChatSurfaceRequest(
             if (!streamStarted) {
               return reply.code(502).send({
                 error: {
-                  message: streamResult.errorMessage,
+                  message: truncateStreamFailureMessage(streamResult.errorMessage),
                   type: 'upstream_error',
                 },
               });

@@ -82,6 +82,7 @@ import {
   bindSurfaceStickyChannel,
   buildSurfaceConcurrencyBusyMessage,
   getSurfaceRequestFailure,
+  insertRetryExhaustedEvent,
   buildSurfaceStickySessionKey,
   clearSurfaceStickyChannel,
   createSurfaceFailureToolkit,
@@ -389,9 +390,22 @@ export async function handleOpenAiResponsesSurfaceRequest(
       if (!selected) {
         const retryFailure = lastRetryFailure;
         if (retryFailure) {
+          const reason = `retry exhausted: HTTP ${retryFailure.status}: ${retryFailure.payload.error.message}`;
           await reportProxyAllFailed({
             model: requestedModel,
-            reason: `retry exhausted: HTTP ${retryFailure.status}: ${retryFailure.payload.error.message}`,
+            reason,
+          });
+          // 重试耗尽运维标记：独立 title 直插 events（不推送、不进聚合器），判别器
+          // `SELECT * FROM events WHERE title = '代理重试耗尽'`。每轮重试耗尽只写这一条；
+          // A 形态（首轮真无通道，retryFailure 为 null）不写。写失败不影响本出口的响应路径。
+          await insertRetryExhaustedEvent({
+            reason,
+            modelRequested: requestedModel,
+            isStream,
+            upstreamPath: retryFailure.upstreamPath,
+            attempt: retryCount,
+            triedChannelIds: excludeChannelIds,
+            forcedChannelId,
           });
           await finalizeDebugFailure(retryFailure.status, retryFailure.payload, retryFailure.upstreamPath);
           return reply.code(retryFailure.status).send(retryFailure.payload);

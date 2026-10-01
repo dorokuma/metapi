@@ -21,6 +21,8 @@ import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
+import { db, schema } from '../../db/index.js';
+import { RETRY_EXHAUSTED_EVENT_TITLE } from '../../shared/eventTitles.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 type SurfaceWarningScope = 'chat' | 'responses' | 'rerank';
@@ -685,6 +687,61 @@ export type SurfaceRetryTerminalFailure = {
   };
   upstreamPath: string | null;
 };
+
+/**
+ * 重试耗尽出口的运维标记事件：直插一条 `events` 行（与 `routes/api/sites.ts` 的
+ * `applySiteStatusSideEffects`、`services/checkinService.ts` 的先例同形——`db.insert(schema.events)`，
+ * **不触发推送**）。判别器：`SELECT * FROM events WHERE title = '代理重试耗尽'`。
+ *
+ * 每轮重试耗尽只调用一次（出口处）；A 形态（首轮真无通道、无留存失败）由调用方保证不调用。
+ * `events` 没有结构化列，状态码（含在 `reason` 里）/ 模型 / 轮次 / 试过的通道等上下文只能进 `message` 文本；
+ * `reason` 直接复用出口喂给 `reportProxyAllFailed` 的同一串（尾部是上游报错体），
+ * 其长度已由出口的 message 截断封顶（≤ `UPSTREAM_ERROR_MESSAGE_MAX_LENGTH`），故整串有界。
+ * **除 `reason` 尾段（上游报错体）外**均为本地元数据，不含任何上游凭据/密钥。
+ *
+ * 本行是**纯 SQL 运维标记**（唯一用途是 `title` 直查），**已从通知中心口径摘除**：
+ * `routes/api/events.ts` 的两个读接口（列表 `GET /api/events`、未读计数 `GET /api/events/count`）
+ * 按本 title 排除 ⇒ 不出现于通知面板列表、不计入未读徽标/计数；标记行仍照常落库、仍可 `title` 直查。
+ * 另仍显式写 `read: true`（`schema.events.read` 为 `integer('read', { mode: 'boolean' }).default(false)`）
+ * ⇒ 「只看未读」类筛选同样不命中本行。
+ *
+ * 写入失败只 warn：**不得**影响客户端响应路径（先例中 `sites.ts` 用空 `catch {}` 吞掉、
+ * `checkinService.ts` 则直接 await 不捕获；此处按「不影响响应路径」的要求捕获并 warn）。
+ */
+export async function insertRetryExhaustedEvent(input: {
+  reason: string;
+  modelRequested: string;
+  isStream?: boolean | null;
+  upstreamPath?: string | null;
+  /** 出口处循环计数器的值（= 已进行的尝试次数），与 attempt 行上的 0 基 `retry_count` 语义不同。 */
+  attempt: number;
+  triedChannelIds: number[];
+  forcedChannelId?: number | null;
+}): Promise<void> {
+  const context = [
+    `model=${input.modelRequested}`,
+    `upstream=${input.upstreamPath || '-'}`,
+    `stream=${input.isStream ? 'true' : 'false'}`,
+    `attempt=${input.attempt}`,
+    `tried_channels=[${input.triedChannelIds.join(',')}]`,
+    `forced_channel=${input.forcedChannelId ?? '-'}`,
+  ].join('; ');
+
+  try {
+    await db.insert(schema.events).values({
+      type: 'proxy',
+      title: RETRY_EXHAUSTED_EVENT_TITLE,
+      message: `${input.reason}; ${context}`,
+      level: 'error',
+      // 已从通知中心口径摘除（服务端排除该 title）；标记行仍可 SQL 直查。
+      read: true,
+      relatedType: 'route',
+      createdAt: formatUtcSqlDateTime(new Date()),
+    }).run();
+  } catch (error) {
+    console.warn('[proxy] failed to write retry-exhausted event', error);
+  }
+}
 
 export function createSurfaceFailureToolkit(input: {
   warningScope: SurfaceWarningScope;

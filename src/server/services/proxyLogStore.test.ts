@@ -4,6 +4,7 @@ const {
   hasProxyLogBillingDetailsColumnMock,
   hasProxyLogClientColumnsMock,
   hasProxyLogDownstreamApiKeyIdColumnMock,
+  hasProxyLogClientHttpStatusColumnMock,
   hasProxyLogStreamTimingColumnsMock,
   dbInsertMock,
   dbInsertValuesMock,
@@ -13,6 +14,7 @@ const {
   hasProxyLogBillingDetailsColumnMock: vi.fn(),
   hasProxyLogClientColumnsMock: vi.fn(),
   hasProxyLogDownstreamApiKeyIdColumnMock: vi.fn(),
+  hasProxyLogClientHttpStatusColumnMock: vi.fn(),
   hasProxyLogStreamTimingColumnsMock: vi.fn(),
   dbInsertMock: vi.fn(),
   dbInsertValuesMock: vi.fn(),
@@ -54,6 +56,7 @@ vi.mock('../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: (...args: unknown[]) => hasProxyLogBillingDetailsColumnMock(...args),
   hasProxyLogClientColumns: (...args: unknown[]) => hasProxyLogClientColumnsMock(...args),
   hasProxyLogDownstreamApiKeyIdColumn: (...args: unknown[]) => hasProxyLogDownstreamApiKeyIdColumnMock(...args),
+  hasProxyLogClientHttpStatusColumn: (...args: unknown[]) => hasProxyLogClientHttpStatusColumnMock(...args),
   hasProxyLogStreamTimingColumns: (...args: unknown[]) => hasProxyLogStreamTimingColumnsMock(...args),
 }));
 
@@ -64,6 +67,7 @@ describe('proxyLogStore', () => {
     hasProxyLogBillingDetailsColumnMock.mockReset();
     hasProxyLogClientColumnsMock.mockReset();
     hasProxyLogDownstreamApiKeyIdColumnMock.mockReset();
+    hasProxyLogClientHttpStatusColumnMock.mockReset();
     hasProxyLogStreamTimingColumnsMock.mockReset();
     dbInsertMock.mockReset();
     dbInsertValuesMock.mockReset();
@@ -71,6 +75,7 @@ describe('proxyLogStore', () => {
     hasProxyLogBillingDetailsColumnMock.mockResolvedValue(false);
     hasProxyLogClientColumnsMock.mockResolvedValue(false);
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(false);
+    hasProxyLogClientHttpStatusColumnMock.mockResolvedValue(false);
     hasProxyLogStreamTimingColumnsMock.mockResolvedValue(false);
 
     dbInsertMock.mockReturnValue({
@@ -302,5 +307,31 @@ describe('proxyLogStore', () => {
     });
     expect(dbInsertValuesMock.mock.calls[1][0].isStream).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].firstByteLatencyMs).toBeUndefined();
+  });
+
+  it('keeps the log but drops the observation column when client_http_status is missing', async () => {
+    // 缺列老库兜底：观测列丢了不要紧（值落 NULL），但绝不能因此丢掉整条代理日志。
+    hasProxyLogClientHttpStatusColumnMock.mockResolvedValue(true);
+    dbInsertRunMock
+      .mockRejectedValueOnce(new Error('no such column: client_http_status'))
+      .mockResolvedValueOnce(undefined);
+
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      httpStatus: 502,
+      clientHttpStatus: 200,
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(2);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      modelRequested: 'gpt-5',
+      httpStatus: 502,
+      clientHttpStatus: 200,
+    });
+    expect(dbInsertValuesMock.mock.calls[1][0]).toMatchObject({
+      modelRequested: 'gpt-5',
+      httpStatus: 502,
+    });
+    expect(dbInsertValuesMock.mock.calls[1][0].clientHttpStatus).toBeUndefined();
   });
 });

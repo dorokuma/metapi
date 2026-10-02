@@ -1465,6 +1465,12 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "client_http_status": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },

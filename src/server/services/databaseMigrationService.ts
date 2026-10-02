@@ -602,7 +602,7 @@ function buildStatements(
   for (const row of snapshot.accounts.proxyLogs) {
     statements.push({
       table: 'proxy_logs',
-      columns: ['id', 'route_id', 'channel_id', 'account_id', 'downstream_api_key_id', 'model_requested', 'model_actual', 'status', 'http_status', 'latency_ms', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'estimated_cost', 'billing_details', 'error_message', 'retry_count', 'created_at', 'site_id', 'model_site_id', 'credential_site_id', 'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens', 'prompt_tokens_include_cache', 'usage_source'],
+      columns: ['id', 'route_id', 'channel_id', 'account_id', 'downstream_api_key_id', 'model_requested', 'model_actual', 'status', 'http_status', 'latency_ms', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'estimated_cost', 'billing_details', 'error_message', 'retry_count', 'created_at', 'site_id', 'model_site_id', 'credential_site_id', 'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens', 'prompt_tokens_include_cache', 'usage_source', 'client_http_status'],
       values: [
         asNumber(row.id, 0),
         asNumber(row.routeId, null),
@@ -630,6 +630,7 @@ function buildStatements(
         asNumber(row.reasoningTokens, null),
         asNullableBoolean(row.promptTokensIncludeCache),
         asNullableString(row.usageSource),
+        asNumber(row.clientHttpStatus, null),
       ],
     });
   }

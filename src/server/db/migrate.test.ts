@@ -464,6 +464,8 @@ describe('sqlite migrate bootstrap', () => {
     );
     expect(proxyLogColumns.some((column) => column.name === 'is_stream')).toBe(true);
     expect(proxyLogColumns.some((column) => column.name === 'first_byte_latency_ms')).toBe(true);
+    // 观测列随 0032 迁移落到既有 sqlite 库（旧库在原地升级后就能写这一列）。
+    expect(proxyLogColumns.some((column) => column.name === 'client_http_status')).toBe(true);
 
     verified.close();
   });

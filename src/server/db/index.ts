@@ -54,6 +54,7 @@ let proxyLogBillingDetailsColumnAvailable: boolean | null = null;
 let proxyLogDownstreamApiKeyIdColumnAvailable: boolean | null = null;
 let proxyLogClientColumnsAvailable: boolean | null = null;
 let proxyLogStreamTimingColumnsAvailable: boolean | null = null;
+let proxyLogClientHttpStatusColumnAvailable: boolean | null = null;
 
 function buildMysqlPoolOptions(
   connectionString = config.dbUrl,
@@ -1062,6 +1063,45 @@ export async function hasProxyLogStreamTimingColumns(): Promise<boolean> {
   return proxyLogStreamTimingColumnsAvailable;
 }
 
+/**
+ * `proxy_logs.client_http_status` 是否存在（纯观测列）。
+ *
+ * 与其它 proxy_logs 观测列同口径的三方言探测：缺列时写侧静默降级为不写该列（值落 NULL），
+ * 不因一个观测列弄丢整条代理日志。
+ */
+export async function hasProxyLogClientHttpStatusColumn(): Promise<boolean> {
+  if (proxyLogClientHttpStatusColumnAvailable !== null) {
+    return proxyLogClientHttpStatusColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    proxyLogClientHttpStatusColumnAvailable = tableExists('proxy_logs')
+      && tableColumnExists('proxy_logs', 'client_http_status');
+    return proxyLogClientHttpStatusColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?',
+      ['proxy_logs', 'client_http_status'],
+    ) as [Array<{ column_name?: string }>, unknown];
+    proxyLogClientHttpStatusColumnAvailable = Array.isArray(rows)
+      && rows.some((row) => String(row?.column_name || '').trim().toLowerCase() === 'client_http_status');
+    return proxyLogClientHttpStatusColumnAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2',
+    ['proxy_logs', 'client_http_status'],
+  );
+  proxyLogClientHttpStatusColumnAvailable = result.rows.some(
+    (row) => String((row as { column_name?: unknown }).column_name || '').trim().toLowerCase() === 'client_http_status',
+  );
+  return proxyLogClientHttpStatusColumnAvailable;
+}
+
 export async function ensureProxyLogStreamTimingColumns(): Promise<boolean> {
   const requiredColumns = [
     { name: 'is_stream', sqliteType: 'integer', mysqlType: 'BOOLEAN NULL', postgresType: 'BOOLEAN' },
@@ -1122,6 +1162,7 @@ function resetSchemaCapabilityCache() {
   proxyLogDownstreamApiKeyIdColumnAvailable = null;
   proxyLogClientColumnsAvailable = null;
   proxyLogStreamTimingColumnsAvailable = null;
+  proxyLogClientHttpStatusColumnAvailable = null;
 }
 
 async function sqliteProxyQuery(sqlText: string, params: unknown[], method: SqlMethod) {

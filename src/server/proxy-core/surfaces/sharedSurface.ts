@@ -258,6 +258,8 @@ export async function writeSurfaceProxyLog(input: {
   modelRequested: string;
   status: string;
   httpStatus: number;
+  /** 客户端实收状态码（观测列）；不传则落 NULL（不拿 `httpStatus` 替代）。 */
+  clientHttpStatus?: number | null;
   isStream?: boolean | null;
   firstByteLatencyMs?: number | null;
   latencyMs: number;
@@ -300,6 +302,7 @@ export async function writeSurfaceProxyLog(input: {
       modelActual: input.selected.actualModel ?? null,
       status: input.status,
       httpStatus: input.httpStatus,
+      clientHttpStatus: input.clientHttpStatus ?? null,
       isStream: input.isStream ?? null,
       firstByteLatencyMs: input.firstByteLatencyMs ?? null,
       latencyMs: input.latencyMs,
@@ -426,6 +429,7 @@ export async function recordSurfaceSuccess(input: {
     modelRequested: string;
     status: string;
     httpStatus: number;
+    clientHttpStatus?: number | null;
     isStream?: boolean | null;
     firstByteLatencyMs?: number | null;
     latencyMs: number;
@@ -598,6 +602,8 @@ export async function recordSurfaceSuccess(input: {
     modelRequested: input.requestedModel,
     status: 'success',
     httpStatus: 200,
+    // 成功出口：客户端拿到的就是 200（JSON 或已 hijack 的 SSE）。
+    clientHttpStatus: 200,
     isStream: input.isStream ?? null,
     firstByteLatencyMs: input.firstByteLatencyMs ?? null,
     latencyMs: input.latencyMs,
@@ -653,25 +659,138 @@ export const UPSTREAM_ERROR_MESSAGE_MAX_LENGTH = 1000;
 export const UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER = '...(truncated)';
 
 /**
- * 上游报错体 message 截断：总长封顶 `UPSTREAM_ERROR_MESSAGE_MAX_LENGTH`，截断处带明确省略标记。
- * 按 Unicode 码点截断（代理对整体取舍），不会切出孤立代理对；纯 ASCII 场景结果长度正好等于上限。
+ * 上游原文**落库**（`proxy_logs.error_message`）的守卫上限：远大于下发给客户端的 1000。
+ * 上游可以把整段 HTML/JSON 报错塞进 message（无界），不经任何守卫就写库会把单行撑到任意大。
  */
-export function truncateUpstreamErrorMessage(message: string): string {
-  const normalized = typeof message === 'string' ? message : '';
-  if (normalized.length <= UPSTREAM_ERROR_MESSAGE_MAX_LENGTH) return normalized;
+export const UPSTREAM_ERROR_MESSAGE_LOG_MAX_LENGTH = 64 * 1024;
 
-  const marker = UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER;
-  // 上限口径是 UTF-16 长度（既有断言 `result.length === 1000` 依赖它），故按码点累加时
-  // 用码点自身的 UTF-16 宽度做预算：代理对放不下就整体停在它之前，长度与码点数双双不越界。
-  const budget = UPSTREAM_ERROR_MESSAGE_MAX_LENGTH - marker.length;
+/**
+ * 尾部标识后缀：`appendFailureIdentifiers`（proxyStream）追加的 `(code=…, request_id=…)`。
+ * 只认最后一组不含嵌套括号的括号段，避免把上游原文自带的括号当后缀摘走。
+ */
+const UPSTREAM_ERROR_IDENTIFIER_SUFFIX_PATTERN = /(\s*\((?=[^()]*\b(?:code|request_id)=)[^()]*\))$/;
+
+/** 按 Unicode 码点累加截取（不切出孤立代理对）。 */
+function takeByCodePoints(text: string, maxUtf16Length: number): string {
   let kept = '';
   let used = 0;
-  for (const codePoint of normalized) {
-    if (used + codePoint.length > budget) break;
+  for (const codePoint of text) {
+    if (used + codePoint.length > maxUtf16Length) break;
     kept += codePoint;
     used += codePoint.length;
   }
-  return `${kept}${marker}`;
+  return kept;
+}
+
+/**
+ * 上游原文截断（可选上限，默认下发给客户端的 1000）：**尾部标识后缀不受截断影响**。
+ *
+ * 为什么单独保后缀：`code` / `request_id` 是定位「哪次上游请求失败」的唯一线索，而它们总在末尾，
+ * 普通封顶头截会把它们第一个切掉——超长上游原文下，客户端与落库就再也拿不到定位信息。
+ */
+export function truncateUpstreamErrorMessageWithLimit(message: string, maxLength: number): string {
+  const normalized = typeof message === 'string' ? message : '';
+  if (normalized.length <= maxLength) return normalized;
+
+  const suffixMatch = UPSTREAM_ERROR_IDENTIFIER_SUFFIX_PATTERN.exec(normalized);
+  const suffix = suffixMatch ? suffixMatch[1] : '';
+  const head = suffixMatch ? normalized.slice(0, suffixMatch.index) : normalized;
+  const marker = UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER;
+  const headBudget = maxLength - marker.length - suffix.length;
+  if (headBudget <= 0) {
+    return `${takeByCodePoints(head, Math.max(0, maxLength - suffix.length))}${suffix}`;
+  }
+  return `${takeByCodePoints(head, headBudget)}${marker}${suffix}`;
+}
+
+/**
+ * 上游原文**落库**守卫：与下发同口径（尾后缀保留），但上限放宽到 `UPSTREAM_ERROR_MESSAGE_LOG_MAX_LENGTH`（64KB）。
+ */
+export function guardUpstreamErrorMessageForLog(message: string): string {
+  return truncateUpstreamErrorMessageWithLimit(message, UPSTREAM_ERROR_MESSAGE_LOG_MAX_LENGTH);
+}
+
+/**
+ * 「已 hijack 的 SSE 流」上失败时给客户端看的 in-band 错误帧（纯函数，不做 IO）。
+ *
+ * 为什么需要它：SSE 一旦 `reply.hijack()`，回复头已发出，**不能再** `reply.code(502).send(...)`
+ * （`ERR_HTTP_HEADERS_SENT`），也不再有任何 HTTP 状态码能告诉客户端「这轮失败了」。唯一剩下的通道
+ * 就是流内的帧。所以断流（上游 body 中途 `terminated` / 流在任何终结帧之前结束）时补一帧标准错误，
+ * 客户端据此能区分「出错」与「正常结束」。
+ *
+ * 帧形状按下游协议区分（两者都是各协议自己的标准错误形）：
+ * - openai：`data: {"error":{"message":…,"type":"upstream_error","code":502}}\n\n`
+ * - claude：`event: error\ndata: {"type":"error","error":{"type":"api_error","message":…}}\n\n`
+ *
+ * **绝不**在错误帧后追加 `data: [DONE]` 或 `message_stop`：那等于告诉客户端「成功结束」，
+ * 会让错误被当成正常收尾吞掉（本轮改动的核心约束之一）。
+ */
+export function buildSurfaceInBandStreamErrorFrame(input: {
+  downstreamFormat: 'openai' | 'claude';
+  message: string | null;
+}): string {
+  const message = typeof input.message === 'string' && input.message.trim().length > 0
+    ? input.message
+    : 'upstream stream interrupted';
+  if (input.downstreamFormat === 'claude') {
+    const payload = JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message },
+    });
+    return `event: error\ndata: ${payload}\n\n`;
+  }
+  const payload = JSON.stringify({
+    error: { message, type: 'upstream_error', code: 502 },
+  });
+  return `data: ${payload}\n\n`;
+}
+
+/**
+ * 把上面的错误帧写进已 hijack 的回复并 `end()`（幂等：回复已结束则什么都不做）。
+ * 返回是否真的写了帧——调用方通常不关心，但测试需要可断言。
+ *
+ * 三种「已经写不进去」的死状态一律挡住，且 write/end 包 try/catch：
+ * - `writableEnded`：回复已规范化结束（重复写会被 Node 丢弃）；
+ * - `destroyed`：客户端 abort 后 socket 已销毁，而 `writableEnded` 仍可能为 false；
+ * - `closed`：底层流已关闭。
+ * 不挡这些状态时 `write` 会抛 `ERR_STREAM_DESTROYED`——一次「尽量体面收尾」变成新异常，
+ * 而错误帧本身是**尽力而为**的观测手段，失败就静默返回 false（不抛）。
+ */
+export function writeSurfaceInBandStreamError(input: {
+  reply: {
+    raw: {
+      writableEnded: boolean;
+      destroyed?: boolean;
+      closed?: boolean;
+      write(chunk: string): unknown;
+      end(): unknown;
+    };
+  };
+  downstreamFormat: 'openai' | 'claude';
+  message: string | null;
+}): boolean {
+  const raw = input.reply.raw;
+  if (raw.writableEnded || raw.destroyed === true || raw.closed === true) return false;
+  try {
+    raw.write(buildSurfaceInBandStreamErrorFrame({
+      downstreamFormat: input.downstreamFormat,
+      message: input.message,
+    }));
+    raw.end();
+  } catch (error) {
+    console.warn('[proxy/surface] failed to write in-band stream error frame', error);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 上游报错体 message 截断：总长封顶 `UPSTREAM_ERROR_MESSAGE_MAX_LENGTH`，截断处带明确省略标记。
+ * 按 Unicode 码点截断（代理对整体取舍），不会切出孤立代理对；尾部的 `(code=…, request_id=…)`
+ * 标识后缀不受截断影响（见 `truncateUpstreamErrorMessageWithLimit`）。
+ */
+export function truncateUpstreamErrorMessage(message: string): string {
+  return truncateUpstreamErrorMessageWithLimit(message, UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
 }
 
 /**
@@ -749,12 +868,22 @@ export function createSurfaceFailureToolkit(input: {
   maxRetries: number;
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
+  /**
+   * 客户端实收状态码取值器（仅供观测列 `client_http_status` 用，不影响任何响应行为）。
+   *
+   * 为什么需要取值器而不是固定值：同一条「流式失败」日志里，客户端实收状态取决于**当时是否已
+   * `reply.hijack()`**——已 hijack（SSE 已发帧）时客户端实收 200 + 流内错误帧；未 hijack 时
+   * 实收 HTTP 502 JSON。只有 surface 自己知道（chatSurface 的 `streamStarted`），且日志发生在
+   * 出口之前，所以这里按调用时实时取值。缺省时沿用传入的 `httpStatus` 口径。
+   */
+  resolveClientHttpStatus?: () => number | null;
 }) {
   const log = async (args: {
     selected: SurfaceSelectedChannel;
     modelRequested: string;
     status: string;
     httpStatus: number;
+    clientHttpStatus?: number | null;
     isStream?: boolean | null | undefined;
     firstByteLatencyMs?: number | null | undefined;
     latencyMs: number;
@@ -778,6 +907,7 @@ export function createSurfaceFailureToolkit(input: {
       modelRequested: args.modelRequested,
       status: args.status,
       httpStatus: args.httpStatus,
+      clientHttpStatus: args.clientHttpStatus ?? null,
       isStream: args.isStream ?? null,
       firstByteLatencyMs: args.firstByteLatencyMs ?? null,
       latencyMs: args.latencyMs,
@@ -812,6 +942,11 @@ export function createSurfaceFailureToolkit(input: {
       });
   };
 
+  const resolveStreamClientHttpStatus = (fallback: number): number => {
+    const resolved = input.resolveClientHttpStatus?.();
+    return typeof resolved === 'number' && Number.isFinite(resolved) ? resolved : fallback;
+  };
+
   return {
     log,
     async handleUpstreamFailure(args: {
@@ -837,6 +972,8 @@ export function createSurfaceFailureToolkit(input: {
         modelRequested: args.requestedModel,
         status: 'failed',
         httpStatus: args.status,
+        // 客户端实收：本出口的 respond 状态就是 `args.status`（重试耗尽分支也用同一状态）。
+        clientHttpStatus: args.status,
         isStream: args.isStream ?? null,
         firstByteLatencyMs: args.firstByteLatencyMs ?? null,
         latencyMs: args.latencyMs,
@@ -906,6 +1043,8 @@ export function createSurfaceFailureToolkit(input: {
         modelRequested: args.requestedModel,
         status: 'failed',
         httpStatus: args.failure.status,
+        // 客户端实收：同上，终端出口沿 `args.failure.status`。
+        clientHttpStatus: args.failure.status,
         isStream: args.isStream ?? null,
         firstByteLatencyMs: args.firstByteLatencyMs ?? null,
         latencyMs: args.latencyMs,
@@ -958,10 +1097,16 @@ export function createSurfaceFailureToolkit(input: {
         modelRequested: args.requestedModel,
         status: 'failed',
         httpStatus: 0,
+        // 客户端实收：本出口既可能是未 hijack 的合成 502 JSON，也可能是**已 hijack 后断流**的兜底
+        // （chatSurface.ts / openAiResponsesSurface.ts 的 catch 都走 `respondTerminalFailure`，此时
+        // 客户端实收 200 + 流内错误帧，硬编码 502 会让观测列首次上线即带已知失真）。
+        // 故与 `recordStreamFailure` 同口径：沿取值器取值，缺省回落到合成的 502。
+        clientHttpStatus: resolveStreamClientHttpStatus(502),
         isStream: args.isStream ?? null,
         firstByteLatencyMs: args.firstByteLatencyMs ?? null,
         latencyMs: args.latencyMs,
-        errorMessage: args.errorMessage,
+        // 上游原文落库保留（排障靠它），但过 64KB 守卫；尾部 `(code=…, request_id=…)` 标识后缀不被截掉。
+        errorMessage: guardUpstreamErrorMessageForLog(args.errorMessage),
         retryCount: args.retryCount,
       });
 
@@ -1002,9 +1147,13 @@ export function createSurfaceFailureToolkit(input: {
       totalTokens?: number | null;
       upstreamPath?: string | null;
       httpStatus?: number;
+      /** 客户端实收状态码（见 `writeSurfaceProxyLog`）。 */
+      clientHttpStatus?: number | null;
       runtimeFailureStatus?: number | null;
     }) {
       const errorMessage = args.errorMessage || 'stream processing failed';
+      // 上游原文落库保留（排障靠它），但过 64KB 守卫；尾部 `(code=…, request_id=…)` 标识后缀不被截掉。
+      const errorMessageForLog = guardUpstreamErrorMessageForLog(errorMessage);
       if (typeof args.runtimeFailureStatus === 'number') {
         await tokenRouter.recordFailure(args.selected.channel.id, {
           status: args.runtimeFailureStatus,
@@ -1022,10 +1171,13 @@ export function createSurfaceFailureToolkit(input: {
         modelRequested: args.requestedModel,
         status: 'failed',
         httpStatus: args.httpStatus ?? 200,
+        // 流式失败：调用方按「是否已 hijack 」告知客户端实收（已 hijack ⇒ 200 + 流内错误帧；
+        // 未 hijack ⇒ 502 JSON），缺省沿用 `httpStatus` 口径。
+        clientHttpStatus: resolveStreamClientHttpStatus(args.clientHttpStatus ?? args.httpStatus ?? 200),
         isStream: args.isStream ?? null,
         firstByteLatencyMs: args.firstByteLatencyMs ?? null,
         latencyMs: args.latencyMs,
-        errorMessage,
+        errorMessage: errorMessageForLog,
         retryCount: args.retryCount,
         promptTokens: args.promptTokens,
         completionTokens: args.completionTokens,

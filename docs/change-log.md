@@ -352,7 +352,7 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
   - **拆除清单（初稿新增项，已全部删除）**：两条出口里的 `failureToolkit.log({...})` 写 `proxy_logs`；`SurfaceRetryLogContext` 与 `buildSurfaceRetryLogContext`；`SurfaceRetryTerminalFailure.logContext`（恢复片 1 的 `{ status, payload, upstreamPath }` 形状）；**12 个留存点**（chat 6 + responses 6）的 `logContext: buildSurfaceRetryLogContext({...})`；`writeSurfaceProxyLog` 与故障工具包 `log` 的各一个**可选 `siteId`**（核全仓调用点后确认已无使用者）；`SurfaceSelectedChannel.site.id` 的加宽（唯一用途就是那个已删的构造器）。⇒ `git diff` 中已无任何 `proxy_logs` 标记写入与 `logContext` / `siteId` 管道（`rg logContext src/` = 0 命中）。
   - **保留期与直查窗口**：`events` 的清理走 `cleanupProgramLogs`（`logCleanupService.ts:60-86`），**开关默认关闭**（`config.ts:97`）⇒ **默认配置下新行不会被定期清理**；打开则按 **30 天**（`config.ts:98`）。`proxy_debug_traces` 只留 **24 小时**（`config.ts:156` / `proxyDebugTraceStore.ts:153-161`）⇒ **按事件回查 trace 的窗口是 24h**。**行数增长 ≤ 失败请求速率**（仅本出口 1:1；末轮直终态/固定通道/`count_tokens`/`geminiSurface`/6 route 不写本标记）：出口每失败请求 1:1 写一行、无合并/去重，`events` 默认永不清理（开关默认关；且需 `logCleanupConfigured=true` 才会真跑，`checkinScheduler.ts:195-198`）⇒ 边际成本 **+1 行/失败请求**（同一请求本就会写一条 `proxy_logs` 失败行，非新量级）；此前「≈42 行/周」是**低频观测、不是上限**；**查不到时**（A 形态/末轮直终态/固定通道/`count_tokens`/`geminiSurface`/6 route 不写本标记）的**下一步**（改查 `title='代理全部失败'` + `原因=No available channels after retries` + 24h 内 trace）与 **`tried_channels` join 指引**（补全 route/site/account）见笔记「遗留与跟进」第 4 条；反例：**租约忙/并发超时若发生在仍有重试余量的轮次是会写本标记的**（`retry exhausted: HTTP 503: Channel busy…`），不要读成「busy 形态永不写」。初稿的 `proxy_logs` 行**从未发版**（只存在于未提交工作区）⇒ **无需数据迁移 / 回填**。
   - **A 组（封顶，保留不动）**：4 处流式失败 502 出口（改后 `chatSurface.ts:971`/`:1031`/`:1136`/`:1214`）的 `message` 改为 `truncateStreamFailureMessage(streamResult.errorMessage)`——同文件私有包装（`:307-309`，**保留 `null` 语义**，不把 `null` 写成空串），内部即共享 `truncateUpstreamErrorMessage`（≤1000 + `...(truncated)`）；状态码 502、`error.type='upstream_error'`、响应结构不变。**未封顶的客户端出口还剩** `geminiSurface.ts:1434-1437`/`:807` 两处与 6 个 route（embeddings / images / completions / videos / search / rerank）的错误体——本片未动。
-  - **已知偏差（如实标注）**：这 4 处出口的封顶在**集成夹具内不可构造**（上游 `error`/`response.failed` 帧被 `proxyStream` 以 `force` 写成 200 SSE 流，`streamStarted` 变 true，到不了 `!streamStarted` 出口；夹具唯一可达源是本地 `Upstream returned empty content`）；**生产未证实可达、也未证实不可达**（2xx + JSON + `type:'error'` 体在 `PROXY_EMPTY_CONTENT_FAIL` 默认 false 且 `proxyErrorKeywords` 默认空时会走 `consumeUpstreamFinalPayload → markFailed(上游 payload)`，其 message 为上游原文）。**封顶保留**；新增用例锁的是**出口不变量**（502 + `upstream_error` + 非 SSE + `message` ≤1000 且文案不变），**没有**「上游超长被截断」断言，`>`1000 形态与「去掉封顶即 FAIL」的原生反向对照不可构造（实测 13 种上游错误形态全部 200；给 4 处出口加临时探针后，当时 102 条的 `chat.stream.test.ts` 用例里探针只命中 3 次且 message 全为本地串）。替代反向对照见下。
+  - **已知偏差（如实标注）**：这 4 处出口的封顶在**集成夹具内不可构造**（上游 `error`/`response.failed` 帧被 `proxyStream` 以 `force` 写成 200 SSE 流，`streamStarted` 变 true，到不了 `!streamStarted` 出口；夹具唯一可达源是本地 `Upstream returned empty content`）；**生产未证实可达、也未证实不可达**（2xx + JSON + `type:'error'` 体在 `PROXY_EMPTY_CONTENT_FAIL` **当时默认 false**（**该默认值已于 2026-10-02 改为开**：`src/server/config.ts:189-190` 默认 `true`，仅 `PROXY_EMPTY_CONTENT_FAIL=false` 可关闭；开＝空内容判失败、客户端不会收到空成功）且 `proxyErrorKeywords` 默认空时会走 `consumeUpstreamFinalPayload → markFailed(上游 payload)`，其 message 为上游原文）。**封顶保留**；新增用例锁的是**出口不变量**（502 + `upstream_error` + 非 SSE + `message` ≤1000 且文案不变），**没有**「上游超长被截断」断言，`>`1000 形态与「去掉封顶即 FAIL」的原生反向对照不可构造（实测 13 种上游错误形态全部 200；给 4 处出口加临时探针后，当时 102 条的 `chat.stream.test.ts` 用例里探针只命中 3 次且 message 全为本地串）。替代反向对照见下。
 - **主要文件**：
   - `src/server/proxy-core/surfaces/chatSurface.ts`
   - `src/server/proxy-core/surfaces/openAiResponsesSurface.ts`
@@ -371,6 +371,87 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、测试、`.agents/notes` 决策记录、`CHANGELOG.md` 与本条持续变更日志。
 - **状态**：已完成（未提交）；本片对片 1 笔记**一条主张的收窄**（「唯一干净判别器 = events 串」⇒ 改为 `events.title` 直查，events 串降级为辅助）与**一条主张的维持**（「终态出口不写自己的 `proxy_logs`」）见上述笔记第「与片 1 笔记的关系」节，旧笔记一字未改。
 - **发版后观察（已闭环，保留一行历史）**：曾计划盯「`代理重试耗尽` 在最近 30 行中的占比」、若出现挤占真告警再决定排除——本标记**已从通知面板与未读徽标/计数中摘除（服务端按 title 排除）**；**标记行仍落库、仍可 SQL 直查**。**曾短暂存在挤占风险**（旧口径下该行占最近 30 行窗口 1 个位次，高频风暴下可能把真告警挤出面板列表、并使徽标计数窗口被占），**已由本片排除修复**；⇒ 该观察动作**不再需要**。
+
+## 2026-10-02
+
+### 1. 客户端可见失败语义（网络异常归一 / SSE in-band 错误帧 / `client_http_status` 观测列 / 路由刷新埋点）
+
+- **类型**：缺陷修复 + 契约变更（`proxy_logs` 新增可空观测列）+ 观测补点
+- **需求来源**：本会话需求（任务标记 `MARK-CLIENTVIS-IMPL-W9`，无 GitHub Issue 链接）
+- **目标**：让「客户端拿不到完整 HTTP 响应」的三类路径对客户端可区分：① 上游静默黑洞（~300s）；② 响应头已到但 body 中途断（SSE 已 hijack ⇒ 客户端看到无终结的流）；③ 请求内路由刷新挂起且零观测。
+- **实现范围**：
+  - `#5` `endpointFlow` 网络类异常（fetch reject / body 异常）归一为与 `!response.ok` 同路径的 `{ok:false,status:502,errText:formatErrorCause(err)}`：客户端状态码保持 502；错误 `type` 由 `server_error` 纠正为 `upstream_error`；attempt 记录与 `final_upstream_path` 现在也会落库；重试/轮换语义不变。
+  - `#6` 已 `reply.hijack()` 的流式失败改写成帧后 `end()`（OpenAI / Claude 两种帧形；**绝不**追加 `[DONE]` / `message_stop`）；未 hijack 出口保持 `reply.code(502).send(...)`。覆盖 `chatSurface` 与 `openAiResponsesSurface`（后者只在「写过帧但无终结事件」时补帧）。
+  - `#7` `proxy_logs` 新增可空列 `client_http_status`（无破坏性默认）：成功出口 200；未 hijack 失败出口 = 出口状态码；执行异常 = 合成 502；已 hijack 的流式失败 = 200（客户端实收 200 + 流内错误帧）。写侧带 `has*` 门禁 + 缺列降级（丢列不丢日志）；跨库迁移拷贝字段与三方言产物同步；新迁移 `drizzle/0032_proxy_logs_client_http_status.sql`。
+  - `#8` 路由刷新最小埋点：`[proxy/route-refresh]` 结构化日志 + `getRouteRefreshObservation()` 计数（耗时/命中/成功/失败），纯观测，不改选择语义。
+- **主要文件**：
+  - `src/server/proxy-core/channelSelection.ts`
+  - `src/server/proxy-core/orchestration/endpointFlow.ts`
+  - `src/server/proxy-core/surfaces/sharedSurface.ts`
+  - `src/server/proxy-core/surfaces/chatSurface.ts`
+  - `src/server/proxy-core/surfaces/openAiResponsesSurface.ts`
+  - `src/server/db/schema.ts`、`src/server/db/index.ts`、`src/server/db/generated/*`
+  - `src/server/services/proxyLogStore.ts`、`src/server/services/databaseMigrationService.ts`
+  - `drizzle/0032_proxy_logs_client_http_status.sql`、`drizzle/meta/_journal.json`
+- **验证**：
+  - `npx drizzle-kit generate`（新迁移、二次运行 `No schema changes`）→ `npm run schema:contract` → `npm run build:server` → `npm run typecheck`（四段）→ `npm run repo:drift-check`（0 违规）→ `npm run test:schema:unit`（21 用例）→ 三方言 live：`test:schema:parity` / `test:schema:upgrade` / `test:schema:runtime`（mysql:8.4 + postgres:16 一次性容器，跑完 `docker rm -f`）。
+  - 新增/扩展用例：#5 两条（`endpointFlow.test.ts`）、#6 两条（`sharedSurface.test.ts` claude 帧 + `chat.stream.test.ts` openai 帧，均断言不含 `[DONE]` 且随后 `end()`）、#7 三条（`schemaParity.test.ts` 契约+三方言产物、`databaseMigrationService.test.ts` 跨库拷贝字段、`sharedSurface.test.ts` 写日志入参）、#8 一条（`sharedSurface.test.ts`）；另扩展 `proxyLogStore.test.ts` 缺列降级一条、`migrate.test.ts` sqlite 迁移列断言一条。
+  - 既有用例按预期纠正两处（均写明理由）：`chat.singleChannelFailure.test.ts` 的「单通道网络失败重试耗尽」由 `server_error` 改断 `upstream_error`，消息由笼统 'Upstream error' 改断真实原因（网络异常归一后与上游失败同路）。
+- **交付物**：代码、测试、`.agents/notes/20261002-client-visible-failure-semantics.md` 与本条持续变更日志。
+- **状态**：已完成（**未提交**）。已知开放项（见笔记「被放弃的方案」）：gemini 原生流 hijack 后仍不写错误帧（仓内无 gemini 帧形构造器，不猜测）；MySQL/PG 老库不经 upgrade 产物补列（upgrade 产物按既有约定保持空步），缺列时写侧降级 NULL。
+
+### 2. 客户端可见失败语义（CVF）收边：带内失败帧识别与原样透传 / 未写字节走 HTTP 层 / 失败终态不生成终结帧 / 空内容判失败默认开 / `client_http_status` 落库守卫 / claude 老形失败改发 `event: error`
+
+- **类型**：缺陷修复 + 契约变更（`proxy_logs` 可空观测列，第 1 条已登记）+ 配置默认值变更
+- **需求来源**：本会话需求（任务标记 `MARK-B4-INBAND-1790927244`、`MARK-B4-FIX-R1-1790928`、`MARK-B4-R2-DEFAULT-ON-1790931`、`MARK-B4-R3-LEGACY-GATE-1790933`、`MARK-B4-R4-CLAUDE-LEGACY-1790941`；无 GitHub Issue 链接）
+- **目标**：任何路径都不得让客户端把失败读成「正常结束」（含「正常结束但空」）——能走 HTTP 层（状态码 + 上游原文）就走 HTTP 层，已写过字节才走带内错误帧；观测面能回答「客户端实收几」。
+- **实现范围**：
+  - **带内失败帧识别（A/B）**：判据改为三分类 `classifyInBandFailure`（`transformers/openai/chat/proxyStream.ts:73`）——`legacy`（逐字保持老判据：`type` 为 `response.failed` / `error`）、`new`（顶层 `error` 对象 / `type` 为 `stream_error` / SSE 帧名 `error`）、`null`；`new` 形不再进归一化链被丢弃，改走带内失败出口 `emitInBandFailureFrame`（`:306`）：**上游 payload 原文 + 本仓重建的 SSE 信封**（`event:` 名保留、`data:` 原文逐行前缀，`formatRawSseBlock:90`）；claude 下游上游帧非 Anthropic 形，用本仓既有 claude 带内错误帧形承载同一份原文（恰一帧 `event: error`）。
+  - **上游原文**：失败原因改取上游原文（`extractFailureMessage:164` 取 `error.message` / `message` / `response.error.message`，取不到才回落原始 `data`），并另补尾部标识 `(code=…, request_id=…)`（`appendFailureIdentifiers:101`，不覆盖原文）。
+  - **未写字节 ⇒ HTTP 层失败（M2 / R3-A）**：`new` 与 `legacy` 失败帧在「本轮尚未向下游写出任何字节」时不再 hijack 成 200 SSE，只 `markFailed(上游原文)`，由既有 HTTP 层出口下发 **502** + `error.type='upstream_error'` + 上游原文（legacy 门禁 `:476-486`、new 分支 `:457-472`）；已写字节才带内透传；`finalize()` 失败终态不 flush 缓冲（否则会把 502 出口 hijack 成 200 SSE）。
+  - **失败终态不生成终结帧（M3）**：`finalize():347-362` 失败终态 early-return，本仓不再生成 openai `data: [DONE]` / claude `message_stop`；上游自带的 `[DONE]` 仅在 **openai 下游**、且已写字节时原样回放（回放条件 `:355`）。
+  - **claude 下游 legacy 老形改发 `event: error`（R4）**：`response.failed` + 已写字节 + claude 下游此前渲染 `message_delta{stop_reason:'end_turn'}` + `message_stop`（客户端读作「正常结束（带部分内容）」、服务端记 failed），现改为复用 `emitInBandFailureFrame` 的 claude 分支 ⇒ **恰一帧 `event: error`**（message = 上游原文 + 后缀）、无本仓终结帧，已写出的内容原样保留在前（分支 `:487-502`）；openai 下游一字未动。
+  - **空内容判失败默认开（R2）**：`src/server/config.ts:189-190` 默认 `false → true`（仅 `PROXY_EMPTY_CONTENT_FAIL=false` 可关）；UI 占位值与勾选项文案（`src/web/pages/UpstreamSettings.tsx`）、`.env.example`、`docs/configuration.md` 同步；新增 `config.test.ts` 两条（默认 true / 显式 false）。
+  - **落库守卫与标识后缀（S2）**：新增 `guardUpstreamErrorMessageForLog`（64KB）与 `truncateUpstreamErrorMessageWithLimit`（`src/server/proxy-core/surfaces/sharedSurface.ts`）——**尾部 `(code=…, request_id=…)` 标识后缀不受截断影响**；下发给客户端的 1000 封顶口径不变，带内透传的上游帧不封顶。
+  - **口径订正（第 1 条「状态」项）**：MySQL/PG 老库的 `client_http_status` 补列**不走盘上 upgrade 产物、由启动期 runtime bootstrap 按 schema contract 差分补列**（详见笔记「被放弃的方案」第 5 条的订正）；upgrade 产物仍按既有约定保持空步（`schemaParity.test.ts` 的空步断言未动）。原「缺列时写侧降级 NULL」是防御位（迁移/bootstrap 未跑过或失败时），不是老库常态。
+- **主要文件**：
+  - `src/server/transformers/openai/chat/proxyStream.ts`
+  - `src/server/proxy-core/surfaces/sharedSurface.ts`、`chatSurface.ts`、`openAiResponsesSurface.ts`
+  - `src/server/proxy-core/orchestration/endpointFlow.ts`、`src/server/proxy-core/channelSelection.ts`
+  - `src/server/services/proxyLogStore.ts`、`src/server/db/index.ts`
+  - `src/server/config.ts`、`src/web/pages/UpstreamSettings.tsx`
+  - `src/server/routes/proxy/chat.stream.test.ts`、`chat.singleChannelFailure.test.ts`、`src/server/proxy-core/surfaces/sharedSurface.test.ts`、`src/server/routes/proxy/endpointFlow.test.ts`
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`
+- **验证**：本批统一验证见下方第 4 条；逐轮的先红后绿证据见笔记各轮「验证」小节（日志在 `/tmp/b4*`：B4 的 6 例红 / R1 的四项单项红 / R2 的 config 默认值红 / R3-A 的两例红 / R4 的一例红，均为「只回退该项修复、保留用例」的真跑）。
+- **交付物**：代码、测试、笔记与本条持续变更日志。
+- **状态**：已完成（**未提交**）。已知开放项：R4-①（openai 下游 `response.failed` + 已写字节仍渲染 `finish_reason:"stop"`，**有意保留**、是否加固待定）、N-3（`(code=…)` 只读顶层 `error.code`）、O1/O2/O6、O-a..O-e、R3-①..R3-⑤，均在笔记「遗留清单」，本批不处理。
+
+### 3. 修掉依赖真实时钟的夹具时间炸弹（`upstreamObservations.test.ts`）
+
+- **类型**：测试修复（CI 稳定性）
+- **需求来源**：本会话需求（发版准备台账，任务标记 `MARK-RELEASE-PREP-1415-1790945`；无 GitHub Issue 链接）
+- **目标**：消除「用例随日期漂移变红」的预存夹具炸弹。
+- **实现范围**：`BASE_MS` 由硬编码 `Date.UTC(2026, 8, 25, 7, 0, 0)` 改为 `Math.floor(Date.now() / 1000) * 1000`（秒精度，保持原有 `BASE_UTC === BASE_MS` 语义），并在文件内写明原因：聚合路由的默认窗口按墙上时钟解析（`to = now`、`from = to - 7d`），硬编码锚点一旦超过 7 天，整组夹具即被排出默认窗口，断言不再测它要测的东西。
+- **主要文件**：`src/server/routes/api/upstreamObservations.test.ts`
+- **偏差（如实登记）**：台账另点名 `src/server/routes/api/checkin.lock.test.ts` 与 `src/server/services/databaseMigrationService.test.ts`；逐文件核对 `git diff` 后确认这两文件本批的改动**与时钟无关**（分别为新增 `hasProxyLogClientHttpStatusColumn` mock 一行、新增 `client_http_status` 跨库拷贝用例），归属 CVF 那一块。本批真实的时间依赖修复**只有本文件一处**；仓库内其它硬编码日历夹具未在本批扩大改动面。
+- **验证**：见下方第 4 条（全量测试含该文件全绿）。
+- **交付物**：测试、本条持续变更日志。
+- **状态**：已完成（**未提交**）。
+
+### 4. 版本 1.4.15 与发版文档口径修正（发版准备，不含发版动作）
+
+- **类型**：文档与版本
+- **需求来源**：本会话需求（任务标记 `MARK-RELEASE-PREP-1415-1790945`；无 GitHub Issue 链接）
+- **目标**：本批次（CVF 收边 + 时间炸弹修复）的版本号与日志文档就位，并修正笔记里与代码不一致的口径，供 reviewer / oracle 核验后提交与发版。
+- **实现范围**：
+  - 版本：`package.json` `1.4.14 → 1.4.15`。复核依据（只读）：`git log --oneline -3 origin/main` = `8c6ccd4c chore(release): 1.4.14` ⇒ 1.4.14 已发布，本批为 1.4.15。
+  - `CHANGELOG.md` 顶部新增 `## [1.4.15] - 2026-10-02`（覆盖 CVF 与时间炸弹两块；空内容默认开、`client_http_status`、路由刷新埋点记入「变更」）。
+  - 本文件补第 2、3、4 条。
+  - `.agents/notes/20261002-client-visible-failure-semantics.md` 四处口径修正：**N-1** 对照表第 4 行「`type:'error'` …（openai 与 claude 下游皆然）」不实 ⇒ 改为「**openai 下游**走归一化块；claude 下游该形由 `consumeAnthropicSseEvent` 原生帧支线接手（同表第 8 行）」；**N-2** 「（上游带了则回放）」限定为 **openai 下游**（`proxyStream.ts:355` 的回放条件含 `downstreamFormat === 'openai'`）；**R4-①** 登记观察项「openai 下游 + `response.failed` + 已写字节 ⇒ 归一化块渲染 `finish_reason:"stop"`」（`transformers/shared/chatFormatsCore.ts:1767-1783`、`:591-593`；测试 `transformers/openai/chat/index.test.ts:623`、`transformers/shared/chatFormatsCore.test.ts:371`），**有意保留**（既有测试名 "…instead of inventing a chat error finish reason"）、是否加固待定；**N-3** 登记 `(code=…)` 后缀取值面（只读顶层 `error.code`，`response.failed` 常见嵌套形拿不到 `code`；继承自 R1）。
+- **主要文件**：`package.json`、`CHANGELOG.md`、`docs/change-log.md`、`.agents/notes/20261002-client-visible-failure-semantics.md`
+- **验证**：`npx tsc --noEmit -p tsconfig.server.json` exit 0；`npm run typecheck`（web / web:test / server / desktop 四段）exit 0；`npm test -- --no-file-parallelism` **连跑均 exit 0**、`Test Files 508 passed | 2 skipped (510)`、`Tests 3380 passed | 16 skipped (3396)`（其中一遍日志 `/tmp/release-prep-1415-full-test.log`；oracle 独立复跑一遍 236.12s 全绿）；`npm run repo:drift-check` `Violations: 0`（5 条预存 tracked debt）。本片未改任何 `src/**` 生产代码（`package.json` 版本号除外）。
+- **交付物**：版本号、三处日志文档、笔记口径修正。
+- **状态**：已完成（**未提交**）。发版动作（`scripts/deploy-painless.sh --version 1.4.15 --yes` 及之后的验收 / 收尾）不在本条范围：本片**未执行任何 git 写操作，未触碰容器 / 生产库 / 生产设置**。
 
 ## 后续记录模板
 

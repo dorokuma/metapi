@@ -1,7 +1,8 @@
-import { fetch } from 'undici';
+import { fetch, Response } from 'undici';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
+import { formatErrorCause } from '../../services/errorChain.js';
 import { resolveUpstreamParamCompatSelfHealPlan } from '../../services/upstreamParamCompat/selfHeal.js';
 import {
   buildUpstreamUrl,
@@ -60,6 +61,11 @@ export type EndpointFlowResult =
     status: number;
     errText: string;
     rawErrText?: string;
+    /**
+     * 最后一次失败尝试的上游路径（`!response.ok` 与网络类异常归一后的出口都带）。
+     * 供各 surface 把它写进代理调试轨迹的 `final_upstream_path`：失败出口不再只剩一个状态码。
+     */
+    upstreamPath?: string | null;
   };
 
 export type ExecuteEndpointFlowInput = {
@@ -84,6 +90,24 @@ export type ExecuteEndpointFlowInput = {
 
 export function withUpstreamPath(path: string, message: string): string {
   return `[upstream:${path}] ${message}`;
+}
+
+/**
+ * 网络类异常（DNS/TCP/TLS/abort 等——拿不到任何上游 HTTP 响应）的归一出口。
+ *
+ * 之前这里直接 `throw`，异常会一路穿出 `executeEndpointFlow`，**绕过** attempt 记录、
+ * `onAttemptFailure` 钩子与 `final_upstream_path` 落库（下游只能看到一个笼统的执行失败）。
+ * 现在把它规范成与 `!response.ok` **同一条路径**的合成 502 响应：响应体就是
+ * `formatErrorCause(error)` 的证据文本，后续的 `readRuntimeResponseText`、自愈、降级判断、
+ * `onAttemptFailure`、重试与端点轮换全部照旧走（`retryable` / `rotateToNextEndpoint` 语义不变）。
+ * 客户端可见状态码仍为 502（原来是执行失败兜底的 502）。
+ */
+function buildNetworkFailureResponse(error: unknown): Response {
+  const errText = formatErrorCause(error).trim() || 'network failure';
+  return new Response(errText, {
+    status: 502,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+  });
 }
 
 async function runEndpointFlowHook<T>(
@@ -112,6 +136,8 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   let finalStatus = 0;
   let finalErrText = 'unknown error';
   let finalRawErrText: string | undefined;
+  /** 最后一次实际尝试的上游路径（失败出口写进 `final_upstream_path`）。 */
+  let finalUpstreamPath: string | null = null;
 
   /** 上游目标 URL：首次尝试与自愈重发共用同一口径（含 proxyUrl 场景）。 */
   const resolveTargetUrl = (path: string): string => (
@@ -123,28 +149,33 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   /**
    * 出站统一入口：首次尝试与 (b) 自愈重发都走这里，保证两者都带首字节超时保护，
    * 且都经同一个 `dispatchRequest` 拿到 timeout signal（保留站点代理与 codex 请求头 / 会话字段）。
+   * 网络类异常在此就地归一（不 throw 出去），见 `buildNetworkFailureResponse`。
    */
-  const dispatchAttempt = (
+  const dispatchAttempt = async (
     request: BuiltEndpointRequest,
     targetUrl: string,
-  ): Promise<Awaited<ReturnType<typeof fetch>>> => (
-    fetchWithObservedFirstByte(
-      async (signal) => (
-        input.dispatchRequest
-          ? await input.dispatchRequest(request, targetUrl, signal)
-          : await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
-            method: 'POST',
-            headers: request.headers,
-            body: JSON.stringify(request.body),
-            signal,
-          }))
-      ),
-      {
-        firstByteTimeoutMs: input.firstByteTimeoutMs,
-        startedAtMs: Date.now(),
-      },
-    )
-  );
+  ): Promise<Response> => {
+    try {
+      return await fetchWithObservedFirstByte(
+        async (signal) => (
+          input.dispatchRequest
+            ? await input.dispatchRequest(request, targetUrl, signal)
+            : await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
+              method: 'POST',
+              headers: request.headers,
+              body: JSON.stringify(request.body),
+              signal,
+            }))
+        ),
+        {
+          firstByteTimeoutMs: input.firstByteTimeoutMs,
+          startedAtMs: Date.now(),
+        },
+      );
+    } catch (error) {
+      return buildNetworkFailureResponse(error);
+    }
+  };
 
   /** 三条成功路径共用（首次 2xx / 既有 tryRecover 成功 / 自愈成功），禁止复制粘贴。 */
   const returnAttemptSuccess = async (
@@ -200,6 +231,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       finalStatus = response.status || 408;
       finalErrText = errText;
       finalRawErrText = rawErrText;
+      finalUpstreamPath = request.path;
       if (input.disableCrossProtocolFallback) {
         break;
       }
@@ -286,6 +318,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       finalStatus = response.status;
       finalErrText = errText;
       finalRawErrText = rawErrText;
+      finalUpstreamPath = baseContext.request.path;
       break;
     }
     const shouldAbortRemainingEndpoints = !isLastEndpoint && !!input.shouldAbortRemainingEndpoints?.({
@@ -296,6 +329,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       finalStatus = response.status;
       finalErrText = errText;
       finalRawErrText = rawErrText;
+      finalUpstreamPath = baseContext.request.path;
       break;
     }
     const shouldDowngrade = !isLastEndpoint && !!input.shouldDowngrade?.(baseContext);
@@ -310,6 +344,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     finalStatus = response.status;
     finalErrText = errText;
     finalRawErrText = rawErrText;
+    finalUpstreamPath = baseContext.request.path;
     break;
   }
 
@@ -318,5 +353,6 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     status: finalStatus || 502,
     errText: finalErrText || 'unknown error',
     rawErrText: finalRawErrText,
+    upstreamPath: finalUpstreamPath,
   };
 }

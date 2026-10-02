@@ -421,6 +421,82 @@ describe('executeEndpointFlow', () => {
       expect(result.errText).toContain('Upstream returned HTTP 400');
     }
   });
+
+  it('normalizes a network exception on the first endpoint instead of throwing, then falls through to the next candidate', async () => {
+    const networkError = new TypeError('fetch failed');
+    (networkError as { cause?: unknown }).cause = Object.assign(new Error('connection reset by peer'), {
+      code: 'ECONNRESET',
+      syscall: 'read',
+    });
+    const dispatchRequest = vi.fn(async (request: BuiltEndpointRequest) => {
+      if (request.path === '/v1/responses') throw networkError;
+      return toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+    });
+    const failures: Array<{ status: number; rawErrText: string; requestPath: string }> = [];
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses', 'chat'],
+      shouldDowngrade: () => true,
+      buildRequest: (endpoint: 'responses' | 'chat') => endpoint === 'responses'
+        ? requestFor('/v1/responses')
+        : { ...requestFor('/v1/chat/completions'), endpoint },
+      dispatchRequest,
+      onAttemptFailure: (ctx: any) => {
+        failures.push({
+          status: ctx.response.status,
+          rawErrText: ctx.rawErrText,
+          requestPath: ctx.request.path,
+        });
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.upstreamPath).toBe('/v1/chat/completions');
+    }
+    // 异常不再穿出 flow：第一次尝试照样落 attempt 记录（合成 502 + `.cause` 证据文本）。
+    expect(dispatchRequest).toHaveBeenCalledTimes(2);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.status).toBe(502);
+    expect(failures[0]?.requestPath).toBe('/v1/responses');
+    expect(failures[0]?.rawErrText).toContain('ECONNRESET');
+  });
+
+  it('resolves to a structured 502 with the last upstream path when every endpoint throws a network exception', async () => {
+    const dispatchRequest = vi.fn(async () => {
+      const error = new TypeError('fetch failed');
+      (error as { cause?: unknown }).cause = Object.assign(new Error('getaddrinfo ENOTFOUND upstream.invalid'), {
+        code: 'ENOTFOUND',
+        syscall: 'getaddrinfo',
+      });
+      throw error;
+    });
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses', 'chat'],
+      shouldDowngrade: () => true,
+      buildRequest: (endpoint: 'responses' | 'chat') => endpoint === 'responses'
+        ? requestFor('/v1/responses')
+        : { ...requestFor('/v1/chat/completions'), endpoint },
+      dispatchRequest,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(502);
+      expect(result.rawErrText).toContain('ENOTFOUND');
+      // 最后一个候选的上游路径进失败结果（surface 用它写 `final_upstream_path`）。
+      expect(result.upstreamPath).toBe('/v1/chat/completions');
+      expect(result.errText).toContain('[upstream:/v1/chat/completions]');
+      expect(result.errText).toContain('Upstream returned HTTP 502');
+    }
+    expect(dispatchRequest).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('executeEndpointFlow upstream param compat self-heal', () => {

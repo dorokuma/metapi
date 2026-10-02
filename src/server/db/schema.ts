@@ -253,6 +253,11 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   modelActual: text('model_actual'),
   status: text('status'), // 'success' | 'failed' | 'retried'
   httpStatus: integer('http_status'),
+  // 客户端实收状态码（纯观测列，可空）。与 `http_status` 语义不同：
+  // `http_status` 描述的是「本轮上游/逻辑状态」（网络层执行失败时为 `0`），
+  // 而客户端真正拿到的是出口状态码（同上情形为 502/503）；SSE 已 `reply.hijack()` 时
+  // 客户端拿到的是 200 + 流内错误帧。缺列的老库静默降级为 NULL（写侧有 has* 门禁）。
+  clientHttpStatus: integer('client_http_status'),
   isStream: integer('is_stream', { mode: 'boolean' }),
   firstByteLatencyMs: integer('first_byte_latency_ms'),
   latencyMs: integer('latency_ms'),

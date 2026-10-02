@@ -1108,6 +1108,58 @@ describe('databaseMigrationService', () => {
     }
   });
 
+  it('copies the client-visible status observation column in the cross-database migration manifest', () => {
+    // 跨库迁移（sqlite → mysql/postgres 等）必须携带 `client_http_status`，否则观测列只在本仓 sqlite 库存在。
+    // 与 `http_status` 分开拷贝：二者语义不同，不能用一列代另一列。
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [{
+          id: 1,
+          routeId: 1,
+          channelId: 1,
+          accountId: 1,
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'failed',
+          httpStatus: 502,
+          clientHttpStatus: 200,
+          latencyMs: 123,
+          retryCount: 0,
+          createdAt: '2026-10-02T00:00:00.000Z',
+        }],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: {
+        settings: [],
+      },
+    } as any);
+
+    const proxyLogsStatement = statements.find((statement) => statement.table === 'proxy_logs');
+    expect(proxyLogsStatement?.columns).toContain('client_http_status');
+    expect(
+      proxyLogsStatement?.values[proxyLogsStatement.columns.indexOf('client_http_status')],
+    ).toBe(200);
+    expect(
+      proxyLogsStatement?.values[proxyLogsStatement.columns.indexOf('http_status')],
+    ).toBe(502);
+  });
+
   it('excludes runtime database config settings from migration statements', () => {
     const statements = __databaseMigrationServiceTestUtils.buildStatements({
       version: 'test',

@@ -66,6 +66,20 @@ describe('buildConfig', () => {
     expect(config.codexResponsesWebsocketBeta).toBe('responses_websockets=2099-01-01');
   });
 
+  it('fails empty upstream content by default (never a silent empty success)', () => {
+    const config = buildConfig({});
+
+    expect(config.proxyEmptyContentFailEnabled).toBe(true);
+  });
+
+  it('allows turning empty-content failure off explicitly', () => {
+    const config = buildConfig({
+      PROXY_EMPTY_CONTENT_FAIL: 'false',
+    });
+
+    expect(config.proxyEmptyContentFailEnabled).toBe(false);
+  });
+
   it('accepts JSON request bodies larger than Fastify default 1 MiB', async () => {
     const app = Fastify(buildFastifyOptions(buildConfig({})));
     const largeText = 'a'.repeat(2 * 1024 * 1024);

@@ -86,6 +86,7 @@ vi.mock('../../db/index.js', () => ({
       }),
     }),
   },
+  hasProxyLogClientHttpStatusColumn: async () => false,
   hasProxyLogStreamTimingColumns: async () => false,
   schema: {
     siteApiEndpoints: {

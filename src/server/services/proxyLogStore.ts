@@ -3,6 +3,7 @@ import {
   schema,
   hasProxyLogBillingDetailsColumn,
   hasProxyLogClientColumns,
+  hasProxyLogClientHttpStatusColumn,
   hasProxyLogDownstreamApiKeyIdColumn,
   hasProxyLogStreamTimingColumns,
 } from '../db/index.js';
@@ -33,6 +34,8 @@ export type ProxyLogInsertInput = {
   modelActual?: string | null;
   status?: string | null;
   httpStatus?: number | null;
+  /** 客户端实收状态码（观测列，可空）。与 `httpStatus` 不是同一件事，见 `schema.proxyLogs.clientHttpStatus`。 */
+  clientHttpStatus?: number | null;
   isStream?: boolean | null;
   firstByteLatencyMs?: number | null;
   latencyMs?: number | null;
@@ -273,6 +276,18 @@ export function isMissingProxyLogClientColumnsError(error: unknown): boolean {
     );
 }
 
+/** `proxy_logs.client_http_status` 缺列（老库）：只丢这一列的观测，不弄丢整条日志。 */
+export function isMissingProxyLogClientHttpStatusColumnError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  return lowered.includes('client_http_status')
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
 export function isMissingProxyLogStreamTimingColumnsError(error: unknown): boolean {
   const lowered = normalizeProxyLogStoreErrorMessage(error);
   const hasStreamTimingColumnReference = [
@@ -333,11 +348,14 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<number
   const requestedStreamTimingFields = input.isStream != null || input.firstByteLatencyMs != null;
   const includeStreamTimingFields = requestedStreamTimingFields
     && await hasProxyLogStreamTimingColumns();
+  const includeClientHttpStatus = input.clientHttpStatus != null
+    && await hasProxyLogClientHttpStatusColumn();
 
   let allowBillingDetails = includeBillingDetails;
   let allowDownstreamApiKeyId = includeDownstreamApiKeyId;
   let allowClientFields = includeClientFields;
   let allowStreamTimingFields = includeStreamTimingFields;
+  let allowClientHttpStatus = includeClientHttpStatus;
 
   while (true) {
     const values = {
@@ -350,6 +368,7 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<number
         : {}),
       ...(allowBillingDetails ? { billingDetails: serializedBillingDetails } : {}),
       ...(allowDownstreamApiKeyId ? { downstreamApiKeyId: input.downstreamApiKeyId } : {}),
+      ...(allowClientHttpStatus ? { clientHttpStatus: input.clientHttpStatus ?? null } : {}),
       ...(allowClientFields
         ? {
           clientFamily: input.clientFamily ?? null,
@@ -383,6 +402,11 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<number
 
       if (allowStreamTimingFields && isMissingProxyLogStreamTimingColumnsError(error)) {
         allowStreamTimingFields = false;
+        continue;
+      }
+
+      if (allowClientHttpStatus && isMissingProxyLogClientHttpStatusColumnError(error)) {
+        allowClientHttpStatus = false;
         continue;
       }
 

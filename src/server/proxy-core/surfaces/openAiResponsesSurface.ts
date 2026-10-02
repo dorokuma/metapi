@@ -92,6 +92,7 @@ import {
   selectSurfaceChannelForAttempt,
   truncateUpstreamErrorMessage,
   trySurfaceOauthRefreshRecovery,
+  writeSurfaceInBandStreamError,
   type SurfaceRetryTerminalFailure,
 } from './sharedSurface.js';
 import {
@@ -324,12 +325,18 @@ export async function handleOpenAiResponsesSurfaceRequest(
     });
     const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
     const maxRetries = getProxyMaxChannelRetries();
+    // 本轮出口是否已 `reply.hijack()`（见下方 `startSseResponse`）：已 hijack 后终态出口不能再
+    // `reply.code().send()`，只能写 in-band 错误帧；同时它是观测列 `client_http_status` 的取值依据
+    // （已 hijack ⇒ 客户端实收 200）。与 chatSurface 同语义：**每轮轮首重置**（见 while 循环首行）。
+    let streamStarted = false;
     const failureToolkit = createSurfaceFailureToolkit({
       warningScope: 'responses',
       downstreamPath,
       maxRetries,
       clientContext,
       downstreamApiKeyId,
+      // 口径与 chat 面一致：成功=200；未 hijack 失败=出口状态码；已 hijack 流式失败=200。
+      resolveClientHttpStatus: () => (streamStarted ? 200 : 502),
     });
     const stickySessionKey = buildSurfaceStickySessionKey({
       clientContext,
@@ -367,6 +374,28 @@ export async function handleOpenAiResponsesSurfaceRequest(
         finalResponseBody: responseBody,
       });
     };
+    /**
+     * 终态失败出口（与 `chatSurface.ts` 的 `respondTerminalFailure` 同口径）。
+     *
+     * 流式出口一旦 `reply.hijack()`（`startSseResponse`）就不能再 `reply.code().send(...)`：
+     * 那会在已发出的 200 头之后又写一份状态行 + JSON 体（双写），并抛
+     * `ERR_HTTP_HEADERS_SENT` / `FST_ERR_REP_ALREADY_SENT`。此时改为写一帧标准 in-band 错误
+     * （`writeSurfaceInBandStreamError` 自带 `writableEnded`/`destroyed`/`closed` 门禁，且**绝不**
+     * 追加 `[DONE]`）；未 hijack 时才走原 `reply.code(status).send(payload)`。
+     */
+    const respondTerminalFailure = (status: number, payload: any) => {
+      if (streamStarted) {
+        writeSurfaceInBandStreamError({
+          reply,
+          downstreamFormat: 'openai',
+          message: typeof payload?.error?.message === 'string'
+            ? truncateUpstreamErrorMessage(payload.error.message)
+            : null,
+        });
+        return reply;
+      }
+      return reply.code(status).send(payload);
+    };
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
     // 本轮终态失败的真实原因：在确定「继续重试」之前留存（真实 status / 报错体 / 上游路径）。
@@ -375,6 +404,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
     let lastRetryFailure: SurfaceRetryTerminalFailure | null = null;
 
     while (retryCount <= maxRetries) {
+      // 轮首重置：新的一轮不能沿用上一轮是否已 hijack 的事实（否则会误写 in-band 帧 / 误判实收状态码）。
+      streamStarted = false;
       const stickyPreferredChannelId = retryCount === 0
         ? getSurfaceStickyPreferredChannelId(stickySessionKey)
         : null;
@@ -922,11 +953,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
         });
       }
       const channelLease = leaseResult.lease;
+      // #5：网络类异常归一后，失败出口也能拿到最后一次尝试的上游路径（写进 `final_upstream_path`）。
+      let lastEndpointFailureUpstreamPath: string | null = null;
 
       try {
         const endpointResult = await runWithSiteApiEndpointPool(selected.site, async (target) => {
           const result = await executeEndpointResultForSiteApiBaseUrl(target.baseUrl);
           if (!result.ok) {
+            lastEndpointFailureUpstreamPath = result.upstreamPath ?? null;
             const upstreamFailure = new SiteApiEndpointRequestError(result.errText || 'unknown error', {
               status: result.status || 502,
               rawErrText: result.rawErrText || result.errText || 'unknown error',
@@ -984,6 +1018,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
           const startSseResponse = () => {
             reply.hijack();
+            streamStarted = true;
             reply.raw.statusCode = 200;
             reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
             reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1009,8 +1044,42 @@ export async function handleOpenAiResponsesSurfaceRequest(
             },
           };
           let upstreamUsagePresent = false;
+          // 终结帧观测（与 chatSurface 同口径）：responses 流会话正常收尾时总会写一个终止事件
+          // （`response.completed` / `response.incomplete` / `response.failed` / `[DONE]`）；
+          // 若流在任何终止事件之前就结束（上游 body 中途 terminated），客户端会拿到「无终结的流」。
+          const responsesTerminalFrameMatcher = /response\.(completed|failed|incomplete)|\[DONE\]/;
+          let responsesTerminalFrameSeen = false;
+          let responsesStreamFrameSeen = false;
+          const noteResponsesFrame = (chunk: string) => {
+            responsesStreamFrameSeen = true;
+            if (!responsesTerminalFrameSeen && responsesTerminalFrameMatcher.test(chunk)) {
+              responsesTerminalFrameSeen = true;
+            }
+          };
           const writeLines = (lines: string[]) => {
-            for (const line of lines) reply.raw.write(line);
+            for (const line of lines) {
+              noteResponsesFrame(line);
+              reply.raw.write(line);
+            }
+          };
+          /**
+           * 已 hijack 的流式出口统一 `end()` 点：无终止帧时补一帧标准 in-band 错误
+           * （已 hijack 后不能 `reply.code().send()`：`ERR_HTTP_HEADERS_SENT`；且绝不追加 `[DONE]`）。
+           * 一帧都没写过的失败仍保持既有行为（直接 end，交由调用方的 JSON 失败出口）。
+           */
+          const streamSink = {
+            end() {
+              if (reply.raw.writableEnded) return;
+              if (responsesStreamFrameSeen && !responsesTerminalFrameSeen) {
+                writeSurfaceInBandStreamError({
+                  reply,
+                  downstreamFormat: 'openai',
+                  message: 'Upstream stream interrupted before a terminal event',
+                });
+                return;
+              }
+              reply.raw.end();
+            },
           };
           const websocketTransportRequest = isResponsesWebsocketTransportRequest(request.headers as Record<string, unknown>);
           const streamSession = openAiResponsesTransformer.proxyStream.createSession({
@@ -1029,6 +1098,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             },
             writeLines,
             writeRaw: (chunk) => {
+              noteResponsesFrame(chunk);
               reply.raw.write(chunk);
             },
           });
@@ -1038,7 +1108,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               startSseResponse();
               const streamResult = await streamSession.run(
                 createSingleChunkStreamReader(rawText),
-                reply.raw,
+                streamSink,
               );
               const latency = Date.now() - startTime;
 	              if (streamResult.status === 'failed') {
@@ -1132,11 +1202,11 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	                terminalFailureOutcome.payload,
 	                successfulUpstreamPath,
 	              );
-	              return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
+	              return respondTerminalFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload);
             }
 
             startSseResponse();
-            const streamResult = streamSession.consumeUpstreamFinalPayload(upstreamData, rawText, reply.raw);
+            const streamResult = streamSession.consumeUpstreamFinalPayload(upstreamData, rawText, streamSink);
 	            if (streamResult.status === 'failed') {
 	              clearSurfaceStickyChannel({
 	                stickySessionKey,
@@ -1227,7 +1297,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 
               const streamResult = await streamSession.run(
                 createSingleChunkStreamReader(rawText),
-                reply.raw,
+                streamSink,
               );
               const latency = Date.now() - startTime;
               if (streamResult.status === 'failed') {
@@ -1288,7 +1358,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               },
             }
             : baseReader;
-          const streamResult = await streamSession.run(reader, reply.raw);
+          const streamResult = await streamSession.run(reader, streamSink);
           rawText += decoder.decode();
 
           const latency = Date.now() - startTime;
@@ -1414,7 +1484,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            terminalFailureOutcome.payload,
 	            successfulUpstreamPath,
 	          );
-	          return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
+	          return respondTerminalFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload);
         }
         const normalized = openAiResponsesTransformer.transformFinalResponse(
           upstreamData,
@@ -1493,7 +1563,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             }
             const payload = { error: { message: failure.message, type: 'server_error' as const } };
             await finalizeDebugFailure(failure.status, payload, null);
-            return reply.code(failure.status).send(payload);
+            return respondTerminalFailure(failure.status, payload);
           }
           const isSiteApiEndpointFailure = (
             err instanceof SiteApiEndpointRequestError
@@ -1522,7 +1592,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               lastRetryFailure = {
                 status: endpointFailureStatus || 502,
                 payload: finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err?.message || 'unknown error').payload,
-                upstreamPath: null,
+                upstreamPath: lastEndpointFailureUpstreamPath,
               };
               retryCount += 1;
               continue;
@@ -1530,9 +1600,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
             await finalizeDebugFailure(
               terminalFailureOutcome.status,
               terminalFailureOutcome.payload,
-              null,
+              lastEndpointFailureUpstreamPath,
             );
-            return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
+            return respondTerminalFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload);
           }
 	        const failureOutcome = await failureToolkit.handleExecutionError({
 	          selected,
@@ -1562,7 +1632,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	            terminalFailureOutcome.payload,
 	            null,
 	          );
-		        return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
+		        return respondTerminalFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload);
 	      } finally {
 	        channelLease.release();
 	      }

@@ -232,6 +232,13 @@
       "when": 1790320000001,
       "tag": "0031_proxy_logs_usage_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1790909899468,
+      "tag": "0032_proxy_logs_client_http_status",
+      "breakpoints": true
     }
   ]
 }

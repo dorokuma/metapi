@@ -77,6 +77,7 @@ import {
   selectSurfaceChannelForAttempt,
   truncateUpstreamErrorMessage,
   trySurfaceOauthRefreshRecovery,
+  writeSurfaceInBandStreamError,
   type SurfaceRetryTerminalFailure,
 } from './sharedSurface.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
@@ -308,6 +309,28 @@ function truncateStreamFailureMessage(message: string | null): string | null {
   return message === null ? null : truncateUpstreamErrorMessage(message);
 }
 
+/**
+ * 诊断字段 `has_content` 的取值：载荷里是否真有可见文本。
+ *
+ * 原来只看 `payload.content` / `choices[].content`，而 chat 协议里文本的真实载体是两个它都不认的位置：
+ * 流式帧在 `choices[].delta.content`（`chat.completion.chunk`），完整 body 在 `choices[].message.content`
+ * （`chat.completion`）。于是该字段在两种真实形下**恒假**——恒假的诊断字段比没有更糟，排障时会把
+ * 「上游明明给了内容」误读成「上游没给内容」。故把四种载体一并认进去；纯观测字段，不影响任何响应行为。
+ */
+function payloadHasVisibleContent(record: Record<string, unknown> | null | undefined): boolean {
+  if (!record) return false;
+  if (record.content != null) return true;
+  if (isRecord(record.delta) && record.delta.content != null) return true;
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  return choices.some((choice) => {
+    if (!isRecord(choice)) return false;
+    if (choice.content != null) return true;
+    if (isRecord(choice.delta) && choice.delta.content != null) return true;
+    if (isRecord(choice.message) && choice.message.content != null) return true;
+    return false;
+  });
+}
+
 export async function handleChatSurfaceRequest(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -383,6 +406,10 @@ export async function handleChatSurfaceRequest(
     maxRetries,
     clientContext,
     downstreamApiKeyId,
+    // 观测列 `client_http_status` 取值器：`streamStarted` 标「本轮是否已 reply.hijack()」。
+    // 已 hijack（哪怕只在首帧后失败）⇒ 客户端实收 200 + 流内错误帧；未 hijack ⇒ 实收 502 JSON。
+    // `streamStarted` 在下方 handler 作用域声明，供此闭包跨重试轮次实时读取；每轮轮首重置。
+    resolveClientHttpStatus: () => (streamStarted ? 200 : 502),
   });
   const stickySessionKey = buildSurfaceStickySessionKey({
     clientContext,
@@ -400,7 +427,26 @@ export async function handleChatSurfaceRequest(
     requestHeaders: request.headers as Record<string, unknown>,
     requestBody: request.body,
   });
-  const finalizeDebugFailure = async (status: number, payload: unknown, upstreamPath: string | null = null) => {
+  // 本轮出口是否已开始向客户端写流（`reply.hijack()` 后只能走 200 + 流内错误帧）。
+  // 提升到 handler 作用域：`failureToolkit` 的观测取值器要跨重试轮次读取它，轮首重置。
+  let streamStarted = false;
+  /**
+   * 终态失败出口写 debug trace。
+   *
+   * `capturedUpstreamText` 是本次尝试已读到的**上游原始字节**（流式路径累积的 `rawText`）。采集开关
+   * （`captureStreamChunks`）开启且确有字节时，trace 的 body **保留上游原文**——否则失败出口永远拿
+   * 自写的 502 JSON 覆盖 body，trace 里看不到一个上游字节，排障只能拿到本仓合成文案（上游到底回了
+   * 什么、是什么帧形，全部不可得）。未读到字节 / 未开采集时保持既有行为（写出口 payload）。
+   */
+  const finalizeDebugFailure = async (
+    status: number,
+    payload: unknown,
+    upstreamPath: string | null = null,
+    capturedUpstreamText: string | null = null,
+  ) => {
+    const preserveUpstreamText = debugTrace?.options.captureStreamChunks === true
+      && typeof capturedUpstreamText === 'string'
+      && capturedUpstreamText.length > 0;
     await safeFinalizeSurfaceProxyDebugTrace(debugTrace, {
       finalStatus: 'failed',
       finalHttpStatus: status,
@@ -408,7 +454,7 @@ export async function handleChatSurfaceRequest(
       finalResponseHeaders: {
         'content-type': 'application/json',
       },
-      finalResponseBody: payload,
+      finalResponseBody: preserveUpstreamText ? capturedUpstreamText : payload,
     });
   };
   const finalizeDebugSuccess = async (status: number, upstreamPath: string | null, responseHeaders: unknown, responseBody: unknown) => {
@@ -429,6 +475,8 @@ export async function handleChatSurfaceRequest(
   let lastRetryFailure: SurfaceRetryTerminalFailure | null = null;
 
   while (retryCount <= maxRetries) {
+    // 轮首重置：`streamStarted` 已提升到 handler 作用域，新的一轮不能沿用上一轮是否已 hijack 的事实。
+    streamStarted = false;
     const stickyPreferredChannelId = retryCount === 0
       ? getSurfaceStickyPreferredChannelId(stickySessionKey)
       : null;
@@ -795,11 +843,34 @@ export async function handleChatSurfaceRequest(
       });
     }
     const channelLease = leaseResult.lease;
+    // #5：网络类异常归一后，失败出口也能拿到最后一次尝试的上游路径（写进 `final_upstream_path`）。
+    let lastEndpointFailureUpstreamPath: string | null = null;
+    // SSE 是否已 `reply.hijack()`（一旦 hijack，终态出口不能再 `reply.code().send()`）。
+    // 本变量在 handler 作用域声明、每轮轮首重置（见上方 `streamStarted = false`）。
+    /**
+     * 终态失败出口：SSE 已 hijack 时不能再 `reply.code().send(...)`（`ERR_HTTP_HEADERS_SENT`），
+     * 改为写一帧标准 in-band 错误后 `end()`（帧形按下游协议，见 `buildSurfaceInBandStreamErrorFrame`）；
+     * 未 hijack 时保持既有 `reply.code(status).send(payload)`。
+     */
+    const respondTerminalFailure = (status: number, payload: any) => {
+      if (streamStarted) {
+        writeSurfaceInBandStreamError({
+          reply,
+          downstreamFormat,
+          message: truncateStreamFailureMessage(
+            typeof payload?.error?.message === 'string' ? payload.error.message : null,
+          ),
+        });
+        return reply;
+      }
+      return reply.code(status).send(payload);
+    };
 
     try {
       const endpointResult = await runWithSiteApiEndpointPool(selected.site, async (target) => {
         const result = await executeEndpointResultForSiteApiBaseUrl(target.baseUrl);
         if (!result.ok) {
+          lastEndpointFailureUpstreamPath = result.upstreamPath ?? null;
           const upstreamFailure = new SiteApiEndpointRequestError(result.errText || 'unknown error', {
             status: result.status || 502,
             rawErrText: result.rawErrText || result.errText || 'unknown error',
@@ -816,7 +887,6 @@ export async function handleChatSurfaceRequest(
 
       if (isStream) {
         const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
-        let streamStarted = false;
         const startSseResponse = () => {
           if (streamStarted) return;
           streamStarted = true;
@@ -871,17 +941,48 @@ export async function handleChatSurfaceRequest(
           await persistUpstreamObservation(true, successfulUpstreamPath, proxyLogWrite);
         };
 
+        // 终结帧观测：SSE 已 hijack 后，能告诉客户端「这轮成功还是失败」的只剩流内终结帧
+        // （openai 的 `data: [DONE]` / claude 的 `message_stop`）。生命周期固定会在退出前
+        // `streamResponse.end()`，所以在这里记住「有没有写过终结帧」与「断流原因」。
+        const sseTerminalFrameMatcher = downstreamFormat === 'claude'
+          ? /"type"\s*:\s*"message_stop"/
+          : /\[DONE\]/;
+        let sseTerminalFrameSeen = false;
+        // M1：本轮是否已向客户端交付过带内失败信号（上游带内错误帧 / legacy `finish_reason:"error"` 块 /
+        // 上游原生 Anthropic 错误帧三条出口都会置真）。补帧门禁看它：已知原因时绝不补第二帧。
+        let sseInBandFailureDelivered = false;
+        let streamInterruptionMessage: string | null = null;
+        const noteSseFrame = (chunk: string) => {
+          if (!sseTerminalFrameSeen && sseTerminalFrameMatcher.test(chunk)) {
+            sseTerminalFrameSeen = true;
+          }
+        };
         const writeLines = (lines: string[]) => {
           startSseResponse();
           for (const line of lines) {
+            noteSseFrame(line);
             reply.raw.write(line);
           }
         };
         const streamResponse = {
           end() {
-            if (streamStarted) {
-              reply.raw.end();
+            if (!streamStarted) return;
+            // 已 hijack 且全程没见过终结帧 ⇒ 客户端拿到的是「无终结的流」（上游 body 中途 terminated /
+            // 流在任何终结帧前结束）。此时 `reply.code().send(...)` 会 ERR_HTTP_HEADERS_SENT，
+            // 改为写一帧标准 in-band 错误后 end()；**不**追加 `[DONE]` / `message_stop`。
+            // M1：若本轮已交付过带内失败信号（带内错误帧 / legacy 错误块 / 原生 Anthropic 错误帧），客户端
+            // 已知道失败原因，绝不在此又补一帧自写的 `Upstream stream interrupted…`（双错误帧）。
+            if (!sseTerminalFrameSeen && !sseInBandFailureDelivered) {
+              writeSurfaceInBandStreamError({
+                reply,
+                downstreamFormat,
+                message: truncateStreamFailureMessage(
+                  streamInterruptionMessage || 'Upstream stream interrupted before a terminal event',
+                ),
+              });
+              return;
             }
+            reply.raw.end();
           },
         };
         const streamSession = openAiChatTransformer.proxyStream.createSession({
@@ -893,6 +994,13 @@ export async function handleChatSurfaceRequest(
           // Claude stays false (its closeout is message_delta/message_stop).
           includeUsage: downstreamFormat === 'openai'
             && (requestEnvelope.metadata as { streamOptionsIncludeUsage?: boolean | null } | undefined)?.streamOptionsIncludeUsage === true,
+          // M2：带内失败帧到来时，会话要知道「有没有已向下游写出的字节」：没写过 ⇒ 不 hijack，
+          // 交给下面 4 处 `!streamStarted` 的 502 出口用状态码 + 上游原文交付。
+          hasStartedDownstreamWrite: () => streamStarted,
+          // M1：把「已交付带内失败信号」的事实回报给 `streamResponse.end()` 的补帧门禁。
+          onInBandFailureDelivered: () => {
+            sseInBandFailureDelivered = true;
+          },
           onParsedPayload: (payload) => {
             if (payload && typeof payload === 'object') {
               upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(payload);
@@ -908,7 +1016,7 @@ export async function handleChatSurfaceRequest(
             if (!choice) return;
             const finishReason = asTrimmedString(choice.finish_reason);
             const hasToolCalls = !!(record.tool_calls || (Array.isArray(record.choices) && record.choices.some((c: any) => c.tool_calls)));
-            const hasContent = !!(record.content != null || (Array.isArray(record.choices) && record.choices.some((c: any) => c.content != null)));
+            const hasContent = payloadHasVisibleContent(record);
             try {
               request.log.info({
                 surface: 'chat/upstream-stream-event',
@@ -923,9 +1031,33 @@ export async function handleChatSurfaceRequest(
           writeLines,
           writeRaw: (chunk) => {
             startSseResponse();
+            noteSseFrame(chunk);
             reply.raw.write(chunk);
           },
         });
+        /**
+         * 断流取证：上游 body 中途 `terminated` 时 `reader.read()` 会抛，异常沿生命周期 `finally`
+         * 冒泡使 `streamSession.run` reject。这里就地记下 `.cause` 链上的原因，供 `streamResponse.end()`
+         * 写 in-band 错误帧时取用；异常本身原样再抛，不改任何既有失败分类 / 重试语义。
+         */
+        const guardStreamReader = <T extends {
+          read(): Promise<{ done: boolean; value?: Uint8Array }>;
+          cancel(reason?: unknown): Promise<unknown>;
+          releaseLock(): void;
+        }>(reader: T): T => ({
+          read: async () => {
+            try {
+              return await reader.read();
+            } catch (error) {
+              streamInterruptionMessage = streamInterruptionMessage
+                || formatErrorCause(error)
+                || 'upstream stream interrupted';
+              throw error;
+            }
+          },
+          cancel: (reason?: unknown) => reader.cancel(reason),
+          releaseLock: () => reader.releaseLock(),
+        }) as unknown as T;
         let rawText = '';
         if (isGeminiNativeRuntimePath(successfulUpstreamPath)) {
           const nativeReader = createGeminiNativeOpenAiStreamReader(
@@ -939,7 +1071,10 @@ export async function handleChatSurfaceRequest(
               rawText += chunk;
             },
           );
-          const streamResult = await streamSession.run(nativeReader, streamResponse);
+          const streamResult = await streamSession.run(
+            nativeReader ? guardStreamReader(nativeReader) : nativeReader,
+            streamResponse,
+          );
           const latency = Date.now() - startTime;
           if (streamResult.status === 'failed') {
             clearSurfaceStickyChannel({
@@ -964,7 +1099,7 @@ export async function handleChatSurfaceRequest(
                 message: streamResult.errorMessage,
                 type: 'stream_error',
               },
-            }, successfulUpstreamPath);
+            }, successfulUpstreamPath, rawText);
             if (!streamStarted) {
               return reply.code(502).send({
                 error: {
@@ -998,7 +1133,7 @@ export async function handleChatSurfaceRequest(
           rawText = fallbackText;
           if (looksLikeResponsesSseText(fallbackText)) {
             const streamResult = await streamSession.run(
-              createSingleChunkStreamReader(fallbackText),
+              guardStreamReader(createSingleChunkStreamReader(fallbackText)),
               streamResponse,
             );
             const latency = Date.now() - startTime;
@@ -1024,7 +1159,7 @@ export async function handleChatSurfaceRequest(
                   message: streamResult.errorMessage,
                   type: 'stream_error',
                 },
-              }, successfulUpstreamPath);
+              }, successfulUpstreamPath, rawText);
               if (!streamStarted) {
                 return reply.code(502).send({
                   error: {
@@ -1129,7 +1264,7 @@ export async function handleChatSurfaceRequest(
                 message: streamResult.errorMessage,
                 type: 'stream_error',
               },
-            }, successfulUpstreamPath);
+            }, successfulUpstreamPath, rawText);
             if (!streamStarted) {
               return reply.code(502).send({
                 error: {
@@ -1180,7 +1315,10 @@ export async function handleChatSurfaceRequest(
               },
             }
             : baseReader;
-          const streamResult = await streamSession.run(reader, streamResponse);
+          const streamResult = await streamSession.run(
+            reader ? guardStreamReader(reader) : reader,
+            streamResponse,
+          );
           rawText += decoder.decode();
 
           const latency = Date.now() - startTime;
@@ -1207,7 +1345,7 @@ export async function handleChatSurfaceRequest(
                 message: streamResult.errorMessage,
                 type: 'stream_error',
               },
-            }, successfulUpstreamPath);
+            }, successfulUpstreamPath, rawText);
             if (!streamStarted) {
               return reply.code(502).send({
                 error: {
@@ -1284,7 +1422,7 @@ export async function handleChatSurfaceRequest(
           upstream_model: modelName,
           raw_finish_reason: upstreamFinishReason || null,
           has_tool_calls: !!(upstreamRecord && (upstreamRecord.tool_calls || (Array.isArray((upstreamRecord as any)?.choices) && (upstreamRecord as any).choices.some((c: any) => c.tool_calls)))),
-          has_content: !!(upstreamRecord && (upstreamRecord.content != null || (Array.isArray((upstreamRecord as any)?.choices) && (upstreamRecord as any).choices.some((c: any) => c.content != null)))),
+          has_content: payloadHasVisibleContent(upstreamRecord),
         }, 'chat surface upstream final payload diagnostic');
       } catch {}
       if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
@@ -1402,7 +1540,7 @@ export async function handleChatSurfaceRequest(
         }
         const payload = { error: { message: failure.message, type: 'server_error' as const } };
         await finalizeDebugFailure(failure.status, payload, null);
-        return reply.code(failure.status).send(payload);
+        return respondTerminalFailure(failure.status, payload);
       }
       const isSiteApiEndpointFailure = (
         err instanceof SiteApiEndpointRequestError
@@ -1424,7 +1562,7 @@ export async function handleChatSurfaceRequest(
           };
         }
         await finalizeDebugFailure(endpointFailureStatus || 400, payload, null);
-        return reply.code(endpointFailureStatus || 400).send(payload);
+        return respondTerminalFailure(endpointFailureStatus || 400, payload);
       }
       if (isSiteApiEndpointFailure) {
         const failureOutcome = await failureToolkit.handleUpstreamFailure({
@@ -1447,7 +1585,7 @@ export async function handleChatSurfaceRequest(
           lastRetryFailure = {
             status: endpointFailureStatus || 502,
             payload: finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error').payload,
-            upstreamPath: null,
+            upstreamPath: lastEndpointFailureUpstreamPath,
           };
           retryCount += 1;
           continue;
@@ -1455,9 +1593,9 @@ export async function handleChatSurfaceRequest(
         await finalizeDebugFailure(
           terminalFailureOutcome.status,
           terminalFailureOutcome.payload,
-          null,
+          lastEndpointFailureUpstreamPath,
         );
-        return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
+        return respondTerminalFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload);
       }
       const failureOutcome = await failureToolkit.handleExecutionError({
         selected,
@@ -1487,7 +1625,7 @@ export async function handleChatSurfaceRequest(
         terminalFailureOutcome.payload,
         null,
       );
-      return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
+      return respondTerminalFailure(terminalFailureOutcome.status, terminalFailureOutcome.payload);
       } finally {
         channelLease.release();
       }

@@ -323,7 +323,7 @@ const UPSTREAM_PARAM_COMPAT_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,64}$/
 export default function UpstreamSettings() {
   const isMobile = useIsMobile();
   const [runtime, setRuntime] = useState<RuntimeSettings>({
-    proxyEmptyContentFailEnabled: false,
+    proxyEmptyContentFailEnabled: true,
     proxyErrorKeywords: [],
     codexUpstreamWebsocketEnabled: false,
     responsesCompactFallbackToResponsesEnabled: false,
@@ -1360,7 +1360,7 @@ export default function UpstreamSettings() {
               checked={runtime.proxyEmptyContentFailEnabled}
               onChange={(e) => setRuntime((prev) => ({ ...prev, proxyEmptyContentFailEnabled: e.target.checked }))}
             />
-            空内容（completion=0，即使 prompt 有词元也算）判定失败
+            空内容（completion=0，即使 prompt 有词元也算）判定失败（默认开启）
           </label>
           <div>
             <button onClick={saveProxyFailureRules} disabled={savingProxyFailureRules} className="btn btn-primary">

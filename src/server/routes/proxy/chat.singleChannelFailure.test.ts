@@ -172,6 +172,8 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
     app = Fastify();
     await app.register(routesModule.chatProxyRoute);
     await app.register(responsesRoutesModule.responsesProxyRoute);
+    // R4：claude 下游（`/v1/messages`）的失败语义也要在这一套真实 sqlite 夹具下可见。
+    await app.register(routesModule.claudeMessagesProxyRoute);
   });
 
   beforeEach(async () => {
@@ -290,9 +292,13 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
     const response = await injectChat();
 
     expect(response.statusCode).toBe(502);
-    // 网络层执行失败没有真实上游 HTTP 响应 ⇒ 分流为 server_error（502 为合成值）。
-    expect(response.json()?.error?.type).toBe('server_error');
-    expect(String(response.json()?.error?.message)).toContain('Upstream error');
+    // 网络层异常（fetch reject）已归一到与「上游返回 !ok」同路径（#5），所以 type 从
+    // `server_error` 纠正为 `upstream_error`；502 仍是本仓合成的状态码。
+    expect(response.json()?.error?.type).toBe('upstream_error');
+    // 归一后同走上游失败路径：客户端拿到的是**真实原因**（不再是笼统的 'Upstream error'），
+    // 这也是「重试耗尽回传上游真实原因」既有口径的一部分。
+    expect(String(response.json()?.error?.message)).toContain('network unreachable');
+    expect(String(response.json()?.error?.message)).toContain('HTTP 502');
     expect(safeFinalizeSurfaceProxyDebugTraceMock).toHaveBeenCalledWith(
       expect.objectContaining({ traceId: 701 }),
       expect.objectContaining({ finalHttpStatus: 502 }),
@@ -536,5 +542,163 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
     expect(message).toContain('HTTP 429');
     // 上游原文被截断，不会整段回传。
     expect(message.includes('y'.repeat(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH))).toBe(false);
+  });
+
+  it('keeps the upstream raw bytes in the debug trace when a stream fails in-band (capture on)', async () => {
+    // C：流式失败出口原来一律用自写的 502 JSON（`{error:{message,type:'stream_error'}}`）覆盖 debug trace
+    // 的 body ⇒ trace 的 `final_response_body_json` 里看不到一个上游字节（上游到底回了什么、是什么帧形
+    // 全部不可得）。采集开关（`captureStreamChunks`）开启且确实读到上游字节时，改为保留上游原文。
+    startSurfaceProxyDebugTraceMock.mockResolvedValue({
+      traceId: 701,
+      options: {
+        enabled: true,
+        captureHeaders: true,
+        captureBodies: true,
+        captureStreamChunks: true,
+        targetSessionId: '',
+        targetClientKind: '',
+        targetModel: '',
+        retentionHours: 24,
+        maxBodyBytes: 262144,
+      },
+    });
+
+    const encoder = new TextEncoder();
+    const upstreamSse = 'data: {"error":{"code":"stream_initialization_failed","message":"Rate limit exceeded: Retry after 29s.","request_id":"req_trace"}}\n\ndata: [DONE]\n\n';
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(upstreamSse));
+        controller.close();
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // 客户端侧（M2 后）：未写出过字节 ⇒ 不 hijack，走既有 HTTP 层 502 出口（状态码 + 上游原文）。
+    expect(response.statusCode).toBe(502);
+    expect(String(response.headers['content-type'] || '')).not.toContain('text/event-stream');
+    expect(String(response.json()?.error?.message || '')).toContain('Rate limit exceeded: Retry after 29s.');
+
+    const failureFinalize = safeFinalizeSurfaceProxyDebugTraceMock.mock.calls
+      .find((call) => (call[1] as any)?.finalStatus === 'failed');
+    expect(failureFinalize).toBeTruthy();
+    // trace 的 body 是上游原始字节（不再是自写 502 JSON）；上游路径也落库。客户端拿到的 502 JSON 是封顶过的，
+    // 上游原文只能从 trace / 落库看——这正是 C 的可用性价值。
+    expect((failureFinalize![1] as any).finalResponseBody).toBe(upstreamSse);
+    expect((failureFinalize![1] as any).finalUpstreamPath).toBeTruthy();
+
+    // 落库：`proxy_logs.error_message` 保留上游原文（含 code/request_id 后缀），不封顶到 1000。
+    const proxyLogRows = await db.select().from(schema.proxyLogs).all();
+    expect(proxyLogRows.length).toBeGreaterThan(0);
+    const streamFailureRow = proxyLogRows.find((row) => Number(row.clientHttpStatus) === 502 && row.status === 'failed');
+    expect(streamFailureRow).toBeTruthy();
+    const errorMessage = String(streamFailureRow?.errorMessage ?? '');
+    expect(errorMessage).toContain('Rate limit exceeded: Retry after 29s.');
+    expect(errorMessage).toContain('code=stream_initialization_failed');
+    expect(errorMessage).toContain('request_id=req_trace');
+  });
+
+  it('claude downstream: an already-written legacy response.failed frame becomes one event: error frame, not end_turn/message_stop', async () => {
+    // R4（R3-⑥ 闭环）：claude 客户端 + 上游老形失败（`response.failed`）+ **已写出字节**。
+    // 旧行为：该帧继续走归一化块（`response.failed` ⇒ `finish_reason:'stop'`），claude 序列化器再把它
+    // 渲染成 `message_delta{stop_reason:'end_turn'}` + `message_stop` ⇒ 客户端看到「正常结束（带部分内容）」
+    // 而服务端记 failed（服务端与客户端对同一轮给出相反结论）。
+    // 新行为：复用 M1 已在用的 claude 带内错误帧出口，发**恰好一帧** `event: error`（message = 上游原文，
+    // 保留尾部 `(request_id=…)` 后缀），且不含任何本仓生成的终结帧；已写出的内容原样保留在前。
+    // 另两处行为不变并各有既有用例守着：未写字节的 legacy 帧 ⇒ 502 + 上游原文
+    // （`chat.stream.test.ts` 的 `gates the legacy failure frames the same way…` ① / `delivers an HTTP 502 …`）、
+    // 新形 M1 的 claude 形恰一帧错误（`chat.stream.test.ts` 的 `claude downstream: an in-band stream_error frame
+    // produces exactly one error frame`）。
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: {
+        id: 901,
+        name: 'openai-site',
+        url: 'https://api.openai.com',
+        platform: 'openai',
+        apiKey: null,
+        useSystemProxy: false,
+        proxyUrl: null,
+        maxConcurrency: null,
+      },
+      account: {
+        id: 33,
+        username: 'single-channel-user',
+        accessToken: '',
+        apiToken: 'sk-openai',
+        status: 'active',
+        checkinEnabled: false,
+        extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+      },
+      tokenName: 'default',
+      tokenValue: 'sk-openai',
+      actualModel: 'gpt-4o-mini',
+    });
+
+    const encoder = new TextEncoder();
+    // 上游形态：`/v1/responses` SSE（claude 下游 + openai 站点的上游路径），先写出一段内容（字节已到客户端），
+    // 随后以老形 `response.failed` 收场。
+    const upstreamSse = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_claude_failed","model":"gpt-4o-mini","created_at":1706000000,"status":"in_progress","output":[]}}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_claude_failed","delta":"partial answer"}\n\n',
+      'event: response.failed\ndata: {"type":"response.failed","request_id":"req_claude_legacy_failed","response":{"id":"resp_claude_failed","model":"gpt-4o-mini","status":"failed","error":{"message":"tool execution failed"}}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('');
+    fetchMock.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(upstreamSse));
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      payload: {
+        model: 'claude-opus-4-6',
+        stream: true,
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // ① 已 hijack：状态码停在 200，失败语义只能落在流内的错误帧上。
+    expect(response.statusCode).toBe(200);
+    expect(String(response.headers['content-type'] || '')).toContain('text/event-stream');
+    // ② 已写出的内容原样保留在前（不是把已写字节丢掉）。
+    expect(response.body).toContain('partial answer');
+    // ③ 恰好一帧 claude 错误帧，message = 上游原文 + 尾部标识后缀。
+    expect(response.body.split('event: error').length - 1).toBe(1);
+    expect(response.body).toContain('"type":"error"');
+    expect(response.body).toContain('tool execution failed');
+    expect(response.body).toContain('request_id=req_claude_legacy_failed');
+    // ④ 不再给对方任何「正常结束」信号：既无 `message_delta`（end_turn），也无 `message_stop`。
+    expect(response.body).not.toContain('message_delta');
+    expect(response.body).not.toContain('end_turn');
+    expect(response.body).not.toContain('message_stop');
+    // ⑤ 落库：服务端仍记 failed（上游原文），客户端实收 200 落进观测列。
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    const proxyLogRows = await db.select().from(schema.proxyLogs).all();
+    const failedRow = proxyLogRows.find((row) => row.status === 'failed');
+    expect(failedRow).toBeTruthy();
+    expect(Number(failedRow?.clientHttpStatus)).toBe(200);
+    const errorMessage = String(failedRow?.errorMessage ?? '');
+    expect(errorMessage).toContain('tool execution failed');
+    expect(errorMessage).toContain('request_id=req_claude_legacy_failed');
   });
 });

@@ -142,6 +142,23 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('"proxy_logs_site_id_idx"');
   });
 
+  it('carries the client-visible status observation column into every dialect artifact', () => {
+    // `proxy_logs.client_http_status`：客户端实收状态码观测列。
+    // 它必须可空、无破坏性默认（旧库缺列时写侧降级为 NULL，由 `hasProxyLogClientHttpStatusColumn` 门禁）。
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const mysqlBootstrap = readFileSync(resolve(generatedDir, 'mysql.bootstrap.sql'), 'utf8');
+    const postgresBootstrap = readFileSync(resolve(generatedDir, 'postgres.bootstrap.sql'), 'utf8');
+    const sqliteMigration = readFileSync(resolve(dbDir, '../../../drizzle/0032_proxy_logs_client_http_status.sql'), 'utf8');
+
+    expect(contract.tables.proxy_logs?.columns.client_http_status?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.client_http_status?.notNull).toBe(false);
+    expect(contract.tables.proxy_logs?.columns.client_http_status?.defaultValue).toBeNull();
+
+    expect(mysqlBootstrap).toContain('`client_http_status`');
+    expect(postgresBootstrap).toContain('"client_http_status"');
+    expect(sqliteMigration).toContain('ADD `client_http_status` integer');
+  });
+
   it('keeps upgrade artifacts in the normalized empty-step state', () => {
     const mysqlUpgrade = readFileSync(resolve(generatedDir, 'mysql.upgrade.sql'), 'utf8');
     const postgresUpgrade = readFileSync(resolve(generatedDir, 'postgres.upgrade.sql'), 'utf8');

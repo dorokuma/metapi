@@ -1,0 +1,1 @@
+ALTER TABLE `proxy_logs` ADD `client_http_status` integer;

@@ -35,6 +35,7 @@ vi.mock('../../db/index.js', () => {
       insert: () => insertChain,
       select: () => queryChain,
     },
+    hasProxyLogClientHttpStatusColumn: async () => false,
     hasProxyLogStreamTimingColumns: async () => false,
     schema: {
       settings: { key: 'key' },

@@ -81,6 +81,34 @@ export function canRetryChannelSelection(retryCount: number, forcedChannelId?: n
   return canRetryProxyChannel(retryCount);
 }
 
+/**
+ * 「空选后按需刷新路由」的观测计数（纯观测，不参与任何选择决策）。
+ *
+ * 为什么要有内存计数：这条刷新路径在 140–182s 的挂起窗口里**零观测**（只有一行失败 warn），
+ * 事后无法回答「刷了多少次 / 命中几次 / 各花了多久」。仓库内既有的指标设施都以 HTTP/日志为落点，
+ * 而这里是请求内的选择阶段，故在此处就地累计，并由 `[proxy/route-refresh]` 结构化日志逐次输出。
+ * 计数只读不写选择语义：不改变 `refreshedRoutes` 单次门禁、不改变返回值、不影响异常传播。
+ */
+export type RouteRefreshObservation = {
+  /** 命中刷新路径的次数（受单次门禁限制，每次选择调用最多 +1）。 */
+  attempts: number;
+  successes: number;
+  failures: number;
+  /** 刷新总耗时（毫秒），含成功与失败。 */
+  totalDurationMs: number;
+};
+
+const routeRefreshObservation: RouteRefreshObservation = {
+  attempts: 0,
+  successes: 0,
+  failures: 0,
+  totalDurationMs: 0,
+};
+
+export function getRouteRefreshObservation(): RouteRefreshObservation {
+  return { ...routeRefreshObservation };
+}
+
 export async function selectProxyChannelForAttempt(input: {
   requestedModel: string;
   downstreamPolicy: DownstreamRoutingPolicy;
@@ -106,10 +134,42 @@ export async function selectProxyChannelForAttempt(input: {
   const refreshRoutesForFirstAttempt = async (): Promise<boolean> => {
     if (input.retryCount > 0 || refreshedRoutes) return false;
     refreshedRoutes = true;
+    routeRefreshObservation.attempts += 1;
+    const startedAtMs = Date.now();
     try {
       await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
+      const durationMs = Math.max(0, Date.now() - startedAtMs);
+      routeRefreshObservation.successes += 1;
+      routeRefreshObservation.totalDurationMs += durationMs;
+      console.info('[proxy/route-refresh]', {
+        trigger: 'empty-selection',
+        outcome: 'success',
+        durationMs,
+        retryCount: input.retryCount,
+        requestedModel: input.requestedModel,
+        stickySession: !!input.stickySessionKey,
+        attempts: routeRefreshObservation.attempts,
+        successes: routeRefreshObservation.successes,
+        failures: routeRefreshObservation.failures,
+        totalDurationMs: routeRefreshObservation.totalDurationMs,
+      });
       return true;
     } catch (error) {
+      const durationMs = Math.max(0, Date.now() - startedAtMs);
+      routeRefreshObservation.failures += 1;
+      routeRefreshObservation.totalDurationMs += durationMs;
+      console.warn('[proxy/route-refresh]', {
+        trigger: 'empty-selection',
+        outcome: 'failure',
+        durationMs,
+        retryCount: input.retryCount,
+        requestedModel: input.requestedModel,
+        stickySession: !!input.stickySessionKey,
+        attempts: routeRefreshObservation.attempts,
+        successes: routeRefreshObservation.successes,
+        failures: routeRefreshObservation.failures,
+        totalDurationMs: routeRefreshObservation.totalDurationMs,
+      });
       console.warn('[proxy/surface] failed to refresh routes after empty selection', error);
       return false;
     }

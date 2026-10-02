@@ -95,6 +95,7 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
+  hasProxyLogClientHttpStatusColumn: async () => false,
   hasProxyLogStreamTimingColumns: async () => false,
   schema: {
     proxyLogs: {},
@@ -4487,7 +4488,13 @@ describe('chat proxy stream behavior', () => {
     expect(matches.length).toBe(1);
   });
 
-  it('emits finish_reason stop when /v1/chat/completions receives response.failed from /v1/responses upstream', async () => {
+  it('delivers an HTTP 502 with the upstream reason when /v1/chat/completions receives response.failed from /v1/responses upstream', async () => {
+    // R3-A 后本用例的形态变了（故意，非回归）：上游在**一个字节都没写过**时就给 legacy `response.failed`
+    // 帧，旧行为是 `force` 写出归一化块（`finish_reason:"stop"`）+ 回放 `[DONE]` —— 客户端以为「正常结束
+    // 但空」（服务端已记 failed，客户端却看不出来）。现在与 `new` 形同门禁：不 hijack，走既有 HTTP 层
+    // 502 出口，body = 状态码 + 上游原文（`tool execution failed`）。
+    // `response.failed` → `finish_reason:"stop"` 的归一化映射仍由单元层锁住，未失去覆盖：
+    // `transformers/openai/chat/index.test.ts:623`、`transformers/shared/chatFormatsCore.test.ts:371`。
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
         {
@@ -4523,9 +4530,10 @@ describe('chat proxy stream behavior', () => {
       },
     });
 
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toContain('"finish_reason":"stop"');
-    expect(response.body).toContain('[DONE]');
+    expect(response.statusCode).toBe(502);
+    expect(String(response.headers['content-type'] || '')).not.toContain('text/event-stream');
+    expect(response.json()?.error?.type).toBe('upstream_error');
+    expect(String(response.json()?.error?.message)).toContain('tool execution failed');
     expect(recordSuccessMock).not.toHaveBeenCalled();
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
   });
@@ -5136,16 +5144,12 @@ describe('chat proxy stream behavior', () => {
     // （`truncateUpstreamErrorMessage`，≤1000）。本用例锁住该出口对外的不变量：502 + `upstream_error`
     // + 非 SSE，且客户端拿到的 message 不超过共享上限、不带截断标记、文案保持原样。
     //
-    // 为什么不断言「上游超长原文被截断」：**夹具内不可构造**——上游的 error/response.failed 帧会被
-    // `proxyStream` 以 `force` 立刻写成 SSE 帧（`streamStarted` 变 true），响应成为 200 SSE 流，
-    // 到不了这 4 处 `!streamStarted` 出口；夹具里唯一可达的失败源是本地生成的
-    // `Upstream returned empty content`（需 `proxyEmptyContentFailEnabled=true`）。实测 13 种上游错误形态
-    // （openai/claude × {type:error,type:response.failed} × {SSE,JSON,裸串}）全部 200；给这 4 处出口加临时
-    // 探针后，整份流式用例（本条加入前 102 条、加入后 103 条）里探针只命中 3 次、message 全是本地串。
-    //
-    // **生产未证实可达、也未证实不可达**：2xx + JSON + `type:'error'` 体在 `PROXY_EMPTY_CONTENT_FAIL` 默认
-    // false 且 `proxyErrorKeywords` 默认空时会走 `consumeUpstreamFinalPayload → markFailed(上游 payload)`，
-    // 其 message 为上游原文（→ 确认封顶保留，但本夹具不构成对它可达性的证据）。
+    // 历史注释（M2 后局部失效，保留供对照）：本条原来只能断言本地文案，因为「上游超长原文 → 这 4 处出口」
+    // 当时**夹具内不可构造**——上游的 error/response.failed 帧会被 `proxyStream` 以 `force` 立刻写成 SSE
+    // 帧（`streamStarted` 变 true），到不了 `!streamStarted` 分支。M2（未写出字节 ⇒ 不 hijack）之后，
+    // 上游原文**可以**走这 4 处出口，封顶因此可构造，见
+    // `delivers an in-band failure over the HTTP layer when no downstream byte was written yet`。
+    // 本条只锁出口不变量本身：502 + `upstream_error` + 非 SSE，且 message 不超过共享上限、不带截断标记。
     const {
       UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
       UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
@@ -5189,20 +5193,173 @@ describe('chat proxy stream behavior', () => {
     }
   });
 
-  it('serves an oversized upstream error frame as a 200 SSE stream instead of the capped 502 exits', async () => {
-    // 锁 A 组的**结构性结论**：上游 `error` 帧（message 5000 字符 > 共享封顶 1000）**不会**走 chat 主 handler
-    // 的 4 处流式失败 502 出口——`proxyStream` 收到错误帧后立即以 `force` 写出 SSE 帧（`streamStarted` 变 true），
-    // 响应固定为 200 SSE，客户端拿不到那 4 处出口的 `<1000` 封顶 JSON。⇒ 那 4 处出口的封顶**夹具内不可构造**：
-    // 上游 `error`/`response.failed` 帧被 force 成 SSE ⇒ `streamStarted=true` ⇒ 4 处 `!streamStarted` 出口不可达
-    // （夹具唯一可达源是本地 `Upstream returned empty content`）；**生产未证实可达、也未证实不可达**。
-    // 封顶保留；这与上面那条「出口不变量」用例是同一结论的正反两面。
+  it('serves an oversized upstream error frame verbatim in-band (uncapped) once a downstream byte was written', async () => {
+    // 客户端可见的带内失败帧**不封顶**：共享 1000 上限只作用于本仓自写的出口 JSON 与落库题干，
+    // 不作用于带内透传的上游帧。这里用 5000 字符 message 证明整段到达客户端。
+    // M2 之后这条路径要求「已写出过字节」（前置内容帧）——未写过字节时走 HTTP 层 502 出口，见下一条用例。
     const oversizedMessage = 'y'.repeat(5000);
+    const oversizedFrame = `data: ${JSON.stringify({ error: { code: 'stream_initialization_failed', message: oversizedMessage, request_id: 'req_oversized' } })}\n\n`;
+    streamSseUpstream(`${openAiPreContentFrame}${oversizedFrame}data: [DONE]\n\n`);
+
+    const response = await injectChatStream();
+
+    expect(response.statusCode).toBe(200);
+    expect(String(response.headers['content-type'] || '')).toContain('text/event-stream');
+    // 上游 payload 原文 + 本仓重建的 SSE 信封 + 上游自带的 `[DONE]`，逐字下发（不截断、不封顶）。
+    expect(response.body.endsWith(`${oversizedFrame}data: [DONE]\n\n`)).toBe(true);
+    expect(response.body).toContain(oversizedMessage);
+    expect(response.body).not.toContain('...(truncated)');
+    // 落库也不封顶到 1000（只过 64KB 守卫）：上游原文整段可见。
+    expect(String(recordedFailure().errorText)).toContain(oversizedMessage);
+  });
+
+  it('delivers an in-band failure over the HTTP layer when no downstream byte was written yet', async () => {
+    // M2（用户已定：混合）：带内失败帧到来时若**尚未写出任何下游字节**（`streamStarted=false`），
+    // 不强行 hijack 写帧——只记失败，交给既有 HTTP 层失败出口用「状态码 + 上游原文」交付（codex 系
+    // 据此自行退避重试，pi 也看得到原文）。客户端拿到的是 502 JSON，且 message 里保留上游原文；
+    // 5000 字符走共享 1000 封顶，但尾部的 `code`/`request_id` 标识后缀必须留住（否则排障丢坐标）。
+    config.proxyEmptyContentFailEnabled = true;
+    const oversizedMessage = 'y'.repeat(5000);
+    streamSseUpstream(`data: ${JSON.stringify({ error: { code: 'stream_initialization_failed', message: oversizedMessage, request_id: 'req_oversized' } })}\n\ndata: [DONE]\n\n`);
+
+    const response = await injectChatStream();
+
+    expect(response.statusCode).toBe(502);
+    expect(String(response.headers['content-type'] || '')).not.toContain('text/event-stream');
+    expect(response.json()?.error?.type).toBe('upstream_error');
+    const message = String(response.json()?.error?.message ?? '');
+    expect(message.length).toBeLessThanOrEqual(1000);
+    expect(message).toContain('...(truncated)');
+    expect(message.endsWith('(code=stream_initialization_failed, request_id=req_oversized)')).toBe(true);
+    // 判失败（不再记 success），且落库保留未封顶的上游原文。
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    expect(String(recordedFailure().errorText)).toContain(oversizedMessage);
+  });
+
+  it('gates the legacy failure frames the same way: 502 before any byte, normalized block afterwards', async () => {
+    // R3-A：legacy 形（`type:"error"` / `response.failed`）此前**没有** M2 门禁——它用
+    // `emitLines(..., { force: true })` 立即写出归一化块，即使一个字节都没写过也会把响应 hijack 成
+    // 200 SSE；而 codex 系对 `finish_reason:"error"` 与优雅 EOF 都发 Completed ⇒ 客户端看到的是
+    // 「正常结束但空」。现在 legacy 与 `new` 同门禁：未写字节 ⇒ 走既有 HTTP 层失败出口（502 + 上游原文）。
+    // 语义边界：已写过字节时**维持原行为**（归一化块 + `force`），与既有 M3 用例 ② 锁的口径一致。
+    config.proxyEmptyContentFailEnabled = true;
+
+    // ① 未写字节：上游直接给 legacy 失败帧 ⇒ 客户端实收 502 JSON + 上游原文（不是 200 SSE 归一化块）。
+    streamSseUpstream('data: {"type":"error","error":{"message":"boom","type":"upstream_error"}}\n\ndata: [DONE]\n\n');
+    const httpLayerResponse = await injectChatStream();
+    expect(httpLayerResponse.statusCode).toBe(502);
+    expect(String(httpLayerResponse.headers['content-type'] || '')).not.toContain('text/event-stream');
+    expect(httpLayerResponse.json()?.error?.type).toBe('upstream_error');
+    expect(String(httpLayerResponse.json()?.error?.message)).toContain('boom');
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toBe('boom');
+
+    // ② 已写字节：归一化块照旧（`finish_reason:"error"`），本轮门禁不改变这一半。
+    recordFailureMock.mockClear();
+    recordSuccessMock.mockClear();
+    streamSseUpstream(`${openAiPreContentFrame}data: {"type":"error","error":{"message":"boom","type":"upstream_error"}}\n\ndata: [DONE]\n\n`);
+    const inBandResponse = await injectChatStream();
+    expect(inBandResponse.statusCode).toBe(200);
+    expect(String(inBandResponse.headers['content-type'] || '')).toContain('text/event-stream');
+    expect(inBandResponse.body).toContain('"object":"chat.completion.chunk"');
+    expect(inBandResponse.body).toContain('"finish_reason":"error"');
+    expect(inBandResponse.body).not.toContain('Upstream stream interrupted');
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toBe('boom');
+  });
+
+  it('never fabricates a terminal frame on a terminally failed stream (no [DONE] the upstream did not send)', async () => {
+    // M3（用户已定：统一不补）：失败终态下本仓**不再生成**终结帧。上游没带 `data: [DONE]` 时客户端
+    // 就看不到任何终结帧（只看到失败信号）；上游带了则原样透传（见上面 429 用例）。两种形都不再出现
+    // 「本仓补的 [DONE] 把失败包装成正常收尾」。
+    config.proxyEmptyContentFailEnabled = true;
+
+    // ① 新形（顶层带 `error` 对象的 `stream_error` 帧）。
+    streamSseUpstream(`${openAiPreContentFrame}data: ${JSON.stringify({ error: { code: 'stream_initialization_failed', message: 'rate limited: Retry after 29s.' }, type: 'stream_error' })}\n\n`);
+    const newShaped = await injectChatStream();
+    expect(newShaped.statusCode).toBe(200);
+    expect(newShaped.body).not.toContain('[DONE]');
+    expect(newShaped.body).toContain('Retry after 29s.');
+
+    // ② legacy 形（`type:"error"`）——M3 一并改变它的行为：同样不再补 `[DONE]`（既有用例
+    //    `keeps the existing failure judgments` 仍锁住它的归一化/序列化路径不变——R3-A 后那条
+    //    带前置内容帧，即「已写过字节」的形）。
+    recordFailureMock.mockClear();
+    recordSuccessMock.mockClear();
+    streamSseUpstream(`${openAiPreContentFrame}data: {"type":"error","error":{"message":"boom","type":"upstream_error"}}\n\n`);
+    const legacyShaped = await injectChatStream();
+    expect(legacyShaped.statusCode).toBe(200);
+    expect(legacyShaped.body).toContain('"finish_reason":"error"');
+    expect(legacyShaped.body).not.toContain('[DONE]');
+  });
+
+  it('claude downstream: an in-band stream_error frame produces exactly one error frame (no synthesized second one)', async () => {
+    // S1 + M1：claude 下游 + 上游 `{"error":{…},"type":"stream_error"}` 帧（已写出过字节）。
+    // 旧行为：上游原文帧之后，收尾的补帧门禁又补了一帧自写的
+    // `Upstream stream interrupted before a terminal event`（claude 分支从不置 `doneSent`）⇒ 双错误帧。
+    config.proxyEmptyContentFailEnabled = true;
+    const upstreamMessage = 'Rate limit exceeded: Retry after 29s.';
+    const requestId = 'req_claude_stream_error';
+    streamSseUpstream(`data: hello\n\ndata: ${JSON.stringify({ error: { code: 'stream_initialization_failed', message: upstreamMessage, request_id: requestId }, type: 'stream_error' })}\n\ndata: [DONE]\n\n`);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      payload: {
+        model: 'claude-opus-4-6',
+        stream: true,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // 错误帧恰好一帧；含上游原文与 code/request_id；不得出现自写的断流补帧，也不得补 `message_stop`。
+    expect(response.statusCode).toBe(200);
+    expect(response.body.split('event: error').length - 1).toBe(1);
+    expect(response.body).toContain(upstreamMessage);
+    expect(response.body).toContain('code=stream_initialization_failed');
+    expect(response.body).toContain(`request_id=${requestId}`);
+    expect(response.body).not.toContain('Upstream stream interrupted');
+    expect(response.body).not.toContain('message_stop');
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toContain(upstreamMessage);
+    expect(String(recordedFailure().errorText)).toContain(`request_id=${requestId}`);
+  });
+
+  it('rebuilds a multi-line data failure frame as valid SSE (every line keeps its data: prefix)', async () => {
+    // S2：上游把 JSON 拆到多行 `data:`（`data: {...` / `data: ...}`）时，重建帧的**每一行**都要带
+    // `data: ` 前缀，否则第二行起会变成非法 SSE 字段行（客户端解不出来）；与
+    // `anthropic/messages/streamBridge.ts` 的 `serializeAnthropicRawSseEvent` 同口径。
+    config.proxyEmptyContentFailEnabled = true;
+    const firstHalf = '{"error":{"code":"stream_initialization_failed",';
+    const secondHalf = '"message":"Rate limit exceeded: Retry after 29s.","request_id":"req_multiline"},"type":"stream_error"}';
+    streamSseUpstream(`${openAiPreContentFrame}data: ${firstHalf}\ndata: ${secondHalf}\n\ndata: [DONE]\n\n`);
+
+    const response = await injectChatStream();
+
+    const expectedFrame = `data: ${firstHalf}\ndata: ${secondHalf}\n\n`;
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(expectedFrame);
+    expect(expectedFrame.trimEnd().split('\n').every((line) => line.startsWith('data: '))).toBe(true);
+    // 多行帧同样被判为失败、且失败原因取上游原文（含 code/request_id 后缀）。
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toContain('Rate limit exceeded: Retry after 29s.');
+    expect(String(recordedFailure().errorText)).toContain('code=stream_initialization_failed');
+  });
+
+  it('writes an in-band openai error frame (and never [DONE]) when the upstream body breaks mid-stream', async () => {
+    // #6 客户端可见失败语义（②）：响应头已到、body 中途 `terminated`。SSE 已 `reply.hijack()`，
+    // 拿不到任何 HTTP 状态码，唯一能告知客户端「这轮失败」的通道就是流内错误帧；
+    // 且**不得**补 `data: [DONE]`（那会把错误当正常收尾吞掉）。
     const encoder = new TextEncoder();
     const upstreamBody = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: oversizedMessage, type: 'server_error' } })}\n\n`));
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-break","choices":[{"delta":{"content":"partial"}}]}\n\n'));
+      },
+      pull(controller) {
+        // 首块被消费后才拉第二次 ⇒ 首帧可达下游（streamStarted 变 true），随后断流。
+        controller.error(new Error('terminated'));
       },
     });
 
@@ -5221,14 +5378,301 @@ describe('chat proxy stream behavior', () => {
       },
     });
 
-    // 没走 4 处 502 JSON 出口 ⇒ 200 + SSE。
+    // 已 hijack：状态码停留在 200（不可能再改），失败语义只能落在一帧错误上。
     expect(response.statusCode).toBe(200);
     expect(String(response.headers['content-type'] || '')).toContain('text/event-stream');
-    // 终止于 SSE 的 `[DONE]`，而不是被封顶过的 502 JSON。
-    expect(response.body).toContain('data: [DONE]');
-    // 实测（真跑确认）：这条上游 error 帧的正文（含超长 message）**根本不下发**——客户端拿到的是
-    // `delta:{}` + `finish_reason:"stop"` 的空成功流（`proxyStream` 吞掉错误帧、不转发其文本）。
-    // ⇒ 「上游超长 message 被 4 处出口封顶到 ≤1000」**夹具内不可构造**；**生产未证实可达、也未证实不可达**；**封顶保留**。
-    expect(response.body).not.toContain('y'.repeat(50));
+    expect(response.body).toContain(
+      'data: {"error":{"message":"terminated","type":"upstream_error","code":502}}',
+    );
+    // 绝不追加正常结束标记。
+    expect(response.body).not.toContain('[DONE]');
+  });
+
+  it('writes exactly one in-band openai error frame (and no [DONE]/response.completed) when a hijacked /v1/responses stream breaks mid-flight', async () => {
+    // #6 客户端可见失败语义（②）responses 面：响应头已到（`reply.hijack()` 已发生）、上游 body 中途
+    // 断流。已 hijack ⇒ 不可能再改 HTTP 状态码，也不可能 `reply.code(502).send(...)`
+    // （Fastify 5 对已 hijack 的回复只 `log.warn(FST_ERR_REP_ALREADY_SENT)` 然后**丢弃**：客户端
+    // 一个失败信号都拿不到）；失败只能落在一帧流内错误上。
+    // 断言四项：① 有且只有**一帧**错误帧；② 不补 `[DONE]`；③ 不误发 `response.completed`；
+    // ④ 没退化成 JSON 失败体（那个出口在 hijack 后写不进去，只会被静默丢弃）。
+    // 这里把重试钉成 1 次尝试，不留第二轮 hijack 的噪声。
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    (config as any).proxyMaxChannelAttempts = 1;
+    try {
+      fetchModelPricingCatalogMock.mockResolvedValue({
+        models: [
+          {
+            modelName: 'upstream-gpt',
+            supportedEndpointTypes: ['/v1/chat/completions'],
+          },
+        ],
+        groupRatio: {},
+      });
+
+      // —— 场景：先写出一帧（流已 hijack），随后上游 body 中断、且没有终结帧。
+      // 流生命周期收尾（`streamSink.end()`）负责补这一帧；surface 终态出口也会尝试写，靠
+      // `writableEnded` 门禁去重 ⇒ 客户端只收到一帧。
+      const encoder = new TextEncoder();
+      const upstreamBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"id":"chatcmpl-r-break","model":"upstream-gpt","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'));
+        },
+        pull(controller) {
+          // 首块被消费后才拉第二次 ⇒ 首帧可达下游，随后断流。
+          controller.error(new Error('terminated'));
+        },
+      });
+
+      fetchMock.mockResolvedValue(new Response(upstreamBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        payload: {
+          model: 'gpt-5.2',
+          input: 'hello',
+          stream: true,
+        },
+      });
+
+      // 已 hijack：状态码停在 200，失败语义只能落在流内。
+      expect(response.statusCode).toBe(200);
+      expect(String(response.headers['content-type'] || '')).toContain('text/event-stream');
+      // 一帧错误、且只有一帧（生命周期出口与终态出口都尝试过写，去重后只剩这一帧）。
+      expect(response.body.split('"type":"upstream_error"').length - 1).toBe(1);
+      expect(response.body).toContain(
+        'data: {"error":{"message":"Upstream stream interrupted before a terminal event","type":"upstream_error","code":502}}',
+      );
+      // 断流**不得**被写成正常收尾：既不补 `[DONE]`，也不误发 `response.completed`。
+      expect(response.body).not.toContain('[DONE]');
+      expect(response.body).not.toContain('response.completed');
+      // 失败没有退化成 JSON 出口（那个出口在 hijack 后写不进去，会被静默丢弃）。
+      expect(response.body).not.toContain('"type":"server_error"');
+
+    } finally {
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
+    }
+  });
+
+  // —— 上游「带内错误帧」（HTTP 200 + `text/event-stream`）的识别与原样透传 ——
+  // 帧形来自真实抓取（Cline/Vercel 网关把 provider 429 包成 200 + SSE），此处只内联帧形与关键文案，
+  // 不复制原始样本文件。
+  const clineRequestId = 'jKvTekvqyRNgEmhOeUgEcZtJcwNJqEpo';
+  const clineInBandFailureFrame = JSON.stringify({
+    error: {
+      code: 'stream_initialization_failed',
+      message: `Failed to create stream: inference request failed: failed to generate stream from Vercel: failed to invoke model 'deepseek/deepseek-v4.1-flash' with streaming: request failed with status 429: ${JSON.stringify({
+        error: {
+          message: "Rate limit exceeded for deepseek/deepseek-v4.1-flash: this team's limit of 100000000 input tokens per minute (per region) was reached. Retry after 29s.",
+          type: 'rate_limit_exceeded',
+        },
+      })}`,
+      request_id: clineRequestId,
+    },
+    request_id: clineRequestId,
+    type: 'stream_error',
+  });
+  const clineInBandFailureSse = `data: ${clineInBandFailureFrame}\n\ndata: [DONE]\n\n`;
+
+  // 「已向下游写出过字节」的前置内容帧：M2 之后，带内失败帧只有在这种「已写过字节」的流里才走带内
+  // 透传；未写过字节会走 HTTP 层 502 出口（见下两条用例）。
+  const openAiPreContentFrame = 'data: {"id":"chatcmpl-pre","object":"chat.completion.chunk","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"pre"},"finish_reason":null}]}\n\n';
+
+  function streamSseUpstream(sse: string) {
+    const encoder = new TextEncoder();
+    fetchMock.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(sse));
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+  }
+
+  function injectChatStream() {
+    return app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: { model: 'gpt-4o-mini', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+    });
+  }
+
+  function recordedFailure(callIndex = 0): any {
+    return (recordFailureMock.mock.calls[callIndex] as any[])[1];
+  }
+
+  it('recognizes an upstream in-band 429 error frame and forwards it to the client verbatim', async () => {
+    // 上游 provider 429 被网关包成 HTTP 200 + `text/event-stream`，失败只写在流内错误帧里。
+    // 旧行为：带内失败判据只认顶层 `type` 为 response.failed/error ⇒ 该帧归一化无匹配、序列化为空 ⇒
+    // 文本被静默丢弃、不日志不计数不下发 ⇒ 空内容兜底把失败改写成自写的
+    // `Upstream returned empty content`（502 JSON），上游字节永不可得。
+    // 新行为：认出该帧（走既有 `markFailed`），并在**已写出过字节**时把「上游 payload 原文 + 本仓
+    // 重建的 SSE 信封」写回客户端（M2）。
+    config.proxyEmptyContentFailEnabled = true;
+    streamSseUpstream(`${openAiPreContentFrame}${clineInBandFailureSse}`);
+
+    const response = await injectChatStream();
+
+    // ① 判为失败而不再记 success；落库原因用上游原文（含 429 文案 / type / code / request_id）。
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    expect(String(recordedFailure().errorText)).toContain('Rate limit exceeded for deepseek/deepseek-v4.1-flash');
+    expect(String(recordedFailure().errorText)).toContain('Retry after 29s.');
+    expect(String(recordedFailure().errorText)).toContain('rate_limit_exceeded');
+    expect(String(recordedFailure().errorText)).toContain('code=stream_initialization_failed');
+    expect(String(recordedFailure().errorText)).toContain(`request_id=${clineRequestId}`);
+    expect(String(recordedFailure().errorText)).not.toContain('Upstream returned empty content');
+
+    // ② 客户端可见的带内错误帧带上游 429 文案与 request_id：已写出过字节 ⇒ 带内透传，从内容帧之后
+    //    逐字等于上游帧序列（含上游自己带的 `[DONE]`，M3：本仓不再自行补终结帧）。
+    expect(response.statusCode).toBe(200);
+    expect(String(response.headers['content-type'] || '')).toContain('text/event-stream');
+    expect(response.body.endsWith(clineInBandFailureSse)).toBe(true);
+    expect(response.body).toContain('Retry after 29s.');
+    expect(response.body).toContain(clineRequestId);
+    // 内容帧先于错误帧（不是把已写出的内容丢掉）。
+    expect(response.body.indexOf('"content":"pre"')).toBeLessThan(response.body.indexOf('stream_initialization_failed'));
+
+    // ③ 不重复写终结帧：`[DONE]` 恰好一帧（上游自带那一个），且没有另外补合成的 finish_reason 帧。
+    expect(response.body.split('data: [DONE]').length - 1).toBe(1);
+    expect(response.body).not.toContain('"finish_reason":"stop"');
+    expect(response.body).not.toContain('Upstream returned empty content');
+  });
+
+  it('recognizes an SSE event: error frame as an in-band failure and forwards it verbatim', async () => {
+    // 带 `event: error` 帧名、正文非 JSON 的形（旧判据只看载荷 `type`，帧名完全没看）——已写出过字节 ⇒
+    // 带内透传（未写出字节的形见 `delivers an in-band failure over the HTTP layer …`）。
+    config.proxyEmptyContentFailEnabled = true;
+    const upstreamSse = 'event: error\ndata: rate limited: Retry after 29s.\n\ndata: [DONE]\n\n';
+    streamSseUpstream(`${openAiPreContentFrame}${upstreamSse}`);
+
+    const response = await injectChatStream();
+
+    expect(response.statusCode).toBe(200);
+    // 从错误帧起逐字等于上游帧序列（含上游自带的 `[DONE]`；M3：本仓不再补终结帧）。
+    expect(response.body.endsWith(upstreamSse)).toBe(true);
+    // 失败原因用上游原文（帧名之外的正文），不再落成自写的空内容文案，也不再被 502 JSON 出口吞掉。
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toBe('rate limited: Retry after 29s.');
+    // 这轮已交付过带内失败信号（M1）且有 `[DONE]` 终结帧，所以不应再叠加断流补帧。
+    expect(response.body).not.toContain('Upstream stream interrupted');
+    expect(response.body.split('data: [DONE]').length - 1).toBe(1);
+  });
+
+  it('keeps the existing failure judgments: {type:"error"} frames and pure empty content', async () => {
+    // ④ 不回归（两个既有判定）：
+    // ① 既有 `{type:"error"}` 帧仍走原归一化 / 序列化路径：客户端拿 `finish_reason:"error"` 的
+    //    chat.completion.chunk（不是上游帧原文），失败原因仍是上游 `error.message`。
+    //    R3-A 后这一半必须带上「已写过字节」的前置内容帧：未写过字节的 legacy 帧现在走 HTTP 层 502
+    //    （见 `gates the legacy failure frames the same way …`），那是新增门禁、不是判据被吃掉。
+    // ② 纯空内容（没有任何失败帧）仍由既有空内容判定兜底：502 + 既有文案（既有用例
+    //    `keeps the streamed failure 502 message within the shared upstream error cap` 锁的是同一不变量）。
+    config.proxyEmptyContentFailEnabled = true;
+
+    streamSseUpstream(`${openAiPreContentFrame}data: {"type":"error","error":{"message":"boom","type":"upstream_error"}}\n\ndata: [DONE]\n\n`);
+    const errorFrameResponse = await injectChatStream();
+    expect(errorFrameResponse.statusCode).toBe(200);
+    expect(errorFrameResponse.body).toContain('"object":"chat.completion.chunk"');
+    expect(errorFrameResponse.body).toContain('"delta":{}');
+    expect(errorFrameResponse.body).toContain('"finish_reason":"error"');
+    expect(errorFrameResponse.body.split('data: [DONE]').length - 1).toBe(1);
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toBe('boom');
+
+    recordFailureMock.mockClear();
+    recordSuccessMock.mockClear();
+    streamSseUpstream('data: {"id":"chatcmpl-empty","choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    const emptyResponse = await injectChatStream();
+    expect(emptyResponse.statusCode).toBe(502);
+    expect(String(emptyResponse.headers['content-type'] || '')).not.toContain('text/event-stream');
+    expect(String(emptyResponse.json()?.error?.message)).toContain('empty content');
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it('claude downstream: recognizes an SSE event: error frame as a failure while still forwarding it verbatim', async () => {
+    // claude 下游 + 上游 Anthropic 原始 `event: error` 帧：本仓 anthropic 转换器本来就把它当标准原始
+    // 事件原样转发（客户端看到错误），但既不记失败也不留原文；本片只补既有的 `markFailed` 语义，
+    // 不改任何已写出的字节。
+    config.proxyEmptyContentFailEnabled = true;
+    const upstreamErrorFrame = 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n';
+    streamSseUpstream(`${upstreamErrorFrame}data: [DONE]\n\n`);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      payload: {
+        model: 'claude-opus-4-6',
+        stream: true,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // 上游帧仍逐字节原样转发；失败原因取上游原文（不再是「记成成功」）。
+    expect(response.body).toContain(upstreamErrorFrame.trimEnd());
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(String(recordedFailure().errorText)).toBe('Overloaded');
+    // 错误帧后不得追加终结帧（claude 的 `message_stop`）。
+    expect(response.body).not.toContain('message_stop');
+  });
+
+  it('reports has_content=true for the real text carriers (streaming delta.content / full-body message.content)', async () => {
+    // 诊断字段 `has_content` 原来只看 `payload.content` / `choices[].content`，而 chat 协议里文本的真实载体是
+    // `choices[].delta.content`（流式 chunk）与 `choices[].message.content`（完整 body）⇒ 两种真实形下恒假，
+    // 排障时会把「上游明明给了内容」误读成「上游没给内容」。这里用带日志流的 app 捕获诊断行，锁住修后的取值。
+    const logLines: string[] = [];
+    const loggingApp = Fastify({
+      logger: {
+        level: 'info',
+        stream: { write: (chunk: string) => { logLines.push(chunk); } },
+      },
+    });
+    const { chatProxyRoute } = await import('./chat.js');
+    await loggingApp.register(chatProxyRoute);
+    try {
+      // 流式：文本在 `choices[].delta.content`。
+      streamSseUpstream('data: {"id":"chatcmpl-log","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n\ndata: {"id":"chatcmpl-log","choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\ndata: [DONE]\n\n');
+      const streamResponse = await loggingApp.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        payload: { model: 'gpt-4o-mini', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      });
+      expect(streamResponse.statusCode, streamResponse.body).toBe(200);
+      const streamDiagnostics = logLines.filter((line) => line.includes('chat/upstream-stream-event'));
+      expect(streamDiagnostics.length).toBeGreaterThan(0);
+      expect(streamDiagnostics.some((line) => line.includes('"has_content":true'))).toBe(true);
+
+      // 非流式：文本在 `choices[].message.content`。
+      logLines.length = 0;
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({
+        id: 'chatcmpl-log-json',
+        object: 'chat.completion',
+        model: 'upstream-gpt',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'hello from body' },
+          finish_reason: 'stop',
+        }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+      const jsonResponse = await loggingApp.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        payload: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] },
+      });
+      expect(jsonResponse.statusCode, jsonResponse.body).toBe(200);
+      const finalDiagnostics = logLines.filter((line) => line.includes('chat/upstream-final'));
+      expect(finalDiagnostics.length).toBeGreaterThan(0);
+      expect(finalDiagnostics.some((line) => line.includes('"has_content":true'))).toBe(true);
+    } finally {
+      await loggingApp.close();
+    }
   });
 });

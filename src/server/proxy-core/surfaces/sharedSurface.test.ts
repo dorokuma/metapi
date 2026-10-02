@@ -29,6 +29,7 @@ const acquireChannelLeaseMock = vi.fn();
 const acquireSiteLeaseMock = vi.fn();
 const buildStickySessionKeyMock = vi.fn();
 const consoleWarnMock = vi.spyOn(console, 'warn').mockImplementation(() => {});
+const consoleInfoMock = vi.spyOn(console, 'info').mockImplementation(() => {});
 const consoleErrorMock = vi.spyOn(console, 'error').mockImplementation(() => {});
 
 vi.mock('../../services/tokenRouter.js', () => ({
@@ -112,6 +113,7 @@ vi.mock('../../services/oauth/refreshSingleflight.js', () => ({
 describe('selectSurfaceChannelForAttempt', () => {
   afterAll(() => {
     consoleWarnMock.mockRestore();
+    consoleInfoMock.mockRestore();
     consoleErrorMock.mockRestore();
   });
 
@@ -144,7 +146,47 @@ describe('selectSurfaceChannelForAttempt', () => {
     acquireSiteLeaseMock.mockReset();
     buildStickySessionKeyMock.mockReset();
     consoleWarnMock.mockClear();
+    consoleInfoMock.mockClear();
     consoleErrorMock.mockClear();
+  });
+
+  it('observes a single route-refresh hit with its duration and cumulative counters', async () => {
+    // 观测契约：刷新路径每次命中输出一行 `[proxy/route-refresh]`，带耗时与累计命中/成功/失败计数。
+    // 纯观测：选择结果与刷新门禁不受影响（同一用例里断言 selectChannel 仍是两次、返回同一个 selected）。
+    const selected = { channel: { id: 33 } };
+    selectChannelMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(selected);
+
+    const { getRouteRefreshObservation } = await import('../channelSelection.js');
+    const before = getRouteRefreshObservation();
+    const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
+    const result = await selectSurfaceChannelForAttempt({
+      requestedModel: 'gpt-5.2',
+      downstreamPolicy: EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      excludeChannelIds: [],
+      retryCount: 0,
+    });
+    const after = getRouteRefreshObservation();
+
+    expect(result).toBe(selected);
+    expect(selectChannelMock).toHaveBeenCalledTimes(2);
+    expect(refreshModelsAndRebuildRoutesMock).toHaveBeenCalledTimes(1);
+    expect(after.attempts - before.attempts).toBe(1);
+    expect(after.successes - before.successes).toBe(1);
+    expect(after.failures - before.failures).toBe(0);
+    expect(after.totalDurationMs - before.totalDurationMs).toBeGreaterThanOrEqual(0);
+
+    const refreshLogs = consoleInfoMock.mock.calls.filter((call) => call[0] === '[proxy/route-refresh]');
+    expect(refreshLogs).toHaveLength(1);
+    const payload = refreshLogs[0]?.[1] as Record<string, unknown>;
+    expect(payload?.outcome).toBe('success');
+    expect(payload?.trigger).toBe('empty-selection');
+    expect(payload?.requestedModel).toBe('gpt-5.2');
+    expect(payload?.attempts).toBe(after.attempts);
+    expect(payload?.successes).toBe(after.successes);
+    expect(typeof payload?.durationMs).toBe('number');
+    expect(payload?.durationMs as number).toBeGreaterThanOrEqual(0);
   });
 
   it('refreshes models and retries selectChannel on the first attempt when no channel is available', async () => {
@@ -351,6 +393,9 @@ describe('selectSurfaceChannelForAttempt', () => {
       modelRequested: 'gpt-5.2',
       status: 'failed',
       httpStatus: 502,
+      // 观测列：`http_status=502`（metapi 判定失败）与客户端实收并不总一致——
+      // 已 hijack 的 SSE 出口客户端实收 200 + 流内错误帧，故两列分开传。
+      clientHttpStatus: 200,
       latencyMs: 1200,
       errorMessage: 'upstream failed',
       retryCount: 1,
@@ -391,6 +436,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       modelActual: 'upstream-model',
       status: 'failed',
       httpStatus: 502,
+      clientHttpStatus: 200,
       isStream: null,
       firstByteLatencyMs: null,
       latencyMs: 1200,
@@ -762,6 +808,51 @@ describe('selectSurfaceChannelForAttempt', () => {
       model: 'gpt-5.2',
       reason: 'socket hang up',
     });
+    // 未 hijack 的同一出口：客户端实收就是出口合成的 502（取值器缺省时不得退化成别的值）。
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      httpStatus: 0,
+      clientHttpStatus: 502,
+    }));
+  });
+
+  it('logs the client-visible 200 for an execution error that happened after the SSE was hijacked', async () => {
+    // 失真复现：已 hijack 的 SSE 断流也会走本出口（调用方在 `respondTerminalFailure` 里以
+    // `streamStarted` 决定写 in-band 帧），此时客户端实收 200 + 流内错误帧，而 `http_status` 仍是 0
+    // （从未拿到上游 HTTP 响应）。两列分道扬镳正是本列存在的意义，硬编码 502 会让该列首次上线即失真。
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'chat',
+      downstreamPath: '/v1/chat/completions',
+      maxRetries: 2,
+      clientContext: null,
+      downstreamApiKeyId: null,
+      // 已 hijack ⇒ 取值器给 200（与 chatSurface/openAiResponsesSurface 的接线同形）。
+      resolveClientHttpStatus: () => 200,
+    });
+
+    await toolkit.handleExecutionError({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      errorMessage: 'terminated',
+      isStream: true,
+      latencyMs: 650,
+      retryCount: 2,
+    });
+
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      httpStatus: 0,
+      clientHttpStatus: 200,
+    }));
   });
 
   it('records stream failures with error text even without a runtime status code', async () => {
@@ -1028,6 +1119,8 @@ describe('selectSurfaceChannelForAttempt', () => {
       modelRequested: 'gpt-5.2',
       status: 'success',
       httpStatus: 200,
+      // 成功出口：客户端实收 200（JSON 或已 hijack 的 SSE），与 `httpStatus` 同值但语义独立。
+      clientHttpStatus: 200,
       isStream: null,
       firstByteLatencyMs: null,
       latencyMs: 250,
@@ -1522,5 +1615,139 @@ describe('truncateUpstreamErrorMessage', () => {
     // 保留部分必须整码点收尾：孤立代理对会让下游 JSON 序列化出 U+FFFD / 非法 UTF-8。
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(result)).toBe(false);
     expect(kept.length % 2).toBe(0);
+  });
+
+  it('keeps the trailing (code/request_id) identifier suffix when an upstream message is capped', async () => {
+    const {
+      truncateUpstreamErrorMessage,
+      UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
+    } = await import('./sharedSurface.js');
+
+    const message = `${'y'.repeat(5000)} (code=stream_initialization_failed, request_id=req_cap)`;
+    const result = truncateUpstreamErrorMessage(message);
+
+    expect(result.length).toBeLessThanOrEqual(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
+    expect(result).toContain(UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER);
+    // 尾部标识后缀必须留住：排障要靠 `code`/`request_id` 定位上游那次请求（它俩总在末尾，
+    // 普通头截会把它们第一个切掉）。
+    expect(result.endsWith('(code=stream_initialization_failed, request_id=req_cap)')).toBe(true);
+  });
+
+  it('does not treat an upstream-authored parenthetical as an identifier suffix', async () => {
+    const {
+      truncateUpstreamErrorMessage,
+      UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
+    } = await import('./sharedSurface.js');
+
+    // 只有含 `code=` / `request_id=` 的尾部括号段才当标识后缀；上游原文自带的括号照常被截。
+    const result = truncateUpstreamErrorMessage(`${'y'.repeat(5000)} (see docs for details)`);
+
+    expect(result.length).toBe(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH);
+    expect(result.endsWith(UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER)).toBe(true);
+  });
+
+  it('guards the logged upstream message at 64KB while still keeping the identifier suffix', async () => {
+    const {
+      guardUpstreamErrorMessageForLog,
+      UPSTREAM_ERROR_MESSAGE_LOG_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_MAX_LENGTH,
+      UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER,
+    } = await import('./sharedSurface.js');
+
+    // 落库上限远大于下发上限：1000 与 64KB 之间的上游原文原样落库（不封顶到 1000）。
+    const betweenLimits = 'z'.repeat(UPSTREAM_ERROR_MESSAGE_MAX_LENGTH * 50);
+    expect(guardUpstreamErrorMessageForLog(betweenLimits)).toBe(betweenLimits);
+
+    const oversized = `${'z'.repeat(70_000)} (code=stream_initialization_failed, request_id=req_log)`;
+    const guarded = guardUpstreamErrorMessageForLog(oversized);
+
+    expect(guarded.length).toBeLessThanOrEqual(UPSTREAM_ERROR_MESSAGE_LOG_MAX_LENGTH);
+    expect(guarded).toContain(UPSTREAM_ERROR_MESSAGE_TRUNCATION_MARKER);
+    expect(guarded.endsWith('(code=stream_initialization_failed, request_id=req_log)')).toBe(true);
+  });
+});
+
+describe('writeSurfaceInBandStreamError', () => {
+  function fakeHijackedReply() {
+    const writes: string[] = [];
+    let ended = false;
+    return {
+      writes,
+      hasEnded: () => ended,
+      reply: {
+        raw: {
+          get writableEnded() {
+            return ended;
+          },
+          write: (chunk: string) => {
+            writes.push(chunk);
+            return true;
+          },
+          end: () => {
+            ended = true;
+          },
+        },
+      },
+    };
+  }
+
+  it('writes the claude in-band error frame, ends the reply, and never appends [DONE]', async () => {
+    const { writeSurfaceInBandStreamError } = await import('./sharedSurface.js');
+    const handled = fakeHijackedReply();
+
+    const written = writeSurfaceInBandStreamError({
+      reply: handled.reply as any,
+      downstreamFormat: 'claude',
+      message: 'terminated',
+    });
+
+    expect(written).toBe(true);
+    expect(handled.hasEnded()).toBe(true);
+    expect(handled.writes.join('')).toBe(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"terminated"}}\n\n',
+    );
+    expect(handled.writes.join('')).not.toContain('[DONE]');
+
+    // 幂等：已结束的回复不再写（Node 会丢弃 post-end 写入，不能假装补上了帧）。
+    expect(writeSurfaceInBandStreamError({
+      reply: handled.reply as any,
+      downstreamFormat: 'claude',
+      message: 'second',
+    })).toBe(false);
+    expect(handled.writes).toHaveLength(1);
+  });
+
+  it('returns false without touching a destroyed hijacked socket (client abort mid-stream)', async () => {
+    // 客户端 abort 后 socket 已销毁，而 `writableEnded` 仍可能是 false；此时 `write` 会抛
+    // `ERR_STREAM_DESTROYED`。错误帧只是「尽力而为」的观测手段，不能被一次收尾动作变成新异常，
+    // 也不该真的去写（写了也没人收到）——门禁挡住 ⇒ 返回 false 且一次 write 都不发生。
+    const { writeSurfaceInBandStreamError } = await import('./sharedSurface.js');
+    let writeCalls = 0;
+    let endCalls = 0;
+    const destroyedReply = {
+      raw: {
+        writableEnded: false,
+        destroyed: true,
+        closed: false,
+        write: () => {
+          writeCalls += 1;
+          throw new Error('ERR_STREAM_DESTROYED');
+        },
+        end: () => {
+          endCalls += 1;
+          throw new Error('ERR_STREAM_DESTROYED');
+        },
+      },
+    };
+
+    expect(writeSurfaceInBandStreamError({
+      reply: destroyedReply as any,
+      downstreamFormat: 'openai',
+      message: 'terminated',
+    })).toBe(false);
+    expect(writeCalls).toBe(0);
+    expect(endCalls).toBe(0);
   });
 });

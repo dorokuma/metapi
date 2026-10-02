@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "db396b71-1ec0-4060-9e98-5782ee95be1f",
-  "prevId": "adce6e29-26f9-4354-bf4c-566f7ae8fb3c",
+  "id": "7667bfbf-5fef-4332-8116-283114f717e2",
+  "prevId": "db396b71-1ec0-4060-9e98-5782ee95be1f",
   "tables": {
     "account_tokens": {
       "name": "account_tokens",
@@ -2179,6 +2179,13 @@
         },
         "http_status": {
           "name": "http_status",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "client_http_status": {
+          "name": "client_http_status",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

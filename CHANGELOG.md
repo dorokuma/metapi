@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+## [1.4.14] - 2026-10-02
+
+### 新增
+
+- 新增「失败不写冷却」总开关 `disable_failure_driven_cooldown`（默认 `false` ＝ 现行为零变化；按严格布尔判定 `=== true`，非布尔取值一律回落到冷却照旧）。开关开启后失败不再产生硬挡，覆盖**四层**：端点级冷却（`site_api_endpoints.cooldown_until` 写入点与读侧判定）、渠道级与 oauth route-unit 成员级冷却（weighted fibonacci 退避 + 写死在代码里的 round_robin 阶梯）、运行时熔断（`SITE_RUNTIME_BREAKER_LEVELS_MS` 阶梯的候选过滤点整段放行，含「多候选全熔断 ⇒ 候选清空」这条硬挡路径）；熔断状态与 `cooldownLevel` 照旧推进/清零，开关关回去时状态诚实。
+- **读侧同步放行**：开关开启时**已落库**的失败驱动窗口立即不再挡人（渠道级 / 成员级 `cooldownUntil`、端点级 `cooldownUntil`）；窗口值不删不改写、写入点语义逐字节不动，关回开关即恢复原行为。
+- **端点轮换修正**：开关开启时把「本请求已尝试端点」作为选择层排除集（`selectSiteApiEndpointTarget(excludeEndpointIds)`），避免因不再写冷却而丢失同请求内的端点故障转移；默认关闭时不传该集合，既有「冷却兜轮换」路径不变（4xx/429 今天不轮换的行为也不变）。
+- **上游指令型冷却保留**：配额 / 限流 reset hint 与 provider-directed 窗口照旧生效（判据收敛在 `shared/failureDrivenCooldownSwitch.isProviderDirectedCooldownShape`，与 `channelRecoveryProbeService.isProviderDirectedCooldown` 同源，避免两份判据漂移）；失败观测照旧落库（`fail_count` / `last_failed_at` / `last_failure_reason` / 代理日志 / 熔断状态），软性排序权重（`SITE_RUNTIME_MIN_MULTIPLIER` 等）不动。
+- **已知残留（如实记录）**：读侧判据用「当下」失败计数（`failCount` / `consecutiveFailCount` / `cooldownLevel` 全为 0 才算上游指令型），未加窗口来源列 ⇒ 若一条配额窗口在途期间恰有非配额失败落库，该残留上游窗口也会被一并忽略（fail-open，下一次同渠道配额 429 即自愈）；彻底消除需 schema 加「来源」列，超出本次范围。详见 `.agents/notes/20261001-failure-cooldown-master-switch.md`。
+
+### 变更
+
+- 运行时设置接线：env `DISABLE_FAILURE_DRIVEN_COOLDOWN`（默认 false）、`PUT /api/settings` 的校验与落库、库值水合（非布尔保留现值）与运行时回显。
+
 ## [1.4.13] - 2026-10-01
 
 ### 修复

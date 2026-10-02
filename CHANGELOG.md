@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [1.4.15] - 2026-10-02
+
+### 修复
+
+- **客户端可见失败语义（CVF）：带内失败帧不再被静默丢弃**。上游把 provider 失败包成 HTTP 200 + `text/event-stream` 时，失败只写在帧里（实测形 `data: {"error":{"code":"stream_initialization_failed","message":"…status 429…","request_id":"…"},"type":"stream_error"}`），旧判据只认 `type` 为 `response.failed` / `error` ⇒ 认不到 ⇒ 归一化无匹配 ⇒ 上游文本被静默丢弃。判据改为三分类 `classifyInBandFailure`（`src/server/transformers/openai/chat/proxyStream.ts:73`）：`legacy`（改动前就认得的形，逐字保持原判据与原路径）、`new`（顶层 `error` 对象 / `type` 为 `stream_error` / SSE 帧名 `error`）、`null`。`new` 形改走带内失败出口：客户端拿到**上游 payload 原文 + 本仓重建的 SSE 信封**（`event:` 名保留、`data:` 原文逐行前缀）——openai 下游；claude 下游上游帧非 Anthropic 形，改用本仓既有 claude 带内错误帧形（`event: error` + `{"type":"error","error":{"type":"api_error","message":"<上游原文>"}}`）承载同一份原文，**恰好一帧**。失败原因另在**不覆盖原文**的前提下补尾部标识后缀 `(code=…, request_id=…)`（`appendFailureIdentifiers`，取顶层 `error.code` 与顶层 `request_id` / `error.request_id`）。
+- **未写字节走 HTTP 层，失败终态不生成终结帧**。`new` / `legacy` 失败帧在「本轮尚未向下游写出任何字节」时不再 hijack 成 200 SSE，只记 `markFailed(上游原文)`，把「状态码 + 上游原文」交给既有 HTTP 层失败出口（**502** + `error.type='upstream_error'` + 上游原文，codex 系据此自行退避）；已写过字节才走带内透传。失败终态下本仓**不再生成终结帧**（openai 的 `data: [DONE]` / claude 的 `message_stop`），仅 **openai 下游**在已写字节时原样回放上游自带的 `[DONE]`（回放条件 `proxyStream.ts:355`）。
+- **claude 下游 legacy 老形失败改发 `event: error`（R4）**。`response.failed` + 已写字节 + claude 下游原先经归一化块渲染成 `message_delta{stop_reason:'end_turn'}` + `message_stop`（客户端读作「正常结束（带部分内容）」、服务端记 failed），现改为**恰好一帧 `event: error`**（message = 上游原文 + 后缀）、不含本仓终结帧，已写出的内容原样保留在前（`proxyStream.ts:487-502`）。openai 下游一字未动。
+- **网络类异常归一（`endpointFlow`）**：`dispatchAttempt` 里直接 throw 的网络类异常（fetch reject / body 读取异常）归一成与 `!response.ok` 同路径的 `{ok:false,status:502,errText:formatErrorCause(err)}`——客户端可见状态码保持 502，错误 `type` 由 `server_error` 纠正为 `upstream_error`，attempt 记录与 `final_upstream_path` 现在也会落库；重试 / 端点轮换语义不变。
+- **已 `reply.hijack()` 的流式失败补 in-band 错误帧**：hijack 后不能再 `reply.code().send(...)`（`ERR_HTTP_HEADERS_SENT`，Fastify 5 只 warn 后丢弃 ⇒ 客户端拿不到任何失败信号），改为写一帧标准错误后 `end()`（openai `data: {"error":{…,"type":"upstream_error","code":502}}` / claude `event: error` + `{"type":"error",…}`，**绝不**追加 `[DONE]` / `message_stop`），且只在「写过帧但无终结事件」时补、只补一帧；未 hijack 出口保持 `reply.code(502).send(...)`。
+- **修掉依赖真实时钟的夹具时间炸弹**：`src/server/routes/api/upstreamObservations.test.ts` 的时间锚点由硬编码 `Date.UTC(2026, 8, 25, 7, 0, 0)` 改为由 `Date.now()` 派生（秒精度，`BASE_UTC === BASE_MS` 语义不变）——聚合路由的默认窗口按墙上时钟算（`to = now`、`from = to - 7d`），锚点一旦过期，整组夹具被排出默认窗口，断言不再测它要测的东西。
+
+### 变更
+
+- **空内容判失败默认开启**：`PROXY_EMPTY_CONTENT_FAIL` 默认值 `false → true`（`src/server/config.ts:189-190`，仅显式 `PROXY_EMPTY_CONTENT_FAIL=false` 可关）。开启时上游空内容判为失败（502 JSON + 自写 `Upstream returned empty content`），客户端不会收到「空的成功」；UI 预加载占位值与勾选项文案（`src/web/pages/UpstreamSettings.tsx`）、`.env.example`、`docs/configuration.md` 同步。
+- **`proxy_logs` 新增可空观测列 `client_http_status`**（客户端实收状态码）：与 `http_status` 语义分离——`http_status` 是「本轮上游/逻辑状态」（网络层执行失败为 `0`），客户端实收却是出口状态码（同上情形 502/503），SSE 已 hijack 时实收 200 + 流内错误帧。落点为 `src/server/db/schema.ts` + sqlite 迁移 `drizzle/0032_proxy_logs_client_http_status.sql` + 三方言产物与 `schemaContract.json`（可空、无破坏性默认）；写侧 `src/server/services/proxyLogStore.ts`（`has*` 门禁 + 缺列降级只丢该列、绝不丢整条日志；无法判定写 NULL，不写猜测值）、跨库迁移 `src/server/services/databaseMigrationService.ts`。上游原文**落库**另有 64KB 守卫（`guardUpstreamErrorMessageForLog`），且尾部 `(code=…, request_id=…)` 标识后缀**不受截断影响**（`truncateUpstreamErrorMessageWithLimit`）；下发给客户端的 1000 封顶口径不变，带内透传的上游帧不封顶。
+- **路由刷新补纯观测埋点**：`[proxy/route-refresh]` 结构化日志 + `getRouteRefreshObservation()`（耗时 / 命中 / 成功 / 失败计数），不改变刷新门禁与选择语义（`src/server/proxy-core/channelSelection.ts`）。
+
 ## [1.4.14] - 2026-10-02
 
 ### 新增

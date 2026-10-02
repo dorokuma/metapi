@@ -18,6 +18,7 @@ describe('siteApiEndpointService', () => {
   let recordSiteApiEndpointSuccess: SiteApiEndpointServiceModule['recordSiteApiEndpointSuccess'];
   let dataDir = '';
   let originalEndpointCooldownSec = 60;
+  let originalDisableFailureDrivenCooldown = false;
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-site-api-endpoint-service-'));
@@ -32,6 +33,7 @@ describe('siteApiEndpointService', () => {
     schema = dbModule.schema;
     config = configModule.config;
     originalEndpointCooldownSec = config.siteApiEndpointCooldownSec;
+    originalDisableFailureDrivenCooldown = config.disableFailureDrivenCooldown;
     selectSiteApiEndpointTarget = serviceModule.selectSiteApiEndpointTarget;
     recordSiteApiEndpointFailure = serviceModule.recordSiteApiEndpointFailure;
     recordSiteApiEndpointSuccess = serviceModule.recordSiteApiEndpointSuccess;
@@ -40,12 +42,14 @@ describe('siteApiEndpointService', () => {
   beforeEach(async () => {
     resetProxyChannelCoordinatorState();
     config.siteApiEndpointCooldownSec = originalEndpointCooldownSec;
+    config.disableFailureDrivenCooldown = originalDisableFailureDrivenCooldown;
     await db.delete(schema.siteApiEndpoints).run();
     await db.delete(schema.sites).run();
   });
 
   afterAll(() => {
     config.siteApiEndpointCooldownSec = originalEndpointCooldownSec;
+    config.disableFailureDrivenCooldown = originalDisableFailureDrivenCooldown;
     delete process.env.DATA_DIR;
   });
 
@@ -587,6 +591,136 @@ describe('siteApiEndpointService', () => {
       .get();
     expect(stored?.lastFailureReason).toBe('fetch failed (cause: ECONNRESET connection reset by peer)');
     expect(stored?.cooldownUntil).not.toBeNull();
+  });
+
+  it('skips the endpoint cooldown write but still records the failure when the failure cooldown switch is on', async () => {
+    config.disableFailureDrivenCooldown = true;
+
+    const site = await db.insert(schema.sites).values({
+      name: 'switch-on-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-switch-on.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    const result = await recordSiteApiEndpointFailure(endpoint.id, {
+      status: 502,
+      message: 'Bad gateway',
+    }, '2026-03-31T12:00:00.000Z');
+
+    // 失败分类不变（仍是「可触发冷却」的失败类型），但总开关开启后不写冷却窗口。
+    expect(result).toMatchObject({
+      retryable: true,
+      rotateToNextEndpoint: true,
+      triggersEndpointCooldown: true,
+      cooldownUntil: null,
+      failureReason: 'HTTP 502: Bad gateway',
+    });
+
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+    expect(stored).toMatchObject({
+      cooldownUntil: null,
+      lastFailedAt: '2026-03-31T12:00:00.000Z',
+      lastFailureReason: 'HTTP 502: Bad gateway',
+    });
+  });
+
+  it('rotates to the next endpoint in the same request when the failure cooldown switch is on', async () => {
+    config.disableFailureDrivenCooldown = true;
+
+    const site = await db.insert(schema.sites).values({
+      name: 'switch-rotation-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values([
+      {
+        siteId: site.id,
+        url: 'https://api-a.example.com',
+        enabled: true,
+        sortOrder: 0,
+      },
+      {
+        siteId: site.id,
+        url: 'https://api-b.example.com',
+        enabled: true,
+        sortOrder: 1,
+      },
+    ]).run();
+
+    const serviceModule = await import('./siteApiEndpointService.js');
+    const attemptedBaseUrls: string[] = [];
+    const result = await serviceModule.runWithSiteApiEndpointPool(site, async (target) => {
+      attemptedBaseUrls.push(target.baseUrl);
+      if (target.baseUrl === 'https://api-a.example.com') {
+        throw new serviceModule.SiteApiEndpointRequestError('HTTP 502: Bad gateway', { status: 502 });
+      }
+      return { upstream: new Response('ok via api-b') };
+    });
+
+    // 冷却被总开关关掉后，同请求内的轮换只能靠「已尝试端点」排除集兜住。
+    expect(attemptedBaseUrls).toEqual([
+      'https://api-a.example.com',
+      'https://api-b.example.com',
+    ]);
+    expect(await (result as { upstream: Response }).upstream.text()).toBe('ok via api-b');
+
+    const storedEndpoints = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.siteId, site.id))
+      .orderBy(asc(schema.siteApiEndpoints.sortOrder), asc(schema.siteApiEndpoints.id))
+      .all();
+    expect(storedEndpoints[0]).toMatchObject({
+      cooldownUntil: null,
+      lastFailureReason: 'HTTP 502: Bad gateway',
+    });
+    expect(storedEndpoints[0]?.lastFailedAt).toBeTruthy();
+    expect(storedEndpoints[1]?.lastSelectedAt).toBeTruthy();
+  });
+
+  it('releases an already written failure-driven endpoint cooldown when the failure cooldown switch is turned on', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'switch-release-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const endpoint = await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-switch-release.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).returning().get();
+
+    const failureAt = '2026-03-31T12:00:00.000Z';
+    const readEndpoint = async () => await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.id, endpoint.id))
+      .get();
+
+    // 默认（开关 false）：失败写下端点冷却窗口。
+    await recordSiteApiEndpointFailure(endpoint.id, { status: 502, message: 'Bad gateway' }, failureAt);
+    const cooling = await readEndpoint();
+    expect(cooling?.cooldownUntil).toBeTruthy();
+    // 窗口未过期前，唯一端点被挡（selector 返回 null），反向对照。
+    await expect(selectSiteApiEndpointTarget(site, failureAt)).resolves.toBeNull();
+
+    // 翻开关：窗口不删、不改写，读侧从这一刻起不再因它挡人。
+    config.disableFailureDrivenCooldown = true;
+    const released = await selectSiteApiEndpointTarget(site, failureAt);
+    expect(released?.endpointId).toBe(endpoint.id);
+    // 窗口值照旧留库做观测（不删状态、不改写入点既有语义）。
+    expect((await readEndpoint())?.cooldownUntil).toBe(cooling?.cooldownUntil);
   });
 
   it('lets a `.cause`-only errno flip the failure classification', async () => {

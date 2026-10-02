@@ -41,6 +41,10 @@ import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyReque
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { normalizeSiteApiEndpointCooldownSec } from '../../shared/siteApiEndpointCooldownSec.js';
+import {
+  DISABLE_FAILURE_DRIVEN_COOLDOWN_DEFAULT,
+  normalizeDisableFailureDrivenCooldown,
+} from '../../shared/failureDrivenCooldownSwitch.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 import {
   startModelAvailabilityProbeScheduler,
@@ -143,6 +147,7 @@ interface RuntimeSettingsBody {
   proxyFirstByteTimeoutSec?: number;
   tokenRouterFailureCooldownMaxSec?: number;
   siteApiEndpointCooldownSec?: number;
+  disableFailureDrivenCooldown?: boolean;
   routingWeights?: Partial<RoutingWeights>;
   proxyErrorKeywords?: string[] | string;
   proxyEmptyContentFailEnabled?: boolean;
@@ -794,6 +799,12 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.siteApiEndpointCooldownSec = normalized;
       return;
     }
+    case 'disable_failure_driven_cooldown': {
+      const normalized = normalizeDisableFailureDrivenCooldown(value);
+      if (normalized == null) return;
+      config.disableFailureDrivenCooldown = normalized;
+      return;
+    }
     case 'post_refresh_probe_enabled':
     case 'post_refresh_probe_model':
     case 'post_refresh_probe_scope':
@@ -850,6 +861,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
     siteApiEndpointCooldownSec: config.siteApiEndpointCooldownSec,
+    disableFailureDrivenCooldown: config.disableFailureDrivenCooldown,
     routingWeights: config.routingWeights,
     webhookUrl: config.webhookUrl,
     barkUrl: config.barkUrl,
@@ -2060,6 +2072,26 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.siteApiEndpointCooldownSec = normalized;
       upsertSetting('site_api_endpoint_cooldown_sec', normalized);
+    }
+
+    if (body.disableFailureDrivenCooldown !== undefined) {
+      let nextValue = DISABLE_FAILURE_DRIVEN_COOLDOWN_DEFAULT;
+      try {
+        nextValue = parseBooleanFlag(body.disableFailureDrivenCooldown, '失败驱动的冷却总开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '失败驱动的冷却总开关格式无效',
+        });
+      }
+
+      if (nextValue !== config.disableFailureDrivenCooldown) {
+        changedLabels.push(nextValue
+          ? '失败不再写入冷却（上游配额/限流冷却保留）'
+          : '失败重新写入冷却');
+      }
+      config.disableFailureDrivenCooldown = nextValue;
+      upsertSetting('disable_failure_driven_cooldown', nextValue);
     }
 
     if (pendingPayloadRules !== undefined) {

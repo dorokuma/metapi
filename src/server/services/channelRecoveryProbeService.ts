@@ -6,6 +6,7 @@ import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
 import { probeRuntimeModel } from './runtimeModelProbe.js';
 import { tokenRouter } from './tokenRouter.js';
 import { isExactTokenRouteModelPattern } from '../../shared/tokenRoutePatterns.js';
+import { isProviderDirectedCooldownShape } from '../shared/failureDrivenCooldownSwitch.js';
 
 type RecoveryProbeSource = 'cooldown' | 'active';
 
@@ -80,10 +81,10 @@ function resolveProbeTokenValue(row: {
 function isProviderDirectedCooldown(row: {
   route_channels: typeof schema.routeChannels.$inferSelect;
 }): boolean {
+  // 判据收敛到 shared/failureDrivenCooldownSwitch.isProviderDirectedCooldownShape（那里记了写入侧不变式），
+  // 避免「探活认 provider-directed」与「读侧放行认失败驱动」两份判据各自漂移。
   return !!row.route_channels.cooldownUntil
-    && (row.route_channels.failCount ?? 0) <= 0
-    && (row.route_channels.consecutiveFailCount ?? 0) <= 0
-    && (row.route_channels.cooldownLevel ?? 0) <= 0;
+    && isProviderDirectedCooldownShape(row.route_channels);
 }
 
 async function mapWithConcurrency<T>(

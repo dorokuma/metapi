@@ -9,6 +9,7 @@ import { normalizeUpstreamPinAdapterMap } from './services/upstreamProviderPin/a
 import { normalizeUpstreamParamCompatRules } from './services/upstreamParamCompat/rules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 import { normalizeSiteApiEndpointCooldownSec } from './shared/siteApiEndpointCooldownSec.js';
+import { normalizeDisableFailureDrivenCooldown } from './shared/failureDrivenCooldownSwitch.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
   const raw = settingsMap.get(key);
@@ -240,6 +241,14 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const normalizedSiteApiEndpointCooldownSec = normalizeSiteApiEndpointCooldownSec(siteApiEndpointCooldownSec);
   if (normalizedSiteApiEndpointCooldownSec != null) {
     config.siteApiEndpointCooldownSec = normalizedSiteApiEndpointCooldownSec;
+  }
+
+  // 失败驱动的冷却总开关：非法/缺失值保留 config 现值（默认 false）。
+  const disableFailureDrivenCooldown = normalizeDisableFailureDrivenCooldown(
+    parseSettingFromMap<boolean>(settingsMap, 'disable_failure_driven_cooldown'),
+  );
+  if (disableFailureDrivenCooldown != null) {
+    config.disableFailureDrivenCooldown = disableFailureDrivenCooldown;
   }
 
   const webhookUrl = parseSettingFromMap<string>(settingsMap, 'webhook_url');

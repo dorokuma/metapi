@@ -69,6 +69,7 @@ describe('settings and auth events', () => {
     (config as any).siteApiEndpointCooldownSec = 60;
     (config as any).tokenRouterFailureCooldownMaxSec = 30 * 24 * 60 * 60;
     (config as any).disableCrossProtocolFallback = false;
+    (config as any).disableFailureDrivenCooldown = false;
     (config as any).payloadRules = {
       default: [],
       defaultRaw: [],
@@ -654,6 +655,41 @@ describe('settings and auth events', () => {
       url: '/api/settings/runtime',
       payload: {
         siteApiEndpointCooldownSec: 0,
+      },
+    });
+    expect(rejectedResponse.statusCode).toBe(400);
+  });
+
+  it('persists, echoes and validates the failure-driven cooldown switch from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        disableFailureDrivenCooldown: true,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { disableFailureDrivenCooldown?: boolean };
+    expect(updated.disableFailureDrivenCooldown).toBe(true);
+    expect((config as any).disableFailureDrivenCooldown).toBe(true);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'disable_failure_driven_cooldown')).get();
+    expect(saved?.value).toBe(JSON.stringify(true));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { disableFailureDrivenCooldown?: boolean };
+    expect(runtime.disableFailureDrivenCooldown).toBe(true);
+
+    const rejectedResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        disableFailureDrivenCooldown: 'true',
       },
     });
     expect(rejectedResponse.statusCode).toBe(400);

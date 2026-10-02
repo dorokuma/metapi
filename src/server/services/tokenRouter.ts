@@ -35,6 +35,11 @@ import {
   type RouteDecisionCandidate,
   type RouteMode,
 } from '../../shared/tokenRouteContract.js';
+import {
+  normalizeDisableFailureDrivenCooldown,
+  shouldIgnoreFailureDrivenCooldownWindow,
+  type FailureCooldownCounters,
+} from '../shared/failureDrivenCooldownSwitch.js';
 
 interface RouteMatch {
   route: RouteRow;
@@ -347,6 +352,34 @@ function resolveEffectiveFailureCooldownMs(failCount?: number | null): number {
 function resolveRoundRobinCooldownSec(level: number): number {
   const normalizedLevel = Math.max(0, Math.min(ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1, Math.trunc(level)));
   return ROUND_ROBIN_COOLDOWN_LEVELS_SEC[normalizedLevel] ?? 0;
+}
+
+/**
+ * 失败驱动的冷却总开关（默认 false）。开启后失败不再写失败驱动的冷却窗口
+ * （端点/通道 weighted fibonacci 与 round_robin 阶梯都停摆），只保留 failCount /
+ * lastFailAt / lastFailureReason 等观测字段；配额/限流（上游指令）分支不受影响。
+ * 另外，开启后运行时熔断（`SITE_RUNTIME_BREAKER_LEVELS_MS` 的 60s/5min/30min 阶梯）
+ * 也不再排除候选：见 `filterSiteRuntimeBrokenCandidatesByModel`，否则「多候选全熔断 ⇒
+ * 候选清空」在调度层等价于硬挡。
+ */
+function isFailureDrivenCooldownDisabled(): boolean {
+  return normalizeDisableFailureDrivenCooldown(config.disableFailureDrivenCooldown) === true;
+}
+
+/**
+ * 通道/成员级**读侧**：该冷却窗口此刻是否仍然挡人。
+ *
+ * - 开关关闭（默认）⇒ 逐字节等价于既有的 `!!row.cooldownUntil && row.cooldownUntil > nowIso`。
+ * - 开关开启 ⇒ 只忽略「失败驱动形状」的窗口（失败计数三件套有一项 > 0），
+ *   上游指令型（配额/限流 reset hint）窗口照旧挡人；窗口值本身不删不改，可回退。
+ *   判据与写入形状见 `shared/failureDrivenCooldownSwitch.ts`。
+ */
+function isFailureCooldownWindowBlocking(
+  row: FailureCooldownCounters & { cooldownUntil?: string | null },
+  nowIso: string,
+): boolean {
+  if (!row.cooldownUntil || row.cooldownUntil <= nowIso) return false;
+  return !shouldIgnoreFailureDrivenCooldownWindow(row, isFailureDrivenCooldownDisabled());
 }
 
 function resolveSiteRuntimeBreakerMs(level: number): number {
@@ -1045,6 +1078,18 @@ function filterSiteRuntimeBrokenCandidatesByModel(
   candidates: RouteChannelCandidate[];
   avoided: Array<{ candidate: RouteChannelCandidate; reason: string }>;
 } {
+  // 失败驱动的冷却总开关开启：运行时熔断（站点/模型/渠道熔断状态，即
+  // `SITE_RUNTIME_BREAKER_LEVELS_MS` 的 60s / 5min / 30min 阶梯）不再排除候选。
+  // 该过滤是「多候选全熔断 ⇒ healthy 为空 ⇒ 候选清空」这条硬挡路径的唯一入口，
+  // 开启时必须整段放行；只放行「全熔断」那一支仍会让失败站点被软性排除，与「不再因失败挡」不符。
+  // 开关关闭（默认）时该分支恒假，后续路径逐字节不变；熔断状态本身照旧写入与清零（观测不丢）。
+  if (isFailureDrivenCooldownDisabled()) {
+    return {
+      candidates,
+      avoided: [],
+    };
+  }
+
   if (candidates.length <= 1) {
     return {
       candidates,
@@ -1563,7 +1608,8 @@ function isOauthRouteUnitMemberCoolingDown(
   member: typeof schema.oauthRouteUnitMembers.$inferSelect,
   nowIso: string,
 ): boolean {
-  return !!member.cooldownUntil && member.cooldownUntil > nowIso;
+  // 读侧放行：开关开启时忽略失败驱动形状的成员窗口（上游指令型窗口仍挡人）。
+  return isFailureCooldownWindowBlocking(member, nowIso);
 }
 
 function compareStableFirstCandidateOrder(left: RouteChannelCandidate, right: RouteChannelCandidate): number {
@@ -2706,6 +2752,8 @@ export class TokenRouter {
     const route = row.token_routes;
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
+    // 失败驱动的冷却总开关（成员级与通道级共用同一判定）。
+    const failureDrivenCooldownDisabled = isFailureDrivenCooldownDisabled();
     const normalizedContext: SiteRuntimeFailureContext = typeof context === 'string'
       ? { modelName: context }
       : (context ?? {});
@@ -2744,7 +2792,8 @@ export class TokenRouter {
           consecutiveFailCount = 0;
           cooldownLevel = 0;
         } else if (routeUnitStrategy === 'round_robin') {
-          if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
+          // 总开关开启：失败驱动的阶梯（cooldownLevel / consecutiveFailCount 推进 + 窗口）整体停摆。
+          if (!failureDrivenCooldownDisabled && consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
             cooldownLevel = Math.min(cooldownLevel + 1, ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1);
             const cooldownSec = resolveRoundRobinCooldownSec(cooldownLevel);
             cooldownUntil = memberCoolingDown
@@ -2757,7 +2806,9 @@ export class TokenRouter {
         } else {
           cooldownUntil = memberCoolingDown
             ? memberRow.member.cooldownUntil
-            : new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
+            : failureDrivenCooldownDisabled
+              ? null
+              : new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
           consecutiveFailCount = 0;
           cooldownLevel = 0;
         }
@@ -2797,7 +2848,8 @@ export class TokenRouter {
       consecutiveFailCount = 0;
       cooldownLevel = 0;
     } else if (routeStrategy === 'round_robin') {
-      if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
+      // 总开关开启：失败驱动的阶梯（cooldownLevel / consecutiveFailCount 推进 + 窗口）整体停摆。
+      if (!failureDrivenCooldownDisabled && consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
         cooldownLevel = Math.min(cooldownLevel + 1, ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1);
         const cooldownSec = resolveRoundRobinCooldownSec(cooldownLevel);
         cooldownUntil = channelCoolingDown
@@ -2810,7 +2862,9 @@ export class TokenRouter {
     } else {
       cooldownUntil = channelCoolingDown
         ? ch.cooldownUntil
-        : new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
+        : failureDrivenCooldownDisabled
+          ? null
+          : new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
       consecutiveFailCount = 0;
       cooldownLevel = 0;
     }
@@ -3383,7 +3437,9 @@ export class TokenRouter {
     const tokenValue = this.resolveChannelTokenValue(candidate);
     if (!tokenValue) reasonParts.push('令牌不可用');
 
-    if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
+    // 读侧放行：开关开启时忽略失败驱动形状的通道窗口（「冷却中」不再进入不可用原因）；
+    // 上游指令型（配额/限流 reset hint）窗口照旧挡人。
+    if (isFailureCooldownWindowBlocking(candidate.channel, nowIso)) {
       reasonParts.push('冷却中');
     }
 

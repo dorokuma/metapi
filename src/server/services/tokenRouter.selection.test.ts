@@ -38,6 +38,7 @@ describe('TokenRouter selection scoring', () => {
   let idSeed = 0;
   let originalRoutingWeights: typeof config.routingWeights;
   let originalRoutingFallbackUnitCost: number;
+  let originalDisableFailureDrivenCooldown = false;
   let originalProxySessionChannelConcurrencyLimit: number;
   let originalProxySessionChannelQueueWaitMs: number;
 
@@ -74,6 +75,7 @@ describe('TokenRouter selection scoring', () => {
     resetProxyChannelCoordinatorState = coordinatorModule.resetProxyChannelCoordinatorState;
     originalRoutingWeights = { ...config.routingWeights };
     originalRoutingFallbackUnitCost = config.routingFallbackUnitCost;
+    originalDisableFailureDrivenCooldown = config.disableFailureDrivenCooldown;
     originalProxySessionChannelConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
     originalProxySessionChannelQueueWaitMs = config.proxySessionChannelQueueWaitMs;
   });
@@ -84,6 +86,7 @@ describe('TokenRouter selection scoring', () => {
     mockedCatalogRoutingCost.mockReturnValue(null);
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
+    config.disableFailureDrivenCooldown = originalDisableFailureDrivenCooldown;
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
@@ -98,6 +101,7 @@ describe('TokenRouter selection scoring', () => {
   afterAll(() => {
     config.routingWeights = { ...originalRoutingWeights };
     config.routingFallbackUnitCost = originalRoutingFallbackUnitCost;
+    config.disableFailureDrivenCooldown = originalDisableFailureDrivenCooldown;
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     invalidateTokenRouterCache();
@@ -794,6 +798,190 @@ describe('TokenRouter selection scoring', () => {
     expect(updatedA?.cooldownUntil).toBeTruthy();
     expect(updatedB?.cooldownUntil).toBeNull();
     expect(updatedB?.lastFailAt).toBeNull();
+
+    // 总开关开启也不得干预「上游指令驱动」的配额/限流冷却（provider-directed）。
+    config.disableFailureDrivenCooldown = true;
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      failCount: 0,
+      lastFailAt: null,
+    }).where(eq(schema.routeChannels.id, channelA.id)).run();
+    invalidateTokenRouterCache();
+
+    await router.recordFailure(channelA.id, {
+      status: 429,
+      errorText: 'rate limit reached for this channel',
+      modelName: 'gpt-5.4',
+    });
+
+    const quotaCooled = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channelA.id))
+      .get();
+    expect(quotaCooled?.cooldownUntil).toBeTruthy();
+  });
+
+  it('keeps the failure-driven channel cooldown by default and skips it when the failure cooldown switch is on', async () => {
+    const modelPattern = 'gpt-5.3-cooldown-switch';
+    const route = await createRoute(modelPattern);
+    const site = await createSite('cooldown-switch');
+    const account = await createAccount(site.id, 'cooldown-switch-user');
+    const token = await createToken(account.id, 'cooldown-switch-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const readChannel = async () => await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+
+    // 默认（开关 false）：既有行为——失败写冷却窗口，单通道路由此后选不出通道。
+    await router.recordFailure(channel.id, { status: 502, errorText: 'Bad gateway' });
+    const cooling = await readChannel();
+    expect(cooling?.cooldownUntil).toBeTruthy();
+    expect(cooling?.lastFailAt).toBeTruthy();
+    expect(cooling?.failCount).toBe(1);
+    await expect(router.selectChannel(modelPattern)).resolves.toBeNull();
+
+    // 开关开启：不再写冷却窗口，失败仍留痕，单渠道随后仍能选中（用户场景回归）。
+    config.disableFailureDrivenCooldown = true;
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, channel.id)).run();
+    invalidateTokenRouterCache();
+
+    await router.recordFailure(channel.id, { status: 502, errorText: 'Bad gateway' });
+    const recorded = await readChannel();
+    expect(recorded?.cooldownUntil).toBeNull();
+    expect(recorded?.lastFailAt).toBeTruthy();
+    expect(recorded?.failCount).toBe(1);
+
+    const selected = await router.selectChannel(modelPattern);
+    expect(selected?.channel.id).toBe(channel.id);
+  });
+
+  it('releases an already written failure-driven channel cooldown as soon as the failure cooldown switch is turned on', async () => {
+    const modelPattern = 'gpt-5.3-cooldown-switch-release';
+    const route = await createRoute(modelPattern);
+    const site = await createSite('cooldown-switch-release');
+    const account = await createAccount(site.id, 'cooldown-switch-release-user');
+    const token = await createToken(account.id, 'cooldown-switch-release-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const readChannel = async () => await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+
+    // 默认（开关 false）：先写下失败驱动的通道冷却窗口（weighted fibonacci，failCount ≥ 1）。
+    await router.recordFailure(channel.id, { status: 502, errorText: 'Bad gateway' });
+    const cooling = await readChannel();
+    expect(cooling?.cooldownUntil).toBeTruthy();
+    expect(cooling?.failCount).toBe(1);
+    // 窗口未过期前，单渠道被硬挡（默认行为，反向对照）。
+    await expect(router.selectChannel(modelPattern)).resolves.toBeNull();
+
+    // 翻开关：窗口不删、不改写，但读侧从这一刻起不再因它挡人。
+    config.disableFailureDrivenCooldown = true;
+    invalidateTokenRouterCache();
+
+    const stillCooling = await readChannel();
+    // 窗口值照旧留在库里做观测（不删状态、不改写入点既有语义）。
+    expect(stillCooling?.cooldownUntil).toBe(cooling?.cooldownUntil);
+    const decision = await router.explainSelection(modelPattern);
+    expect(decision.candidates.find((candidate) => candidate.channelId === channel.id)?.reason || '')
+      .not.toContain('冷却中');
+    const released = await router.selectChannel(modelPattern);
+    expect(released?.channel.id).toBe(channel.id);
+
+    // 关回 false（可回退）：窗口仍在 ⇒ 旧行为逐字恢复。
+    config.disableFailureDrivenCooldown = false;
+    invalidateTokenRouterCache();
+    await expect(router.selectChannel(modelPattern)).resolves.toBeNull();
+  });
+
+  it('still blocks a provider-directed (quota) channel cooldown when the failure cooldown switch is on', async () => {
+    const modelPattern = 'gpt-5.3-cooldown-switch-quota';
+    const route = await createRoute(modelPattern);
+    const site = await createSite('cooldown-switch-quota');
+    const account = await createAccount(site.id, 'cooldown-switch-quota-user');
+    const token = await createToken(account.id, 'cooldown-switch-quota-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    config.disableFailureDrivenCooldown = true;
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 429,
+      errorText: 'rate limit reached for this channel',
+    });
+
+    const quotaCooling = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    // 配额/限流窗口照旧写入，且是 provider-directed 形状（失败计数三件套全 0）。
+    expect(quotaCooling?.cooldownUntil).toBeTruthy();
+    expect(quotaCooling?.failCount).toBe(0);
+    expect(quotaCooling?.consecutiveFailCount).toBe(0);
+    expect(quotaCooling?.cooldownLevel).toBe(0);
+    // 上游明确说「别打」：总开关不解除上游指令型窗口，读侧照旧挡人。
+    await expect(router.selectChannel(modelPattern)).resolves.toBeNull();
+  });
+
+  it('does not advance the round robin cooldown ladder when the failure cooldown switch is on', async () => {
+    config.disableFailureDrivenCooldown = true;
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.3-rr-cooldown-switch',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+    const site = await createSite('rr-cooldown-switch');
+    const account = await createAccount(site.id, 'rr-cooldown-switch-user');
+    const token = await createToken(account.id, 'rr-cooldown-switch-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await router.recordFailure(channel.id, { status: 502, errorText: 'Bad gateway' });
+    }
+
+    const recorded = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    // 阶梯阈值（3 次）已到，但总开关开启 ⇒ 不写窗口、不推进 cooldownLevel、不清零计数。
+    expect(recorded?.cooldownUntil).toBeNull();
+    expect(recorded?.failCount).toBe(3);
+    expect(recorded?.consecutiveFailCount).toBe(3);
+    expect(recorded?.cooldownLevel).toBe(0);
+    expect(recorded?.lastFailAt).toBeTruthy();
   });
 
   it('opens a site breaker after repeated transient failures and closes it after recovery', async () => {
@@ -2014,6 +2202,92 @@ describe('TokenRouter selection scoring', () => {
     expect(yCandidate?.reason || '').toContain('渠道熔断');
     // Summary should indicate no channel was selected after breaker filtering.
     expect(decision.summary.join(' ')).toContain('本次未选出通道');
+  });
+
+  it('keeps runtime-breaker candidates selectable when the failure cooldown switch is on', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.3-breaker-switch',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const site = await createSite('breaker-switch-site');
+    const account = await createAccount(site.id, 'breaker-switch-user');
+    const tokenX = await createToken(account.id, 'breaker-switch-token-x');
+    const tokenY = await createToken(account.id, 'breaker-switch-token-y');
+
+    const channelX = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenX.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelY = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: tokenY.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    // 运行时熔断阶梯：连续 3 次瞬时失败 ⇒ 60s / 5min / 30min。
+    const failThrice = async () => {
+      for (let i = 0; i < 3; i += 1) {
+        await router.recordFailure(channelX.id, {
+          status: 502,
+          errorText: 'Bad gateway',
+          modelName: 'gpt-5.3-breaker-switch',
+        });
+        await router.recordFailure(channelY.id, {
+          status: 502,
+          errorText: 'Bad gateway',
+          modelName: 'gpt-5.3-breaker-switch',
+        });
+      }
+    };
+
+    await failThrice();
+    // 清掉渠道级冷却，让候选真正走到运行时熔断过滤点。
+    await router.clearChannelFailureState([channelX.id, channelY.id]);
+    invalidateTokenRouterCache();
+
+    // 开关 false（默认）：多候选全熔断 ⇒ 候选被清空 ⇒ 硬挡（既有行为，反向对照）。
+    const defaultDecision = await router.explainSelection('gpt-5.3-breaker-switch');
+    expect(defaultDecision.selectedChannelId).toBeUndefined();
+    expect(defaultDecision.summary.join(' ')).toContain('本次未选出通道');
+    expect(defaultDecision.candidates.find((candidate) => candidate.channelId === channelX.id)?.reason || '')
+      .toContain('渠道熔断');
+
+    // 开关 true：同一份熔断状态不再排除候选 ⇒ 仍能选出通道（用户「无限打」场景）。
+    config.disableFailureDrivenCooldown = true;
+    invalidateTokenRouterCache();
+
+    const switchedDecision = await router.explainSelection('gpt-5.3-breaker-switch');
+    expect([channelX.id, channelY.id]).toContain(switchedDecision.selectedChannelId);
+    expect(switchedDecision.summary.join(' ')).not.toContain('熔断避让');
+    expect(switchedDecision.candidates.find((candidate) => candidate.channelId === channelX.id)?.reason || '')
+      .not.toContain('熔断');
+    // 开关只停「硬挡」：熔断状态自身照旧写入与保留，观测不丢。
+    expect(isTokenRuntimeBreakerOpenForTest(tokenX.id)).toBe(true);
+
+    // 开关仍开启时再连续 3 次瞬时失败：候选依旧可选，不会被硬挡。
+    await failThrice();
+    invalidateTokenRouterCache();
+    const repeatedDecision = await router.explainSelection('gpt-5.3-breaker-switch');
+    expect([channelX.id, channelY.id]).toContain(repeatedDecision.selectedChannelId);
   });
 
   it('re-enters a recovered token back into the rotation pool after probe success', async () => {

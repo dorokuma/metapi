@@ -9,6 +9,7 @@ import { resolveUpstreamPinAdapter } from './services/upstreamProviderPin/adapte
 // （数组按值复制，其余为原始值/引用保持原语义：测试只整体赋值、不改写原对象）。
 const originalConfig = {
   disableCrossProtocolFallback: config.disableCrossProtocolFallback,
+  disableFailureDrivenCooldown: config.disableFailureDrivenCooldown,
   responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
   webhookEnabled: config.webhookEnabled,
   barkEnabled: config.barkEnabled,
@@ -35,6 +36,7 @@ describe('applyRuntimeSettings', () => {
   it('hydrates persisted runtime settings that should survive restarts', () => {
     config.disableCrossProtocolFallback = false;
     config.responsesCompactFallbackToResponsesEnabled = false;
+    config.disableFailureDrivenCooldown = false;
     config.webhookEnabled = true;
     config.barkEnabled = true;
     config.serverChanEnabled = true;
@@ -42,6 +44,7 @@ describe('applyRuntimeSettings', () => {
 
     applyRuntimeSettings(new Map([
       ['disable_cross_protocol_fallback', JSON.stringify(true)],
+      ['disable_failure_driven_cooldown', JSON.stringify(true)],
       ['responses_compact_fallback_to_responses_enabled', JSON.stringify(true)],
       ['webhook_enabled', JSON.stringify(false)],
       ['bark_enabled', JSON.stringify(false)],
@@ -50,11 +53,20 @@ describe('applyRuntimeSettings', () => {
     ]));
 
     expect(config.disableCrossProtocolFallback).toBe(true);
+    expect(config.disableFailureDrivenCooldown).toBe(true);
     expect(config.responsesCompactFallbackToResponsesEnabled).toBe(true);
     expect(config.webhookEnabled).toBe(false);
     expect(config.barkEnabled).toBe(false);
     expect(config.serverChanEnabled).toBe(false);
     expect(config.globalAllowedModels).toEqual(['gpt-5.4', 'claude-3.7-sonnet']);
+
+    // 非布尔值不静默强转：先把现值改成 false，再喂非法值（字符串 'true'），必须仍是 false。
+    // 若实现写成 Boolean(value) 之类的静默强转，这里会翻成 true，用例即失败。
+    config.disableFailureDrivenCooldown = false;
+    applyRuntimeSettings(new Map([
+      ['disable_failure_driven_cooldown', JSON.stringify('true')],
+    ]));
+    expect(config.disableFailureDrivenCooldown).toBe(false);
   });
 
   it('normalizes smtpPort to a positive integer during hydration', () => {

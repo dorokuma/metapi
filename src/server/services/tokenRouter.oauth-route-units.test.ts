@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
+type ConfigModule = typeof import('../config.js');
 
 describe('TokenRouter oauth route units', () => {
   let db: DbModule['db'];
@@ -13,6 +14,8 @@ describe('TokenRouter oauth route units', () => {
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let tokenRouterTestUtils: TokenRouterModule['__tokenRouterTestUtils'];
+  let config: ConfigModule['config'];
+  let originalDisableFailureDrivenCooldown = false;
   let dataDir = '';
 
   beforeAll(async () => {
@@ -22,14 +25,18 @@ describe('TokenRouter oauth route units', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const configModule = await import('../config.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     tokenRouterTestUtils = tokenRouterModule.__tokenRouterTestUtils;
+    config = configModule.config;
+    originalDisableFailureDrivenCooldown = config.disableFailureDrivenCooldown;
   });
 
   beforeEach(async () => {
+    config.disableFailureDrivenCooldown = originalDisableFailureDrivenCooldown;
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.modelAvailability).run();
@@ -42,6 +49,7 @@ describe('TokenRouter oauth route units', () => {
   });
 
   afterAll(() => {
+    config.disableFailureDrivenCooldown = originalDisableFailureDrivenCooldown;
     invalidateTokenRouterCache();
     delete process.env.DATA_DIR;
   });
@@ -675,5 +683,276 @@ describe('TokenRouter oauth route units', () => {
     expect(updatedMember?.cooldownUntil).toBe(seededCooldownUntil);
     expect(updatedMember?.consecutiveFailCount).toBe(0);
     expect(updatedMember?.cooldownLevel).toBe(1);
+  });
+
+  it('skips the round robin member cooldown ladder when the failure cooldown switch is on', async () => {
+    config.disableFailureDrivenCooldown = true;
+
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'rr-switch-off-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-rr-switch-off-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-rr-switch-off-member-a', email: 'rr-switch-off-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Round Robin Switch Off Pool',
+      strategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+    const member = await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+      // 连续失败计数已达阈值：本次失败会命中跨阈值阶梯分支。
+      consecutiveFailCount: 3,
+      cooldownLevel: 0,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, { status: 503, errorText: 'upstream unavailable' }, accountA.id);
+
+    const updatedMember = await db.select().from(schema.oauthRouteUnitMembers)
+      .where(eq(schema.oauthRouteUnitMembers.id, member.id))
+      .get();
+
+    // 总开关开启：阶梯停摆（不写窗口、不递增等级、不清零连续计数），失败仍留痕。
+    expect(updatedMember?.cooldownUntil).toBeNull();
+    expect(updatedMember?.cooldownLevel).toBe(0);
+    expect(updatedMember?.consecutiveFailCount).toBe(4);
+    expect(updatedMember?.failCount).toBe(1);
+    expect(updatedMember?.lastFailAt).toBeTruthy();
+  });
+
+  it('skips the stick-until-unavailable member cooldown window when the failure cooldown switch is on', async () => {
+    config.disableFailureDrivenCooldown = true;
+
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'sticky-switch-off-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-sticky-switch-off-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-sticky-switch-off-member-a', email: 'sticky-switch-off-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Sticky Switch Off Pool',
+      strategy: 'stick_until_unavailable',
+      enabled: true,
+    }).returning().get();
+    const member = await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, { status: 503, errorText: 'upstream unavailable' }, accountA.id);
+
+    const updatedMember = await db.select().from(schema.oauthRouteUnitMembers)
+      .where(eq(schema.oauthRouteUnitMembers.id, member.id))
+      .get();
+
+    // 总开关开启：fibonacci 窗口不写，但 failCount / lastFailAt 照旧记录。
+    expect(updatedMember?.cooldownUntil).toBeNull();
+    expect(updatedMember?.failCount).toBe(1);
+    expect(updatedMember?.lastFailAt).toBeTruthy();
+  });
+
+  it('releases an already written member cooldown when the failure cooldown switch is turned on', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'release-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-release-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-release-member-a', email: 'release-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Release Pool',
+      strategy: 'stick_until_unavailable',
+      enabled: true,
+    }).returning().get();
+    const member = await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+    }).returning().get();
+    await db.insert(schema.modelAvailability).values([
+      { accountId: accountA.id, modelName: 'gpt-5.4', available: true },
+    ]).run();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const readMember = async () => await db.select().from(schema.oauthRouteUnitMembers)
+      .where(eq(schema.oauthRouteUnitMembers.id, member.id))
+      .get();
+
+    // 默认（开关 false）：失败写下成员冷却窗口（stick_until_unavailable ⇒ fibonacci）。
+    await router.recordFailure(channel.id, { status: 503, errorText: 'upstream unavailable' }, accountA.id);
+    const cooling = await readMember();
+    expect(cooling?.cooldownUntil).toBeTruthy();
+    expect(cooling?.failCount).toBe(1);
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
+
+    // 翻开关：窗口照旧留库做观测，读侧从这一刻起不再因它挡人。
+    config.disableFailureDrivenCooldown = true;
+    invalidateTokenRouterCache();
+
+    const stillCooling = await readMember();
+    expect(stillCooling?.cooldownUntil).toBe(cooling?.cooldownUntil);
+    const released = await router.selectChannel('gpt-5.4');
+    expect(released?.account.id).toBe(accountA.id);
+  });
+
+  it('still blocks a provider-directed member cooldown when the failure cooldown switch is on', async () => {
+    config.disableFailureDrivenCooldown = true;
+
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'provider-directed-member-a@example.com',
+      accessToken: 'oauth-access-token-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-provider-directed-member-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-provider-directed-member-a', email: 'provider-directed-member-a@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Provider Directed Pool',
+      strategy: 'stick_until_unavailable',
+      enabled: true,
+    }).returning().get();
+    // provider-directed 形状的成员窗口：窗口在、失败计数三件套全 0（配额/限流分支的写入形状）。
+    await db.insert(schema.oauthRouteUnitMembers).values({
+      unitId: routeUnit.id,
+      accountId: accountA.id,
+      sortOrder: 0,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+      cooldownUntil: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    }).run();
+    await db.insert(schema.modelAvailability).values([
+      { accountId: accountA.id, modelName: 'gpt-5.4', available: true },
+    ]).run();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+
+    const router = new TokenRouter();
+    // 上游指令型窗口不得被总开关解除：成员仍不可用 ⇒ 候选不可用 ⇒ 选不出通道。
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
   });
 });

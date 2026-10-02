@@ -10,6 +10,7 @@ import {
   normalizeSiteApiEndpointCooldownSec,
   SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT,
 } from '../shared/siteApiEndpointCooldownSec.js';
+import { normalizeDisableFailureDrivenCooldown } from '../shared/failureDrivenCooldownSwitch.js';
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 404, 422]);
@@ -29,6 +30,14 @@ const NETWORK_FAILURE_PATTERNS = [
 function resolveSiteApiEndpointCooldownMs(): number {
   const normalized = normalizeSiteApiEndpointCooldownSec(config.siteApiEndpointCooldownSec);
   return (normalized ?? SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT) * 1000;
+}
+
+/**
+ * 失败驱动的冷却总开关（默认 false）。开启后失败不再产生端点冷却窗口，
+ * 端点轮换改由「本请求内已尝试端点」排除集驱动（见 runWithSiteApiEndpointPool）。
+ */
+function isFailureDrivenCooldownDisabled(): boolean {
+  return normalizeDisableFailureDrivenCooldown(config.disableFailureDrivenCooldown) === true;
 }
 
 type SiteRow = typeof schema.sites.$inferSelect;
@@ -232,7 +241,15 @@ function isCooldownActive(cooldownUntil: string | null | undefined, nowIso: stri
 }
 
 function isEndpointCoolingDown(endpoint: SiteApiEndpointRow, nowIso: string): boolean {
-  return isCooldownActive(endpoint.cooldownUntil, nowIso);
+  if (!isCooldownActive(endpoint.cooldownUntil, nowIso)) return false;
+  // 读侧放行：端点冷却窗口只有「失败驱动」一种来源，总开关开启时整段不再挡人；
+  // 窗口值仍留在库里做观测，开关关回去即恢复旧行为。依据（唯一写入点=recordSiteApiEndpointFailure）：
+  //   ① `site_api_endpoints.cooldown_until` 的全库写入点只有本文件的 recordSiteApiEndpointFailure
+  //      （失败驱动）与 recordSiteApiEndpointSuccess（置 null），无上游 reset hint 写入口；
+  //   ② `classifySiteApiEndpointFailure` 对 429/408 等 4xx 一律 `triggersEndpointCooldown=false`
+  //      （站点只有一个端点时写冷却等于把唯一出口拉黑），故配额/限流不会产生端点窗口；
+  //   ③ 站点编辑（PUT /api/sites/:id 重建 api_endpoints 行）只会把窗口重置为空，不是上游指令。
+  return !isFailureDrivenCooldownDisabled();
 }
 
 function isClientErrorStatus(status: number): boolean {
@@ -313,6 +330,11 @@ export function classifySiteApiEndpointFailure(
 export async function selectSiteApiEndpointTarget(
   site: SiteRow,
   now?: string | Date,
+  /**
+   * 本次请求内已经尝试失败的端点 id：总开关开启后冷却不再挡住失败端点，
+   * 只能靠该排除集保证「同一请求不重选失败端点」。默认不传（= 既有冷却驱动路径）。
+   */
+  excludeEndpointIds?: ReadonlySet<number>,
 ): Promise<SiteApiEndpointTarget | null> {
   const nowIso = toIsoTimestamp(now);
   const endpoints = await db.select().from(schema.siteApiEndpoints)
@@ -332,7 +354,9 @@ export async function selectSiteApiEndpointTarget(
   }
 
   const eligible = endpoints
-    .filter((endpoint) => (endpoint.enabled ?? true) && !isEndpointCoolingDown(endpoint, nowIso))
+    .filter((endpoint) => (endpoint.enabled ?? true)
+      && !isEndpointCoolingDown(endpoint, nowIso)
+      && !excludeEndpointIds?.has(endpoint.id))
     .sort((left, right) => {
       const sortOrder = (left.sortOrder ?? 0) - (right.sortOrder ?? 0);
       if (sortOrder !== 0) return sortOrder;
@@ -387,7 +411,11 @@ export async function recordSiteApiEndpointFailure(
     .where(eq(schema.siteApiEndpoints.id, endpointId))
     .get();
   const existingCooldownUntil = current?.cooldownUntil ?? null;
+  // 总开关开启时失败不再产生端点冷却窗口：已有窗口按原值回写（不提前解除、不续期），
+  // last_failed_at / last_failure_reason 照常写入，用户仍能自己看出循环。
+  const failureDrivenCooldownDisabled = isFailureDrivenCooldownDisabled();
   const cooldownUntil = disposition.triggersEndpointCooldown
+    && !failureDrivenCooldownDisabled
     && !isCooldownActive(existingCooldownUntil, nowIso)
     ? new Date(Date.parse(nowIso) + resolveSiteApiEndpointCooldownMs()).toISOString()
     : existingCooldownUntil;
@@ -439,7 +467,13 @@ export async function runWithSiteApiEndpointPool<T>(
 
   try {
     while (true) {
-      const target = await selectSiteApiEndpointTarget(site);
+      const target = await selectSiteApiEndpointTarget(
+        site,
+        undefined,
+        // 冷却被总开关关掉后，端点轮换只能靠「本请求内已尝试」排除集来保证 A 失败改打 B；
+        // 默认（开关关闭）不传排除集，既有「冷却兜轮换」路径逐字节不变。
+        isFailureDrivenCooldownDisabled() ? attemptedEndpointIds : undefined,
+      );
       if (!target) {
         if (lastError) throw lastError;
         throw new Error('当前站点的 API 请求地址均不可用');

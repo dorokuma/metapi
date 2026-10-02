@@ -9,6 +9,7 @@ import {
   normalizeSiteApiEndpointCooldownSec,
   SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT,
 } from './shared/siteApiEndpointCooldownSec.js';
+import { DISABLE_FAILURE_DRIVEN_COOLDOWN_DEFAULT } from './shared/failureDrivenCooldownSwitch.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -134,6 +135,8 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // 端点冷却时长（秒）：非法 env 回落默认 60 秒，合法值统一夹到 [1, ceiling]。
     siteApiEndpointCooldownSec: normalizeSiteApiEndpointCooldownSec(env.SITE_API_ENDPOINT_COOLDOWN_SEC)
       ?? SITE_API_ENDPOINT_COOLDOWN_SEC_DEFAULT,
+    // 失败驱动的冷却总开关：默认 false = 冷却照旧；开启后失败不再写冷却窗口（上游指令型冷却保留）。
+    disableFailureDrivenCooldown: parseBoolean(env.DISABLE_FAILURE_DRIVEN_COOLDOWN, DISABLE_FAILURE_DRIVEN_COOLDOWN_DEFAULT),
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),

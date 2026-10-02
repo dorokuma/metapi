@@ -18,7 +18,13 @@ const { testDataDir } = vi.hoisted(() => {
 });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const BASE_MS = Date.UTC(2026, 8, 25, 7, 0, 0);
+// The aggregate routes resolve their default window against the wall clock
+// (`to = now`, `from = to - 7d`), so a hard-coded calendar anchor rots: once the
+// runner's clock is more than 7 days past the anchor, every fixture row falls
+// outside the default window (the F3 cap is then no longer what the assertions
+// exercise). Derive the anchor from "now" instead, so the suite behaves the same
+// on any date; second precision keeps `BASE_UTC === BASE_MS` as before.
+const BASE_MS = Math.floor(Date.now() / 1000) * 1000;
 const BASE_UTC = formatUtcSqlDateTime(new Date(BASE_MS));
 
 function buildObservation(overrides: Partial<UpstreamProviderObservation> = {}): UpstreamProviderObservation {

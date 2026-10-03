@@ -738,6 +738,26 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：版本号（两文件）、`CHANGELOG.md` 1.4.19 段、本条日志、五条门槛日志、`git diff --stat`。
 - **状态**：已完成（**未提交**，分支 `chore/release-1.4.19`）。本轮**未做任何 commit / push / merge / 部署**，未触碰容器 / 生产库 / 生产设置；发版动作（`scripts/deploy-painless.sh --version 1.4.19 --yes` 及验收 / 收尾）不在本条范围。**tag 惯例**：`git tag --list --sort=v:refname` 最新为 `v1.4.0`——仓库**曾有** `v<版本>` 打 tag 的惯例，但 `v1.4.0` 之后（1.4.1–1.4.18）**再未**逐版打 tag，本轮**不打 tag**。
 
+### 12. 版本 1.4.20 与发版准备（`MARK-WORK-METAPI-XHIGH-RELEASE-PREP`；含 rebase / 门禁 / 提交 / 推送本分支，不含发版动作）
+
+- **类型**：版本与文档（发版准备）
+- **需求来源**：本会话需求（任务标记 `MARK-WORK-METAPI-XHIGH-RELEASE-PREP`；无 GitHub Issue 链接）——分支 `feat/reasoning-effort-xhigh` 的 4 个提交（`feat(transformers): support xhigh reasoning effort passthrough` 及其测试与笔记）随 1.4.20 并入。
+- **目标**：在 worktree `/root/workspace/metapi-xhigh` 内完成「rebase 到最新 origin/main → 全量门禁 → 版本 bump 1.4.20 → 提交 → 推送本分支」；**不含发版动作**（不部署、不 merge、不 push main、不跑 docker）。
+- **模板与依据（先查明，未凭印象）**：`git show d55b18e5 --stat`（`chore(release): 1.4.19`，即上一版发版提交）= `CHANGELOG.md` / `docs/change-log.md` / `package-lock.json` / `package.json` **四个文件**；本轮改**同四个文件**，逐字照其改法（版本号两文件同法、`CHANGELOG.md` 仍插在 `## [Unreleased]` 之后）。
+- **实现范围**：
+  - **rebase**：`git rebase origin/main`（origin/main = `d55b18e5`，先前 behind 49）**无冲突**，4 个提交重放为新哈希 `bb0f1c70` / `bfa83bec` / `01b2e3c0` / `2ebb5de5`；`git diff --name-status origin/main...HEAD` = 4 项（A `.agents/notes/20260928-reasoning-effort-xhigh-scope.md` / M `reasoning.test.ts` / M `reasoning.ts` / M `types.ts`）。rebase 前先备份被移除的 tracked `AGENTS.md` 到 `/tmp/xhigh-AGENTS.md.bak`。
+  - **版本**：`package.json` `1.4.19 → 1.4.20`；`package-lock.json` 的**根 `version`** 与 **`packages[""].version`** 两处同步 `1.4.19 → 1.4.20`。
+  - **`CHANGELOG.md`**：`## [Unreleased]` 之后新增 `## [1.4.20] - 2026-10-03`，一条新增——canonical `reasoning_effort` 白名单新增 `xhigh`，OpenAI chat/responses 链路原样透传；Anthropic / Gemini 表面有意维持现状（存量行为，另立项）。
+  - **本文件**：补本条。
+- **主要文件**：`package.json`、`package-lock.json`、`CHANGELOG.md`、`docs/change-log.md`
+- **验证（四条门槛于 cwd，全绿）**：
+  - `npm run build`（web + server + desktop 全量）exit 0
+  - `npm test`（全量 vitest）exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3412 passed | 16 skipped (3428)`、`60.79s`
+  - `npm run typecheck` 四段（web / web:test / server / desktop）exit 0
+  - `npm run repo:drift-check` exit 0、`Violations: 0`、`Tracked debt: 5`（均为预存项）
+- **交付物**：rebase 后的 4 提交、版本号（两文件）、`CHANGELOG.md` 1.4.20 段、本条日志、四条门槛输出、`chore(release): 1.4.20` 提交、远端分支 `origin feat/reasoning-effort-xhigh`。
+- **状态**：已完成（分支 `feat/reasoning-effort-xhigh`）。本轮**只在本 worktree 内**做 git 写操作（rebase / commit / push 本分支），**未 push main、未 merge、未执行部署脚本 / 任何 docker 命令**，未触碰容器 / 生产库 / 生产设置；发版动作（`scripts/deploy-painless.sh` 及验收 / 收尾）不在本条范围。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

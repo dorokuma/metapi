@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+## [1.4.20] - 2026-10-03
+
+### 新增
+
+- **canonical `reasoning_effort` 白名单新增 `xhigh`，OpenAI chat/responses 链路原样透传**（`src/server/transformers/canonical/types.ts`、`src/server/transformers/canonical/reasoning.ts`）：`CanonicalReasoningEffort` 联合类型追加 `'xhigh'`，`normalizeReasoningEffort` 的 switch 增加 `case 'xhigh'`。此前白名单为 `none/low/medium/high/max`，`xhigh` 在归一阶段被静默丢弃（`default: undefined`），该档位无法透传；未知值仍按原语义丢弃。
+  - **透传路径（无需改动，经审查确认）**：出站回写（`openAiRequestBridge` 直接赋值 `body.reasoning_effort`）与入站（openai chat/responses 不做值域校验）原本就是原样传递，故本次只放开归一白名单即可端到端透传。
+  - **范围边界（本轮裁决，有意不动）**：Anthropic 与 Gemini 表面不随之扩展——Anthropic 入站校验在 adaptive 思考下对白名单外 effort 返回 400、非 adaptive 下静默忽略，Gemini 未知档位归一为 `medium`；以上均为**存量行为**（本改动前后一致），是否放行属独立设计决策，需另行立项。遗留观察见 `.agents/notes/20260928-reasoning-effort-xhigh-scope.md`。
+  - **测试**（改既有文件 `src/server/transformers/canonical/reasoning.test.ts`）：新增「`xhigh` 原样保留」用例与「大小写 / 空白变体归一」用例（`'XHIGH'` / `'XHigh'` / `'  xhigh  '` ⇒ `xhigh`）。canonical 目录 25/25、transformers 全目录 451/451 通过。
+
 ## [1.4.19] - 2026-10-03
 
 ### 修复

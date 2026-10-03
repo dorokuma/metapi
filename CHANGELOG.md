@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+## [1.4.18] - 2026-10-03
+
+### 修复
+
+- **失败出口观测列三列收口：`is_stream` / `first_byte_latency_ms` / `client_http_status` 补齐 20 处出口（列级 23 格）**。1.4.16 / 1.4.17 两轮只补了降级出口、8 处流式失败出口与 `handleDetectedFailure` 的 `first_byte_latency_ms`；本轮把 `.agents/notes/20261002-client-visible-failure-semantics.md`「出口 × 三列 全量扫描」表里剩余的 `待补` 项一次性补齐（`is_stream` 5 处、`client_http_status` 15 处、`first_byte_latency_ms` 3 处，其中 3 处出口同补两列）。全部是**纯观测列**：响应码、重试条件、路由选择与计费语义零改动。
+  - **外层失败出口 4 处**（`chatSurface.ts` 流式非 SSE 单块出口 / 非流式出口，`openAiResponsesSurface.ts` 同两处）的 `handleDetectedFailure` 调用点补 `first_byte_latency_ms`（取与各自成功出口同源的 `getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null`，语义＝上游响应首字节延迟；未观测到即 `NULL`、**不编造**）与 `is_stream`（取本轮请求解析结果变量，未写死字面量）。
+  - **站点并发超时失败行 3 处**（`chatSurface.ts` / `openAiResponsesSurface.ts` / claude count-tokens 处理器）补 `client_http_status = failure.status`（与本出口 respond 同码）与 `is_stream`。
+  - **`first_byte_latency_ms` 跨轮次不串值**：四面（chat / responses / rerank / gemini）该变量均提升到 handler 作用域并**每轮轮首重置**，避免上一轮的观测值被下一轮的失败出口写成假延迟；rerank 与 gemini 面新增 / 接上 `onAttemptFailure` **纯观测捕获**（不参与任何选择 / 重试 / 路由 / 计费决策），与 chat / responses 同法。
+  - **6 个路由级 `logProxy` helper 追加可选参数**：`geminiSurface.ts` / `embeddings.ts` / `completions.ts` / `images.ts` / `search.ts` 各新增可选参数 `clientHttpStatus`（缺省 `null`）。**成功行调用点一个未改**（不传即行为逐字不变），只有失败行传**真实下发码**：gemini 三处＝本出口 respond 的 `lastStatus`、流式中途失败出口＝`200`（该出口在 `reply.hijack()` 之后、客户端 HTTP 层已收到 200）；embeddings / search / images 两处 catch ＝ `status || 502`（网络类失败 `status = 0`，respond 兜底 502）；completions 一处＝`failure.status`、一处＝`status || 502`；images 两处 malformed 出口＝`502`（结构性无法解析，固定码）。**未使用 `-1` 哨兵**——该哨兵只属 `onDowngrade` 的非终态行。
+  - **`is_stream` 5 处**：3 处租约忙（busy 503）行取本轮请求解析真值；count-tokens 与 rerank 端点**结构上非流式**（真值即 `false`，注释说明后传 `false`）。
+  - **gemini 端点层失败行的 `first_byte_latency_ms` 补上（口径订正）**：compat 路径的 `!endpointResult.ok` 出口此前写死 `NULL`，理由写作「无 upstream 响应对象」——**不成立**：该 flow 的每次派发都经 `fetchWithObservedFirstByte`（无条件打点），失败响应本身带着观测 meta。现由该面**既有**的 `onAttemptFailure` 钩子按 rerank 同法捕获（handler 作用域变量 + 每轮轮首重置，纯观测、不参与任何决策），端点层失败行落真实首字节延迟；同轮的后续失败行不会沿用上一轮的值。
+  - **有意为 `NULL` 的口径（设计如此，不是漏传）**：count-tokens 路径（`handleUpstreamFailure` / `handleExecutionError` 与站点并发超时行）**直接 `dispatchRequest`、不经 `fetchWithObservedFirstByte`** ⇒ 响应上没有观测 meta，该列保持 `NULL`；gemini 外层 catch（`handleGenerateContent` 的 catch）**该处没有 response 对象**（`endpointFlow` 的网络类异常已在内部归一、不冒泡到此；能拿到 response 的端点层失败已由上一条出口落库）⇒ 同列 `NULL`；4 处租约忙行（chat / responses / count-tokens / rerank）未发出上游请求 ⇒ 该列与 `client_http_status` 维持既有 `NULL` 口径。
+- **调试库脱敏补齐「长形变体授权头名」词元**（`src/server/services/proxyDebugTraceStore.ts`）：敏感头名**词元**表新增 `authorization` / `authentication`。裸 `authorization` 早在精确名单里，但 `x-authorization` / `authentication` / `x-authentication` 这类**长形变体**切词后得到的是 `authorization` / `authentication`，而 `auth` 词元按**整个短横段**匹配、盖不住它们 ⇒ 这类头名的值此前仍明文落库。**已知过掩码（宁多勿漏）**：`x-authentication-method`（典型值 `basic` / `bearer` / `oauth2`，本身不是凭据）现也替换为 `[redacted]`；不为它加例外表——例外表自身会成为新的漏网面。
+- **部署脚本的切换注释改为有界，且 compose 改写窗口纳入恢复路径**（`scripts/deploy-painless.sh`）：脚本每次部署会往 compose 的 `image:` 行上方写两行切换记录（含回滚提示），历次累积后注释块无限增长；现改为**恒 ≤2 条**（含本次新写这条，保留最近的那条旧记录），并且只识别、只删除**本脚本自己生成的两种注释行**——人工手写注释与空行永远不动；插入位置（紧贴 `image:` 上方）、条目文案、以及「找不到 `image:` 行即报错退出」的行为都与改动前一致。另修一处既有缺口：`SWITCHED=1` 提前到**备份成功之后、改写之前**——python 改写与改后的 `compose config -q` 都落在「已备份、未 `up -d`」窗口内，此前若改后校验失败就退出，而 `SWITCHED=0` ⇒ `trap` 不恢复备份，**改写后的 compose 会留在盘上**（容器仍是旧镜像，下次任何人 `up -d` 就静默换镜像）；现该窗口由 trap 走既有回滚路径（恢复 `.pre-*` 备份 → `compose up -d`），**正常路径的步骤顺序、验收与退出码逐字不变**。
+
 ## [1.4.17] - 2026-10-03
 
 ### 修复

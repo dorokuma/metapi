@@ -7,6 +7,38 @@ import { retainTokenRouterDumps, TokenRouterDumpRetentionDeps } from './tokenRou
 
 const PREFIX = 'metapi-token-router-selection-';
 
+// Test-only seam used to reproduce the *non-contention* `flock` failure class.
+//
+// The service always invokes flock in fd mode (`flock -x -n 3` with the lock fd
+// handed over as stdio[3]); in that mode an real environment error (bad fd,
+// unusable lock file, unsupported filesystem, ...) cannot be provoked from a
+// test, because the fd is opened by the service itself and is always valid.
+// Measured behaviour of util-linux 2.41 flock (see the note on the service):
+//   * genuine contention            -> exit 1, stderr empty
+//   * any other failure             -> exit >= 64, stderr non-empty
+// The stub below therefore only fabricates the second shape, i.e. the exact
+// spawnSync result the service must classify differently.
+const flockFailureStub = vi.hoisted(() => ({
+  result: null as { status: number | null; stderr: string } | null,
+  /** How often the stub actually replaced a real spawnSync result. */
+  hits: 0,
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: ((command: string, args?: readonly string[], options?: unknown) => {
+      const stub = flockFailureStub.result;
+      if (stub !== null && command === '/usr/bin/flock' && Array.isArray(args) && args.includes('-n')) {
+        flockFailureStub.hits += 1;
+        return { status: stub.status, signal: null, stdout: '', stderr: stub.stderr, pid: 0 };
+      }
+      return (actual.spawnSync as (...a: unknown[]) => unknown)(command, args, options);
+    }) as typeof actual.spawnSync,
+  };
+});
+
 // Each test run gets its own private root directory so parallel test files
 // that also touch tmpdir() cannot race and delete our dump directories
 // before retainTokenRouterDumps processes them.
@@ -154,6 +186,8 @@ describe('tokenRouterDumpRetentionService', () => {
 
   beforeEach(() => {
     createdDirs = [];
+    // Belt-and-braces: an armed stub must never leak into another test.
+    flockFailureStub.result = null;
     // Reap lock holders left behind by an earlier (possibly failed) test: a
     // surviving `sleep` still owns an fd on the lock file's file description,
     // which would keep the flock alive into the next test's window.
@@ -337,6 +371,14 @@ describe('tokenRouterDumpRetentionService', () => {
     expect(warnSpy.mock.calls.some((args) =>
       typeof args[0] === 'string' && args[0].includes('token-router-dump-retention'),
     )).toBe(true);
+    // Genuine contention keeps the original, well-established wording...
+    expect(warnSpy.mock.calls.some((args) =>
+      typeof args[0] === 'string' && args[0].includes('cleanup lock held by another process; skipping'),
+    )).toBe(true);
+    // ...and must never be reported as an environment/flock error.
+    expect(warnSpy.mock.calls.some((args) =>
+      typeof args[0] === 'string' && args[0].includes('not lock contention'),
+    )).toBe(false);
 
     (console as { warn: typeof originalWarn }).warn = originalWarn;
 
@@ -348,6 +390,74 @@ describe('tokenRouterDumpRetentionService', () => {
     // Cleanup: kill child and remove lock file
     killLockHolder(child);
     try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+  });
+
+  it('reports a non-contention flock failure with its stderr instead of blaming lock contention', () => {
+    const root = ensurePrivateRoot();
+    const beforeCount = countMatchingDirs(root);
+
+    const originalWarn = console.warn;
+    const warns: string[] = [];
+    const warnSpy = vi.fn((...args: unknown[]) => { warns.push(args.map((a) => String(a)).join(' ')); });
+    (console as { warn: typeof warnSpy }).warn = warnSpy;
+
+    function retentionWarns(): string[] {
+      return warns.filter((message) => message.includes('token-router-dump-retention'));
+    }
+
+    try {
+      // (a) environment error: flock could not even test the lock
+      flockFailureStub.result = { status: 65, stderr: 'flock: 3: Bad file descriptor\nnoise second line\n' };
+      flockFailureStub.hits = 0;
+
+      const result = retainTokenRouterDumps({
+        prefix: PREFIX,
+        rootDir: root,
+        ttlMinutes: 0,
+        maxCount: 10,
+      });
+
+      // Self-check: the stub must really have intercepted the flock call. If the
+      // call shape ever drifts (e.g. `-n` becoming `-xn`), the stub would stop
+      // matching, the service would reach the real binary, this test would keep
+      // passing without covering the branch — so assert the hit count instead.
+      expect(flockFailureStub.hits).toBe(1);
+
+      // fail-closed: exact same "skip this cleanup pass" contract as a real conflict
+      expect(result).toEqual({ deletedExpired: 0, deletedExcess: 0, remaining: 0 });
+      expect(countMatchingDirs(root)).toBe(beforeCount);
+
+      const messages = retentionWarns();
+      expect(messages).toHaveLength(1);
+      // different wording, carrying the stderr excerpt for the operator
+      expect(messages[0]).toContain('not lock contention');
+      expect(messages[0]).toContain('Bad file descriptor');
+      expect(messages[0]).not.toContain('held by another process');
+      // only the first stderr line is surfaced
+      expect(messages[0]).not.toContain('noise second line');
+
+      // (b) a pathologically long stderr line is truncated
+      warns.length = 0;
+      flockFailureStub.result = { status: 64, stderr: `flock: ${'x'.repeat(500)}\n` };
+      flockFailureStub.hits = 0;
+      retainTokenRouterDumps({
+        prefix: PREFIX,
+        rootDir: root,
+        ttlMinutes: 0,
+        maxCount: 10,
+      });
+
+      expect(flockFailureStub.hits).toBe(1);
+
+      const longMessages = retentionWarns();
+      expect(longMessages).toHaveLength(1);
+      expect(longMessages[0]).toContain('not lock contention');
+      expect(longMessages[0]).not.toContain('x'.repeat(200));
+      expect(longMessages[0].length).toBeLessThan(400);
+    } finally {
+      flockFailureStub.result = null;
+      (console as { warn: typeof originalWarn }).warn = originalWarn;
+    }
   });
 
   it('falls back to tmpdir lock when rootDir is not provided', () => {

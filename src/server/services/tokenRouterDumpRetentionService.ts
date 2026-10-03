@@ -6,6 +6,9 @@ import { spawnSync } from 'node:child_process';
 const TOKEN_ROUTER_DUMP_PREFIX = 'metapi-token-router-';
 const FLOCK_BIN = '/usr/bin/flock';
 
+/** Max characters of flock's first stderr line echoed into the diagnostic log. */
+const FLOCK_STDERR_EXCERPT_LIMIT = 120;
+
 export interface TokenRouterDumpRetentionOptions {
   rootDir?: string;
   prefix?: string;
@@ -59,6 +62,8 @@ function getLockPath(options: TokenRouterDumpRetentionOptions, deps: TokenRouter
  *   (e.g. process crash), the kernel releases the lock immediately, so a
  *   crashed holder does not block subsequent acquisitions.
  * - Non-Linux / no flock binary: warns and returns null (cleanup skipped).
+ * - Non-zero flock exit is classified by stderr (see below): silent failure =
+ *   lock contention, stderr output = environment error. Both fail closed.
  *
  * The lock fd is held for the entire cleanup section and released in the
  * caller's finally block via closeSync(fd). Lock file is never unlinked
@@ -97,6 +102,36 @@ function acquireCleanupLock(lockPath: string, now: () => number): { fd: number }
   }
 
   if (flockResult.status !== 0) {
+    // Two distinct failure classes share a non-zero exit status; only the first
+    // one is lock contention. Basis: upstream util-linux `sys-utils/flock.c`,
+    // verified empirically against util-linux 2.41 on Linux with this exact
+    // invocation (fd mode, `flock -x -n 3`):
+    //   * contention — the `case EWOULDBLOCK: case EACCES:` arm does
+    //     `if (verbose) warnx("failed to get lock"); exit(conflict_exit_code)`,
+    //     where conflict_exit_code defaults to 1 (flock(1)), so a lost `-n`
+    //     race exits 1 *silently*: only --verbose makes it print.
+    //   * every other failure — flock's other arms all `warn()`/`err()` to
+    //     stderr before exiting (fd/file errors: EX_DATAERR or EX_OSERR via the
+    //     `default:` arm; `open_file()`: "cannot open lock file" + EX_OSERR /
+    //     EX_CANTCREAT / EX_NOINPUT; usage and timer paths: EX_USAGE/EX_OSFILE).
+    //     So ALL stderr output belongs to non-contention paths.
+    // Reporting those as contention would send operators hunting for a holder
+    // that does not exist, so classify on stderr: non-empty → surface the
+    // excerpt below; empty → genuine contention.
+    const stderrExcerpt = (flockResult.stderr ?? '').split('\n')[0].trim();
+    if (stderrExcerpt.length > 0) {
+      const detail =
+        stderrExcerpt.length > FLOCK_STDERR_EXCERPT_LIMIT
+          ? `${stderrExcerpt.slice(0, FLOCK_STDERR_EXCERPT_LIMIT)}…`
+          : stderrExcerpt;
+      console.warn(
+        '[token-router-dump-retention] flock failed before it could test the lock (not lock contention); skipping cleanup:',
+        detail,
+      );
+      closeSync(fd);
+      return null;
+    }
+
     // Another process holds the lock → warn and skip (do NOT fall back to CAS)
     console.warn(
       '[token-router-dump-retention] cleanup lock held by another process; skipping',

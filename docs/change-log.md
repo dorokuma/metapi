@@ -522,6 +522,26 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、测试、笔记 O-d 条目（改为「已修」并写清 8 处取值口径）、本条持续变更日志。
 - **状态**：已完成（**未提交**，分支 `fix/stream-failure-observability`）。发布版本号留到发版准备轮；本轮未做任何 git 写操作（仅建分支），未触碰容器 / 生产库 / 生产设置。
 
+### 2. 版本 1.4.17 与发版准备（`OD-RELEASE-PREP-1790991289`；不含发版动作）
+
+- **类型**：版本与文档（发版准备）
+- **需求来源**：本会话需求（派单文件 `/tmp/od-release-prep-1790991289.md`，任务标记 `OD-RELEASE-PREP-1790991289`；无 GitHub Issue 链接）——O-d 收尾（第 1 条）经 reviewer PASS + oracle 同意提交后的发版准备。
+- **目标**：O-d 批次的版本号与日志文档就位（`1.4.16 → 1.4.17`），并做 oracle 指出的一处非阻断事实订正，供复核后提交与发版。
+- **实现范围**：
+  - **版本**：`package.json` `1.4.16 → 1.4.17`；`package-lock.json` 根 `version` 与 `packages[""].version` 同步 `1.4.16 → 1.4.17`（照 1.4.16 提交 `0207d0a1` 的做法：模板只动 `package.json`，1.4.16 轮额外把 lock 根 version（当时陈旧值 1.4.8）同步为发布值；本轮延续该口径，两文件一致）。
+  - **`CHANGELOG.md`**：顶部新增 `## [1.4.17] - 2026-10-03`，一条修复（流式失败出口补齐 `is_stream` / `first_byte_latency_ms` 观测列：8 处 `recordStreamFailure` 出口按真实取值传参、首字节未观测到保持 `NULL`）+ 一行**已知限制**（上游中途断流路径 `handleExecutionError` 的首字节延迟仍为 `NULL`，登记项 O8，待后续单独处理）；未夸大、未触及旧条目。
+  - **笔记事实订正（P-1，oracle 指出）**：`.agents/notes/20261002-client-visible-failure-semantics.md` 本轮验证节里「`git status --porcelain` 仅 4 个本次预期文件」改为「仅 **5** 个本次预期文件」（O-d 轮实际为 2 源码 + 1 测试 + 笔记 + 本文件）；只改这一处事实，未顺手扩写。
+  - **本文件**：补本条。
+- **主要文件**：`package.json`、`package-lock.json`、`CHANGELOG.md`、`docs/change-log.md`、`.agents/notes/20261002-client-visible-failure-semantics.md`
+- **验证（P-0 门槛，对当前最终树跑，全绿）**：
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3385 passed | 16 skipped (3401)`、234.05s｜`/tmp/od-prep/full-test.txt`；
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）｜`/tmp/od-prep/tsc-server.txt`；
+  - `npm run repo:drift-check` exit 0、`Violations: 0`（仅 5 条预存 tracked debt）｜`/tmp/od-prep/drift.txt`；
+  - `npm run build` exit 0（`metapi@1.4.17`：web `✓ built in 6.61s` + `build:server` + `build:desktop`）｜`/tmp/od-prep/build.txt`。
+  - 本片未改任何 `src/**` 生产代码（除版本号外不涉代码）。
+- **交付物**：版本号（两文件）、CHANGELOG 条目、笔记事实订正、本条日志 + P-0 命令结果。
+- **状态**：已完成（**未提交**）。本次**未执行任何 git 写操作**（不 add / commit / push / merge / branch / checkout / stash），未触碰容器 / 生产库 / 生产设置；发版动作（`scripts/deploy-painless.sh --version 1.4.17 --yes` 及验收 / 收尾）不在本条范围，待复核指示。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

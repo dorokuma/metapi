@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [1.4.17] - 2026-10-03
+
+### 修复
+
+- **流式失败出口补齐 `is_stream` / `first_byte_latency_ms` 观测列**。`recordStreamFailure` 的 **8 处**调用点（`src/server/proxy-core/surfaces/chatSurface.ts` 4 处 + `openAiResponsesSurface.ts` 4 处）此前都没传 `isStream` / `firstByteLatencyMs` ⇒ 这类流式失败写下的 `proxy_logs` 行这两列恒为 `NULL`。现 8 处均按**真实取值**传参：`isStream` 传本轮请求解析结果（chat 面 `requestEnvelope.parsed.isStream` / responses 面 `requestEnvelope.stream`；8 处都在 `if (isStream)` 块内，故运行期恒 `true`，但写法与既有 `onDowngrade` 出口一致、未写死字面量）；`firstByteLatencyMs` 传与各自成功出口同源的 `getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null`（语义 = 上游响应首字节延迟）。**首字节未观测到 ⇒ 保持 `NULL`（不编造）**；8 处上游响应均已在首字节之后，故实际落真实延迟值。
+- **已知限制（如实记录）**：上游中途断流路径（body 读取抛异常 → 外层 catch → `handleExecutionError`）的 `first_byte_latency_ms` 仍为 `NULL`（登记项 O8，真因是该变量声明在 `try` 内、catch 作用域取不到），不在本次范围，待后续单独处理。
+
 ## [1.4.16] - 2026-10-03
 
 ### 修复

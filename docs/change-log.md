@@ -480,6 +480,20 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：验证统计（本条）。
 - **状态**：已完成（**未提交**）。
 
+### 7. 版本 1.4.16 与发版准备（`MARK-FIX-A-RELEASE-PREP-1790986024`；不含发版动作）
+
+- **类型**：版本与文档（发版准备）
+- **需求来源**：本会话需求（任务标记 `MARK-FIX-A-RELEASE-PREP-1790986024`；无 GitHub Issue 链接）
+- **目标**：fix-A（降级出口观测列补齐 + 调试库凭据脱敏）的发版元数据就绪，并把 oracle 复核提出的两条纯文档口径订正。
+- **实现范围**：
+  - **文档订正**（oracle R2）：① 哨兵注释与笔记的 `NULL` 取值来源清单补上第三处 busy 出口 `chatSurface.ts:1849`（`handleClaudeCountTokensSurfaceRequest` 内的 lease timeout，同样未传 `clientHttpStatus`）⇒ NULL 桶现为「3 处 busy 出口」并按面列举；② 笔记中 `recordStreamFailure` 调用点由「4 处」订正为 **8 处**（chat 面 4 + responses 面 4，逐执行块核对入参，`isStream` / `firstByteLatencyMs` 均 0 命中），并列出 8 处 file:line；`docs/change-log.md` 第 5 条的遗留登记同步。
+  - **版本**：`package.json` `1.4.15 → 1.4.16`（模板：`9baafb39 chore(release): 1.4.15`；该模板未动 lock 文件）；另按任务要求同步 `package-lock.json` 根 `version` 字段（陈旧值 `1.4.8 → 1.4.16`）以保持两文件一致。
+  - **`CHANGELOG.md`**：新增 `## [1.4.16] - 2026-10-03` 两条修复（降级出口观测列补齐含 `-1` 非终态哨兵语义及其边界；调试表 header 落库前敏感头值脱敏），未夸大、未触及旧条目。
+- **主要文件**：`package.json`、`package-lock.json`、`CHANGELOG.md`、`docs/change-log.md`、`.agents/notes/20261002-client-visible-failure-semantics.md`、`src/server/proxy-core/surfaces/sharedSurface.ts`（仅注释）。
+- **验证**：`npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）；`npm run typecheck` 四段 exit 0（均打 `metapi@1.4.16`）；`npm run build` exit 0（web `✓ built in 6.84s` + build:server + build:desktop）；`npm run repo:drift-check` `Violations: 0`（5 条预存 tracked debt）。日志 `/tmp/mark1790986024-*.txt`。
+- **交付物**：版本号、CHANGELOG 条目、文档口径订正、本条日志。
+- **状态**：已完成（**未提交**）。发版动作（`scripts/deploy-painless.sh --version 1.4.16 --yes` 及验收/收尾）不在本条范围：本步**未执行任何 git 写操作，未触碰容器 / 生产库 / 生产设置**。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

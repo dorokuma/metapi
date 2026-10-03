@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [1.4.16] - 2026-10-03
+
+### 修复
+
+- **降级出口观测列补齐：降级行不再两列俱空**。端点降级出口（`onDowngrade`）写下的 `proxy_logs` 行此前 `client_http_status` 与 `is_stream` 都为空，看不出这一行到底是不是终态行。现补写两列：`is_stream` 按本轮实际形态写（流式 `true` / 非流式 `false`）；`client_http_status` 写新增哨兵 **`-1`**（`CLIENT_HTTP_STATUS_NON_TERMINAL`，`src/server/proxy-core/surfaces/sharedSurface.ts`）——降级出口返回后 `executeEndpointFlow` 会 `continue` 去试下一个端点（`src/server/proxy-core/orchestration/endpointFlow.ts`，该分支要求 `!isLastEndpoint`），降级行**永远不是**本请求的终态行，客户端实收状态码由同一请求的终态行给出，故不写猜测值、也不写会与「无法判定」混叠的 `NULL`。**语义边界（已同步进代码注释与笔记）**：该哨兵**只约束降级出口写入的行**，不是整列不变量——降级出口之外的中间/非终态来源各按自己既有口径落库：预重试出口（`handleUpstreamFailure` / `handleDetectedFailure` / `handleExecutionError` 的落库发生在 `maybeRetry` 之前）与 8 处流式失败出口 `recordStreamFailure` 写各自真实状态码；3 处租约超时 busy 出口（`chatSurface.ts` / `openAiResponsesSurface.ts`）与缺列兜底写 `NULL`。列的三取值语义另写入 `src/server/db/schema.ts` 列注释与 `.agents/notes/20261002-client-visible-failure-semantics.md`。
+- **调试表 header 落库前对敏感头做值脱敏**。`proxy_debug_traces` / `proxy_debug_attempts` 的 `request_headers_json` / `final_response_headers_json` / `response_headers_json` 此前明文保存 `Authorization` 等凭据（上游 key、下游客户端 token）。现于四条列的唯一落库咽喉 `serializeHeaders`（`src/server/services/proxyDebugTraceStore.ts`）把敏感头的**值**替换为固定占位 `[redacted]`：头名、头次序、非敏感头一字不改；不写定长哈希、也不保留任何原文派生取值（避免弱凭据可离线爆破）。敏感判定 = 精确名单（`authorization` / `proxy-authorization` / `cookie` / `set-cookie` / `x-api-key` / `api-key` / `x-goog-api-key`）+ **词元判定**（`key` / `apikey` / `api-key` / `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth`；下划线与空白先归一成 `-` 再按 `-` 切词，**任一词元**命中即敏感）+ 保底子串规则；`x-monkey` / `x-request-id` / `content-type` / `x-client` 等名字不被误伤。调试排障信息（头名、次序与对应关系）不受影响。
+
 ## [1.4.15] - 2026-10-02
 
 ### 修复

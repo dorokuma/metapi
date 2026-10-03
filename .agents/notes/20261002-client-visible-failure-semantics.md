@@ -333,3 +333,19 @@ oracle 第二意见落地：R2-1 掩码边界补齐（必修代码）、R2-2 哨
 1. **NULL 桶补第三处 busy 出口**：NULL 取值来源原只列 `chatSurface.ts:820` 与 `openAiResponsesSurface.ts:930`，漏了 `chatSurface.ts:1849`（同样是 lease timeout 形：`buildSurfaceConcurrencyBusyMessage` + `failureToolkit.log` 未传 `clientHttpStatus`，所在处理器 `handleClaudeCountTokensSurfaceRequest`）。已补进哨兵注释的 NULL 桶（改为「**3 处** busy 出口」并按面列举）及本节各 NULL 清单。
 2. **`recordStreamFailure` 调用点 4 → 8（数字订正）**：实际为 **8 个**生产调用点（chat 面 4 + responses 面 4，行号清单见「遗留与跟进」O-d）；逐个执行块核对入参，`isStream` / `firstByteLatencyMs` **均 0 命中**。笔记内四处「4 处」（O-d 条目、三类取值段、登记段、R2-2 段）与 `docs/change-log.md` 第 5 条的遗留登记已统一订正。
 
+### P-2 发版元数据（1.4.15 → 1.4.16）
+
+- 模板：`git show 9baafb39`（`chore(release): 1.4.15`）= 只动 `CHANGELOG.md`（+17）与 `package.json`（版本号 1 行）；**未**动 `package-lock.json`。本轮按任务括号条款额外同步了 `package-lock.json` 的根 `version` 字段（原为陈旧值 `1.4.8`，自 1.4.8 起历次发版都未同步）⇒ 两文件一致；如需与模板完全一致可只回退该文件（无构建影响，`npm ci` 不校验根 `version`）。
+- `CHANGELOG.md` 新增 `## [1.4.16] - 2026-10-03`（两条修复：降级出口观测列补齐含 `-1` 非终态哨兵语义及其边界；调试表 header 落库前敏感头值脱敏），不涉 429 潮等无关叙述，也未改动 `1.4.15` 及更早条目。
+- `docs/change-log.md` 第 5/6 条已在本轮写入，本轮只核对表述（与 CHANGELOG 一致、不重复），并向第 5 条的遗留登记同步 O-d 的「8 处」订正。
+
+### P-3 复核命令（全绿；日志 `/tmp/mark1790986024-*.txt`）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc --noEmit -p tsconfig.server.json` | exit 0（输出 0 字节） |
+| `npm run typecheck` | exit 0（web / web:test / server / desktop 四段，均打 `metapi@1.4.16`） |
+| `npm run build` | exit 0（web 产物 `✓ built in 6.84s`，再 `build:server` + `build:desktop` 均通过；仅 vite 预存的 chunk >500kB 提醒，非错误） |
+| `npm run repo:drift-check` | `Violations: 0`（仅 5 条预存 tracked debt） |
+
+`git status --porcelain`：12 个已跟踪文件全部为 ` M`（无新增未跟踪文件，`dist/` 构建产物被 ignore）；未做任何 git 写操作。

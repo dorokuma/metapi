@@ -6,7 +6,9 @@ import { tr } from '../i18n.js';
 import { SITE_DOCS_URL } from '../docsLink.js';
 import { buildUpdateReminder } from './helpers/updateCenterPresentation.js';
 
-const VERSION = '1.3.0';
+// 当前版本只来自 /api/update-center/status；拿不到时显示与语言无关的中性占位，
+// 不再回退到编造的版本号，也不把编造值传给更新提醒计算。
+const UNKNOWN_VERSION_PLACEHOLDER = '—';
 
 const FEATURES = [
   { icon: '🌐', title: '统一代理网关', desc: '一个密钥、一个入口，兼容 OpenAI / Claude 下游格式' },
@@ -35,11 +37,11 @@ const LINKS = [
 ];
 
 export default function About() {
-  const [currentVersion, setCurrentVersion] = useState(`v${VERSION}`);
+  const [currentVersion, setCurrentVersion] = useState('');
   const [latestGitHubVersion, setLatestGitHubVersion] = useState('');
   const [latestDockerHubVersion, setLatestDockerHubVersion] = useState('');
   const [updateReminder, setUpdateReminder] = useState(() => buildUpdateReminder({
-    currentVersion: VERSION,
+    currentVersion: '',
     helper: null,
     githubRelease: null,
     dockerHubTag: null,
@@ -56,9 +58,9 @@ export default function About() {
           dockerHubTag?: { normalizedVersion?: string; displayVersion?: string; tagName?: string | null; digest?: string | null } | null;
           helper?: { imageTag?: string | null; imageDigest?: string | null } | null;
         };
-        const resolvedCurrentVersion = String(status.currentVersion || VERSION);
+        const resolvedCurrentVersion = String(status.currentVersion || '');
         if (cancelled) return;
-        setCurrentVersion(`v${resolvedCurrentVersion}`);
+        setCurrentVersion(resolvedCurrentVersion ? `v${resolvedCurrentVersion}` : '');
         setLatestGitHubVersion(String(status.githubRelease?.displayVersion || status.githubRelease?.normalizedVersion || ''));
         setLatestDockerHubVersion(String(status.dockerHubTag?.displayVersion || status.dockerHubTag?.normalizedVersion || ''));
         setUpdateReminder(buildUpdateReminder({
@@ -95,7 +97,12 @@ export default function About() {
           />
           <div>
             <div style={{ fontSize: 18, fontWeight: 700 }}>Metapi</div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)', marginTop: 2 }}>{currentVersion}</div>
+            <div
+              data-testid="about-current-version"
+              style={{ fontSize: 12, color: 'var(--color-text-tertiary)', marginTop: 2 }}
+            >
+              {currentVersion || UNKNOWN_VERSION_PLACEHOLDER}
+            </div>
           </div>
         </div>
         <div style={{ fontSize: 14, color: 'var(--color-text-secondary)', lineHeight: 1.8 }}>

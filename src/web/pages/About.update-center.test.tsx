@@ -84,4 +84,60 @@ describe('About update center', () => {
       root?.unmount();
     }
   });
+
+  it('shows a neutral placeholder instead of a fabricated version when the status payload omits currentVersion', async () => {
+    apiMock.getUpdateCenterStatus.mockResolvedValue({
+      githubRelease: {
+        normalizedVersion: '1.4.0',
+        displayVersion: '1.4.0',
+      },
+      dockerHubTag: null,
+      helper: null,
+    });
+
+    let root!: ReactTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter>
+            <About />
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      // 当前版本未知：不得拿编造版本冒充当前版本，也不得由此得出“发现新版本”的假提示
+      expect(text).not.toContain('v1.3.0');
+      expect(text).not.toContain('发现新版本');
+      const versionLine = root.root.find((node) => node.props['data-testid'] === 'about-current-version');
+      expect(collectText(versionLine)).toBe('—');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('shows a neutral placeholder and keeps the unknown-state reminder when the status lookup fails', async () => {
+    apiMock.getUpdateCenterStatus.mockRejectedValue(new Error('status unavailable'));
+
+    let root!: ReactTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter>
+            <About />
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      expect(text).not.toContain('v1.3.0');
+      expect(text).toContain('无法检查更新');
+      const versionLine = root.root.find((node) => node.props['data-testid'] === 'about-current-version');
+      expect(collectText(versionLine)).toBe('—');
+    } finally {
+      root?.unmount();
+    }
+  });
 });

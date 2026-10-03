@@ -112,8 +112,107 @@ function getCaptureOptions(): ProxyDebugCaptureOptions {
   };
 }
 
+/**
+ * 敏感头的固定占位值（保留头名、丢掉整个值）。
+ *
+ * 为什么是固定占位而不是「保留头几位 + 尾几位」：本仓既有的 `maskSecret` / `maskToken` / `maskCookieValue`
+ * 都是**展示用**掩码（保留部分原文），用于列表展示尚可，但落进调试库就留下了可离线爆破的存量，故不适用。
+ * 亦不写定长哈希：调试不需要跨行关联凭据，而任何由原文派生的取值都会让弱凭据（如自定义站点头里的短口令）
+ * 可以被离线爆破，得不偿失。
+ */
+export const REDACTED_DEBUG_HEADER_VALUE = '[redacted]';
+
+/** 敏感头名（精确匹配，大小写不敏感）。 */
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'api-key',
+  'x-goog-api-key',
+]);
+
+/**
+ * 敏感头名（的**词元**表，大小写不敏感）。
+ *
+ * 判定前先把头名 `trim`/`lowercase`、把下划线与空白归一成短横，再**按短横切词**；**任一词元**命中本表即敏感。
+ * 为什么必须按词元而不是子串：`x-monkey` 含子串 `key`、`x-request-id` 等容易被误伤；按词元切分后
+ * `x-amz-signature` / `x-litellm-key` / `x-api-key`（→ `['x','api','key']`）都能命中，
+ * `x-monkey`（→ `['x','monkey']`）不会。
+ *
+ * 与任务点名清单的一一对应：
+ * - `key`：`key` / `x-access-key` / `x-auth-key` / `x-upstream-key` / `x-litellm-key` / `x-api-key` / `x-goog-api-key`；
+ * - `apikey`：`apikey` / `x-apikey`；
+ * - `api-key`：切词后不可达（`api-key` → `['api','key']`）——保留为清单镜像，两种写法已分别由 `key` 词元与
+ *   下方既有 `api-key` 子串规则覆盖；
+ * - `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth`：各自写法
+ *   （`x-amz-signature` / `x-auth-key` / `x-custom-site-token` …）。
+ */
+const SENSITIVE_HEADER_TOKENS = new Set([
+  'key',
+  'apikey',
+  'api-key',
+  'token',
+  'secret',
+  'password',
+  'passwd',
+  'credential',
+  'signature',
+  'auth',
+]);
+
+/**
+ * 敏感头名（子串匹配，大小写不敏感；`_` 与空白先归一成 `-`）——**保底**规则，不是主判据。
+ *
+ * 保留它只为「改前会被掩码的名字，改后不得不被掩码」（不因升级判据而回退覆盖面）；
+ * 反过来它会**过掩码**（如 `x-mytokensecret` 这类词元表盖不住的拼接名）。
+ */
+const SENSITIVE_HEADER_NAME_FRAGMENTS = [
+  'api-key',
+  'apikey',
+  'token',
+  'secret',
+  'password',
+  'passwd',
+  'credential',
+];
+
+function splitDebugHeaderNameTokens(normalized: string): string[] {
+  return normalized.split('-').filter(Boolean);
+}
+
+function isSensitiveDebugHeaderName(name: string): boolean {
+  const normalized = name.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  if (!normalized) return false;
+  if (SENSITIVE_HEADER_NAMES.has(normalized)) return true;
+  // 词元判定（主判据）：`x-access-key` / `x-amz-signature` / `x-auth-key` / `x-litellm-key` / `key` …
+  if (splitDebugHeaderNameTokens(normalized).some((token) => SENSITIVE_HEADER_TOKENS.has(token))) {
+    return true;
+  }
+  return SENSITIVE_HEADER_NAME_FRAGMENTS.some((fragment) => normalized.includes(fragment));
+}
+
+/**
+ * 把敏感头的值替换为固定占位（头名原样保留，头先后次序与传入一致，非敏感头一字不改）。
+ *
+ * 调用点在 `serializeHeaders`，即四条落库列的**唯一**咽喉：
+ * `proxy_debug_traces.request_headers_json` / `proxy_debug_traces.final_response_headers_json` /
+ * `proxy_debug_attempts.request_headers_json` / `proxy_debug_attempts.response_headers_json`。
+ */
+function redactSensitiveDebugHeaderValues(
+  headers: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!headers) return null;
+  const redacted: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    redacted[name] = isSensitiveDebugHeaderName(name) ? REDACTED_DEBUG_HEADER_VALUE : value;
+  }
+  return redacted;
+}
+
 function serializeHeaders(value: HeadersLike, maxBytes: number): string | null {
-  return stringifyDebugValue(normalizeHeadersValue(value), maxBytes);
+  return stringifyDebugValue(redactSensitiveDebugHeaderValues(normalizeHeadersValue(value)), maxBytes);
 }
 
 export function normalizeProxyDebugResponseHeaders(value: HeadersLike): Record<string, unknown> | null {

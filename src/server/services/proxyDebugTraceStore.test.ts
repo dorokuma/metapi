@@ -36,7 +36,10 @@ describe('proxyDebugTraceStore', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('creates, updates, and reads unredacted debug traces and attempts', async () => {
+  it('creates, updates, and reads debug traces and attempts with credential headers masked', async () => {
+    // 安全口径：调试价值保留（头名、次序、非敏感头的值一字不改）、明文消失。
+    // 四条落库列（trace/attempt 的 request/response headers）都过同一个 `serializeHeaders` 咽喉。
+    // 夹具里的 token 全是假值（不得出现真凭据）。
     const trace = await store.createProxyDebugTrace({
       downstreamPath: '/v1/responses',
       clientKind: 'codex',
@@ -45,7 +48,8 @@ describe('proxyDebugTraceStore', () => {
       requestedModel: 'gpt-4o',
       downstreamApiKeyId: 7,
       requestHeaders: {
-        authorization: 'Bearer developer-token',
+        authorization: 'Bearer fake-downstream-token',
+        cookie: 'sid=fake-cookie-value',
         'x-client': 'Codex Desktop',
       },
       requestBody: {
@@ -83,7 +87,9 @@ describe('proxyDebugTraceStore', () => {
       targetUrl: 'https://chatgpt.com/backend-api/codex/responses',
       runtimeExecutor: 'codex',
       requestHeaders: {
-        authorization: 'Bearer developer-token',
+        authorization: 'Bearer fake-upstream-token',
+        'x-api-key': 'fake-api-key-value',
+        'x-request-id': 'req-keep-plain',
       },
       requestBody: {
         model: 'gpt-4o',
@@ -92,6 +98,7 @@ describe('proxyDebugTraceStore', () => {
       responseStatus: 403,
       responseHeaders: {
         'content-type': 'application/json',
+        'set-cookie': 'sid=fake-set-cookie-value; Path=/; HttpOnly',
       },
       responseBody: {
         error: {
@@ -116,6 +123,7 @@ describe('proxyDebugTraceStore', () => {
       finalUpstreamPath: '/responses',
       finalResponseHeaders: {
         'content-type': 'application/json',
+        'set-cookie': 'sid=fake-final-cookie-value; Path=/',
       },
       finalResponseBody: {
         error: {
@@ -138,11 +146,10 @@ describe('proxyDebugTraceStore', () => {
     });
 
     const detail = await store.getProxyDebugTraceDetail(trace.id);
-    expect(detail?.trace.requestHeadersJson || '').toContain('Bearer developer-token');
+    // 调试价值保留：头名在位、非敏感头的值与体照旧。
     expect(detail?.trace.requestBodyJson || '').toContain('"hello"');
     expect(detail?.trace.finalResponseBodyJson || '').toContain('Channel busy');
     expect(detail?.attempts).toHaveLength(1);
-    expect(detail?.attempts[0]?.requestHeadersJson || '').toContain('developer-token');
     expect(detail?.attempts[0]?.responseBodyJson || '').toContain('forbidden');
     expect(detail?.attempts[0]).toMatchObject({
       endpoint: 'responses',
@@ -150,6 +157,101 @@ describe('proxyDebugTraceStore', () => {
       responseStatus: 403,
       downgradeDecision: true,
     });
+
+    // 明文消失：四条列里都不得留下任何凭据原文（本用例全部为假值）。
+    const headerColumns = [
+      detail?.trace.requestHeadersJson,
+      detail?.trace.finalResponseHeadersJson,
+      detail?.attempts[0]?.requestHeadersJson,
+      detail?.attempts[0]?.responseHeadersJson,
+    ].map((value) => value || '');
+    for (const leaked of [
+      'fake-downstream-token',
+      'fake-cookie-value',
+      'fake-upstream-token',
+      'fake-api-key-value',
+      'fake-set-cookie-value',
+      'fake-final-cookie-value',
+    ]) {
+      for (const column of headerColumns) {
+        expect(column).not.toContain(leaked);
+      }
+    }
+
+    // 头名保留 + 值变固定占位；次序与传入一致（按名排序），非敏感头原文保留。
+    expect(detail?.trace.requestHeadersJson || '').toContain('authorization');
+    expect(detail?.trace.requestHeadersJson || '').toContain(store.REDACTED_DEBUG_HEADER_VALUE);
+    expect(JSON.parse(detail?.trace.requestHeadersJson || 'null')).toEqual({
+      authorization: store.REDACTED_DEBUG_HEADER_VALUE,
+      cookie: store.REDACTED_DEBUG_HEADER_VALUE,
+      'x-client': 'Codex Desktop',
+    });
+    expect(JSON.parse(detail?.attempts[0]?.requestHeadersJson || 'null')).toEqual({
+      authorization: store.REDACTED_DEBUG_HEADER_VALUE,
+      'x-api-key': store.REDACTED_DEBUG_HEADER_VALUE,
+      'x-request-id': 'req-keep-plain',
+    });
+    expect(JSON.parse(detail?.attempts[0]?.responseHeadersJson || 'null')).toEqual({
+      'content-type': 'application/json',
+      'set-cookie': store.REDACTED_DEBUG_HEADER_VALUE,
+    });
+    expect(JSON.parse(detail?.trace.finalResponseHeadersJson || 'null')).toEqual({
+      'content-type': 'application/json',
+      'set-cookie': store.REDACTED_DEBUG_HEADER_VALUE,
+    });
+  });
+
+  it('judges sensitive header names by word token (key / …-key / signature / auth) without harming look-alikes', async () => {
+    // R2-1：只按**子串**判定时，`key` / `x-access-key` / `x-auth-key` / `x-upstream-key` /
+    // `x-litellm-key` / `x-amz-signature` 全部漏网（站点 `customHeaders` 允许任意头名并被合并进上游请求，
+    // 故配 `{"x-upstream-key":"…"}` 即可把自家 key 明文写进调试库）。判定升为**词元判定**后它们都命中；
+    // 同时 `x-monkey`（含 `key` 子串）等名字不得被误伤——这是本用例的反向控制组。
+    const sensitiveNames = [
+      'authorization',
+      'key',
+      'x-access-key',
+      'x-auth-key',
+      // 站点自定义头复现路径（`siteCustomHeaders` 任意头名 ⇒ 合并进上游头 ⇒ 随 attempt 落库）。
+      'x-upstream-key',
+      'x-litellm-key',
+      'x-amz-signature',
+      'x-custom-site-token',
+    ];
+    const plainNames = ['x-monkey', 'x-request-id', 'content-type', 'x-client'];
+    const requestHeaders = Object.fromEntries([
+      ...sensitiveNames.map((name) => [name, `value-of-${name}`]),
+      ...plainNames.map((name) => [name, `value-of-${name}`]),
+    ]);
+
+    const trace = await store.createProxyDebugTrace({
+      downstreamPath: '/v1/chat/completions',
+      clientKind: 'codex',
+      requestedModel: 'gpt-4o',
+      requestHeaders,
+      requestBody: { model: 'gpt-4o' },
+    });
+
+    const headers = JSON.parse(
+      (await store.getProxyDebugTraceDetail(trace.id))?.trace.requestHeadersJson || 'null',
+    ) as Record<string, string>;
+
+    // 正例（改前这 6 个 `*-key` / `signature` 名字全部漏网 ⇒ 整组变红）：值一律变固定占位。
+    expect(
+      Object.fromEntries(sensitiveNames.map((name) => [name, headers[name]])),
+    ).toEqual(
+      Object.fromEntries(sensitiveNames.map((name) => [name, store.REDACTED_DEBUG_HEADER_VALUE])),
+    );
+    // 反例（控制组）：这些名字不得被误伤，值原文逐字保留。
+    expect(
+      Object.fromEntries(plainNames.map((name) => [name, headers[name]])),
+    ).toEqual(
+      Object.fromEntries(plainNames.map((name) => [name, `value-of-${name}`])),
+    );
+    // 明文消失：敏感头的值不得以任何形式留在落库文本里（含被截断预览）。
+    for (const name of sensitiveNames) {
+      expect(String(requestHeaders[name])).toBe(`value-of-${name}`);
+      expect(JSON.stringify(headers)).not.toContain(`value-of-${name}`);
+    }
   });
 
   it('stores truncated debug payload previews as valid JSON text for json-capable databases', async () => {
@@ -158,8 +260,10 @@ describe('proxyDebugTraceStore', () => {
       clientKind: 'codex',
       requestedModel: 'gpt-5.4',
       requestHeaders: {
-        authorization: `Bearer ${'x'.repeat(5000)}`,
-        'x-client': 'Codex Desktop',
+        // 敏感头的值现在会被掩码，故改用**非敏感**的长头值来触发截断（本用例要验的是
+        // 「截断后的 preview 仍是合法 JSON」，与哪一个头无关）。
+        authorization: 'Bearer fake-truncation-token',
+        'x-client': `Codex Desktop ${'x'.repeat(5000)}`,
       },
       requestBody: {
         model: 'gpt-5.4',

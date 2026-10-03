@@ -257,6 +257,12 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   // `http_status` 描述的是「本轮上游/逻辑状态」（网络层执行失败时为 `0`），
   // 而客户端真正拿到的是出口状态码（同上情形为 502/503）；SSE 已 `reply.hijack()` 时
   // 客户端拿到的是 200 + 流内错误帧。缺列的老库静默降级为 NULL（写侧有 has* 门禁）。
+  // 三取值语义（口径详见 `.agents/notes/20261002-client-visible-failure-semantics.md`）：
+  // ① `100..599`：真实下发的状态码（终态行；以及按各自既有口径写真实码的非终态行，如预重试出口）；
+  // ② `-1`（`CLIENT_HTTP_STATUS_NON_TERMINAL`，`proxy-core/surfaces/sharedSurface.ts`）：仅表示「该行由
+  //    `onDowngrade` 降级出口写入的真实非终态尝试」——客户端此刻还没收到终态结果，真实码在本请求的终态行上；
+  // ③ `NULL`：无法判定（租约超时行 / 非 toolkit 直写日志 / 缺列兜底）。
+  // 注意：本列**不是**「凡非终态就写 -1」，降级出口之外的中间来源各按自己既有口径落库。
   clientHttpStatus: integer('client_http_status'),
   isStream: integer('is_stream', { mode: 'boolean' }),
   firstByteLatencyMs: integer('first_byte_latency_ms'),

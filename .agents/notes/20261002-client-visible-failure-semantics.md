@@ -269,6 +269,24 @@ R4（R3-⑥ 闭环）：只改一处生产代码 + 一处用例 + 本文。
 
 **登记（本次不做）**：O-d 仍成立（**8 处**流式失败出口仍未传 `isStream` / `firstByteLatencyMs`，清单见「遗留与跟进」O-d）；gemini 面的 `onDowngrade`（`geminiSurface.ts:1421-1427`）**不写 `proxy_logs`**（只更新 debug attempt）⇒ 不存在同类缺列，无需改。
 
+### ② 调试库头脱敏：上游凭据不再明文落库
+
+- **唯一写入点**：`serializeHeaders`（`src/server/services/proxyDebugTraceStore.ts:214`，R2-1 后行号快照）——是四条列的咽喉：`proxy_debug_attempts.request_headers_json`（上游请求头，**明文存上游 `Authorization: Bearer …` 的就是它**）/ `proxy_debug_attempts.response_headers_json` / `proxy_debug_traces.request_headers_json`（下游客户端头，含本仓入口 token）/ `proxy_debug_traces.final_response_headers_json`。
+- **复用情况**：仓内既有掩码全是**展示用**（`routes/api/settings.ts:197` `maskSecret`、`services/accountTokenService.ts:34` `maskToken`、`routes/api/monitor.ts:66` `maskCookieValue`、`services/backupService.ts:1268`、`services/downstreamApiKeyService.ts:73`）——都保留部分原文（如 `sk-abc****1234`），落进调试库就是可离线爆破的存量，**故不复用**；新增最小 helper：占位常量 `REDACTED_DEBUG_HEADER_VALUE = '[redacted]'`（`:123`）、判定 `isSensitiveDebugHeaderName`（`:185`，R2-1 后已升为词元判定）、替换 `redactSensitiveDebugHeaderValues`（`:203`）。
+- **掩码策略**：只替换**值**（头名、头次序、非敏感头原文一律保留），固定占位 `[redacted]`；**不写定长哈希**——调试不需要跨行关联凭据，而任何由原文派生的取值都会让弱凭据（自定义站点头里的短口令）可离线爆破，任务允许但本次取更严的一侧。
+- **覆盖的敏感头名清单**（R2-1 后为**词元判定**，大小写不敏感；`_` 与空白先归一成 `-`，再按 `-` 切词；**任一词元**命中即敏感）：
+  - 精确名单：`authorization`、`proxy-authorization`、`cookie`、`set-cookie`、`x-api-key`、`api-key`、`x-goog-api-key`；
+  - **词元表（主判据）**：`key` / `apikey` / `api-key` / `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth` ↦ 覆盖 `key`、`x-access-key`、`x-auth-key`、`x-upstream-key`、`x-litellm-key`、`x-amz-signature`、`x-custom-site-token` 等（站点 `customHeaders` 允许任意头名：`services/siteCustomHeaders.ts:24-40` 解析、`siteProxy.ts:432/489` 合并进上游请求头）；
+  - 保底子串规则（保留不删，使「改前会被掩码的名字改后仍被掩码」）：`api-key` / `apikey` / `token` / `secret` / `password` / `passwd` / `credential`；
+  - **不会判为敏感的（反例/控制组）**：`x-monkey`（含子串 `key`，但词元是 `monkey`）、`x-request-id`、`content-type`、`x-client`。
+  > **R2-1 订正**：R1 只按**子串**判定，`key` / `x-access-key` / `x-auth-key` / `x-upstream-key` / `x-litellm-key` / `x-amz-signature` 全部漏网（oracle 探针复现）。
+- **同一落库路径其它敏感面的**排查结论（生产库只读计数，仅计数不贴值）：
+  - `proxy_debug_attempts`：共 5653 行；`request_headers_json` 含 `Authorization` = **5653 行（100%）**，时间范围 `2026-10-02 00:59:26` → `2026-10-02 23:29:10`；`response_headers_json` 含 `set-cookie` = 0（同一咽喉一并覆盖）。
+  - `proxy_debug_traces`：共 5842 行；`request_headers_json` 含 `Authorization` = **5842 行**（下游客户端 token），`final_response_headers_json` 含 `set-cookie` = 0（同一咽喉一并覆盖）。
+  - **请求体不需要处理（有证据）**：`request_body_json` 里没有任何凭据**键**（`"authorization"` / `"api_key"` / `"headers"` 命中均为 0）；`bearer ` 子串命中 73 行集中在 36 分钟窗口（07:11–07:47），是对话正文里的自由文本，不是结构化凭据。
+  - **登记（本次未处理）**：URL 查询串（`target_url` / `request_path`）含 `key=` 的生产命中 = 0；本仓把上游 key 放头（`services/upstreamRequestBuilder.ts:70-71` 把 `cookie` / `x-api-key` / `x-goog-api-key` 列为屏蔽的透传头），但若将来某站点把 key 写进 endpoint URL，它会随 `target_url` 落库——属 URL 侧另一条面。`raw_error_text` / `response_body_json` 含 `Bearer ` 的生产命中均为 0。
+- **是否需要清理历史行 / 轮换密钥：由用户决定**（本轮只计数，未删任何生产数据）。事实：`proxy_debug_*` 有保留期（默认 24h，由 `deleteExpiredProxyDebugTraces` 清理），上述明文行会自然过期。
+
 ## 验证（本轮 `MARK-FIX-A-R2-1790985034`，未 commit）
 
 oracle 第二意见落地：R2-1 掩码边界补齐（必修代码）、R2-2 哨兵口径订正（必修文档）、R2-3 列语义可见性（必修文档）。同一分支 `fix/downgrade-observability-and-secret-masking`，未提交；R2-1 只动脱敏 helper/名单与该处测试，未动其它逻辑。
@@ -278,6 +296,16 @@ oracle 第二意见落地：R2-1 掩码边界补齐（必修代码）、R2-2 哨
 > 新增哨兵注释（约 +25 行，且各降级出口各 +1..+2 行）、R2-2 又把该注释扩写了 +6 行。本节行号为 **R2 后**
 > 的当前快照；核对历史小节时请**以符号名 / 函数名（如 `handleExecutionError`、`recordStreamFailure`）为准**，
 > 行号仅作定位起点（是否需要整文件重编号，留给主代理决定）。
+
+### R2-1 掩码边界补齐：子串判定 → **词元判定**
+
+- **事实（oracle 探针）**：R1 只按**子串**判定 ⇒ `key` / `x-access-key` / `x-auth-key` / `x-upstream-key` / `x-litellm-key` / `x-amz-signature` **全部明文保留**；站点 `customHeaders` 允许任意头名（`services/siteCustomHeaders.ts:24-40`）并被合并进上游请求头（`services/siteProxy.ts:432` / `:489` 调 `mergeHeadersWithSiteCustomHeaders`）⇒ 配 `{"x-upstream-key":"…"}` 即可复现。
+- **改法（file:line）**：`services/proxyDebugTraceStore.ts` —— 新增 `SENSITIVE_HEADER_TOKENS`（`:152`）；`splitDebugHeaderNameTokens`（`:181`）；`isSensitiveDebugHeaderName`（`:185`）升级为三级判定 = 精确名单（`:126`）→ **任一词元命中词表**（主判据）→ 保底子串规则（`:171`）。归一化：`trim` + `lowercase` + `[\s_]+ → '-'`，再按 `-` 切词。
+- **正例（会被判为敏感）**：`authorization`（精确）｜`key`｜`x-access-key`｜`x-auth-key`｜`x-upstream-key`（站点自定义头复现路径）｜`x-litellm-key`｜`x-amz-signature`｜`x-custom-site-token`｜以及既有 `x-api-key` / `x-goog-api-key` / `api-key` / `cookie` / `set-cookie`。
+- **反例（不会被误伤，值原文保留）**：`x-monkey`（含子串 `key`，但词元是 `monkey`）｜`x-request-id`｜`content-type`｜`x-client`。
+- **先红后绿（“仅回退 R2-1 即变红”）**：用例在 `services/proxyDebugTraceStore.test.ts:204`（既有文件内新增一条，未新开文件）。
+  - **红**：仅把 `proxyDebugTraceStore.ts` 还原成 R1 版（保留用例）⇒ `Tests 1 failed | 3 passed (4)`、exit 1；红 diff 逐字列出 6 个漏网头（`"key": "value-of-key"` / `x-access-key` / `x-amz-signature` / `x-auth-key` / `x-litellm-key` / `x-upstream-key` 仍为原值），而 `authorization` 与 `x-custom-site-token`（含子串 `token`）已掩码不变｜`/tmp/mark1790985034/red/r2-1-red.txt`。
+  - **绿**：还原后 `Tests 20 passed (20)`（2 文件：store 4 + singleChannelFailure 16）、exit 0｜`/tmp/mark1790985034/green/r2-focused-green.txt`；还原经 `diff -q` 校验字节一致（输出 `restored-byte-identical`）。
 
 ### R2-2 哨兵口径订正（oracle S-1）
 

@@ -3,6 +3,12 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../../config.js';
 import { resetUpstreamEndpointRuntimeState } from '../../services/upstreamEndpointRuntimeMemory.js';
+import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
+import * as siteApiEndpointService from '../../services/siteApiEndpointService.js';
+import * as sharedSurfaceModule from '../../proxy-core/surfaces/sharedSurface.js';
+
+/** O8 R4：真实工厂引用（`vi.spyOn` 后还能拿到原实现，供壳子转发）。 */
+const realCreateSurfaceFailureToolkit = sharedSurfaceModule.createSurfaceFailureToolkit;
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
@@ -115,7 +121,7 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
-  hasProxyLogClientHttpStatusColumn: async () => false,
+  hasProxyLogClientHttpStatusColumn: async () => true,
   // 本文件现在要断言 `is_stream` / `first_byte_latency_ms` 是否真的进写侧取值，故置真（置假时
   // `insertProxyLog` 按设计整列丢弃这两列，断言无法区分「未传」与「传了但被丢」）。
   hasProxyLogStreamTimingColumns: async () => true,
@@ -368,6 +374,10 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.error?.message).toContain('empty content');
     expect(recordSuccessMock).not.toHaveBeenCalled();
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    // O8 追加一：本行由 `handleDetectedFailure` 出口写；改前该出口没传 `firstByteLatencyMs` ⇒ 该列恒 NULL。
+    expect(lastProxyLogValues()?.firstByteLatencyMs).toEqual(expect.any(Number));
+    // O8 R3：该出口此前也未传 `is_stream`。本用例是非流式请求 ⇒ 真值必须是 `false`（写死 `true` 会在此拆穿）。
+    expect(lastProxyLogValues()?.isStream).toBe(false);
   });
 
   it('returns HTTP upstream_error instead of hijacking when streamed chat requests receive empty non-SSE payloads', async () => {
@@ -404,6 +414,10 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.error?.type).toBe('upstream_error');
     expect(recordSuccessMock).not.toHaveBeenCalled();
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    // O8 追加一：本行由 `handleDetectedFailure` 出口写；改前该出口没传 `firstByteLatencyMs` ⇒ 该列恒 NULL。
+    expect(lastProxyLogValues()?.firstByteLatencyMs).toEqual(expect.any(Number));
+    // O8 R3：该出口此前也未传 `is_stream`；本用例是流式请求（`stream: true`）⇒ 真值 `true`。
+    expect(lastProxyLogValues()?.isStream).toBe(true);
   });
 
   it('returns HTTP upstream_error when streamed chat SSE yields only empty deltas before DONE', async () => {
@@ -2887,6 +2901,10 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.error?.message).toContain('empty content');
     expect(recordSuccessMock).not.toHaveBeenCalled();
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    // O8 追加一：本行由 `handleDetectedFailure` 出口写；改前该出口没传 `firstByteLatencyMs` ⇒ 该列恒 NULL。
+    expect(lastProxyLogValues()?.firstByteLatencyMs).toEqual(expect.any(Number));
+    // O8 R3：该出口此前也未传 `is_stream`。本用例是非流式请求 ⇒ 真值必须是 `false`（写死 `true` 会在此拆穿）。
+    expect(lastProxyLogValues()?.isStream).toBe(false);
   });
 
   it('returns HTTP upstream_error instead of hijacking when streamed /v1/responses receives empty non-SSE payloads', async () => {
@@ -2920,6 +2938,10 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.error?.type).toBe('upstream_error');
     expect(recordSuccessMock).not.toHaveBeenCalled();
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    // O8 追加一：本行由 `handleDetectedFailure` 出口写；改前该出口没传 `firstByteLatencyMs` ⇒ 该列恒 NULL。
+    expect(lastProxyLogValues()?.firstByteLatencyMs).toEqual(expect.any(Number));
+    // O8 R3：该出口此前也未传 `is_stream`；本用例是流式请求（`stream: true`）⇒ 真值 `true`。
+    expect(lastProxyLogValues()?.isStream).toBe(true);
   });
 
   it('prefers native /v1/responses for claude-family /v1/responses requests that include input_file file_url', async () => {
@@ -5475,6 +5497,18 @@ describe('chat proxy stream behavior', () => {
       // 失败没有退化成 JSON 出口（那个出口在 hijack 后写不进去，会被静默丢弃）。
       expect(response.body).not.toContain('"type":"server_error"');
 
+      // O8（responses 面）：本行由外层 catch 的 `handleExecutionError` 出口写。改前 `firstByteLatencyMs`
+      // 声明在 `try` 内 ⇒ catch 作用域取不到 ⇒ 本行 `first_byte_latency_ms` 恒 NULL；提升到 handler
+      // 作用域并按轮重置后，必须落本轮观测到的真实首字节延迟。
+      const breakRow = lastProxyLogValues();
+      // `client_http_status` 在本夹具被 `hasProxyLogClientHttpStatusColumn() => false` 整列丢弃，故不断言它。
+      expect(breakRow).toMatchObject({
+        status: 'failed',
+        httpStatus: 0,
+        isStream: true,
+      });
+      expect(breakRow?.firstByteLatencyMs).toEqual(expect.any(Number));
+
     } finally {
       (config as any).proxyMaxChannelAttempts = previousAttempts;
     }
@@ -5798,6 +5832,263 @@ describe('chat proxy stream behavior', () => {
       expect(finalDiagnostics.some((line) => line.includes('"has_content":true'))).toBe(true);
     } finally {
       await loggingApp.close();
+    }
+  });
+
+  // —— O8：外层 catch 失败出口的 `first_byte_latency_ms`（改前因变量声明在 `try` 内而恒 NULL）——
+  // 两个外层出口：`handleExecutionError`（中途断流 / 执行类异常）与 `handleUpstreamFailure`（上游非 2xx）。
+  // 取值口径：= 本轮上游响应观测到的首字节延迟（`getObservedResponseMeta`）；本轮未观测到 ⇒ NULL。
+  const proxyLogRowsInOrder = (): Array<Record<string, any>> => proxyLogValuesMock.mock.calls
+    .map((call) => call[0])
+    .filter((values): values is Record<string, any> => (
+      !!values && typeof values === 'object' && 'httpStatus' in values && 'retryCount' in values
+    ));
+
+  it('records a real first_byte_latency_ms on the chat outer-catch exit when the upstream body breaks mid-stream', async () => {
+    // O8：SSE body 中途 `terminated`（`reader.read()` 抛）⇒ 异常从 `try` 冒泡到外层 catch →
+    // `handleExecutionError` 出口。重试钉成 1 次尝试，保证只写一行、不被后续轮次干扰。
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    (config as any).proxyMaxChannelAttempts = 1;
+    try {
+      const encoder = new TextEncoder();
+      const upstreamBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"id":"chatcmpl-o8-break","choices":[{"delta":{"content":"partial"}}]}\n\n'));
+        },
+        pull(controller) {
+          // 首块被消费后才拉第二次 ⇒ 首帧可达下游（首字节已观测），随后断流。
+          controller.error(new Error('terminated'));
+        },
+      });
+      fetchMock.mockResolvedValue(new Response(upstreamBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+
+      const response = await injectChatStream();
+      // 已 hijack：状态码停在 200，失败语义落在流内错误帧（本条只关心落库观测列的取值）。
+      expect(response.statusCode).toBe(200);
+
+      const rows = proxyLogRowsInOrder();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'failed', isStream: true });
+      expect(rows[0].firstByteLatencyMs).toEqual(expect.any(Number));
+      expect(rows[0].firstByteLatencyMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
+    }
+  });
+
+  it('records a real first_byte_latency_ms on the chat outer-catch exit when the upstream throws (HTTP 429)', async () => {
+    // O8：上游非 2xx（429）⇒ `executeEndpointFlow` 回流 `ok: false` ⇒ 站内 API 端点池回调抛
+    // `SiteApiEndpointRequestError` ⇒ 外层 catch 的 `handleUpstreamFailure` 出口。
+    // 该出口的取值来源是本轮**失败尝试**的上游响应（`onAttemptFailure` 钩子里的 `getObservedResponseMeta`）：
+    // 429 响应已到达且 body 已读到 ⇒ 真实首字节延迟可得。
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'rate limited', type: 'rate_limit_exceeded' },
+    }), { status: 429, headers: { 'content-type': 'application/json; charset=utf-8' } }));
+
+    const response = await injectChatStream();
+    // 对外语义不变：客户端实收 429（`shouldRetryProxyRequest` 在本夹具里不触发重试）。
+    expect(response.statusCode).toBe(429);
+
+    const rows = proxyLogRowsInOrder();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'failed', httpStatus: 429 });
+    expect(rows[0].firstByteLatencyMs).toEqual(expect.any(Number));
+    expect(rows[0].firstByteLatencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('resets first_byte_latency_ms per retry iteration when a later attempt observes no first byte', async () => {
+    // O8 的主要风险（两审点名）：把变量提升到重试循环之外后，上一轮观测到的值不能漏到下一轮。
+    // 夹具：第 1 轮上游已回 200 且首块到达（观测到真实延迟）→ SSE body 中途断 → 外层 catch
+    // （`handleExecutionError`）写行并继续重试；第 2 轮上游根本没回（网络类失败，`endpointFlow`
+    // 合成的 502 无 meta）⇒ 第 2 轮该行必须落 NULL，不得沿用第 1 轮的值。
+    // 注：非流式 body 断流不会走这里（`readRuntimeResponseText` 把读取异常吞成空串），必须用流式夹具。
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    const previousFallback = (config as any).disableCrossProtocolFallback;
+    (config as any).proxyMaxChannelAttempts = 2;
+    // 单端点：避免本轮 502 在每个非末端点各写一条降级行（那是既有行为，与本用例无关），
+    // 使每一轮重试恰好只留一条终态失败行。
+    (config as any).disableCrossProtocolFallback = true;
+    try {
+      // 第 2 轮要真选到通道才会再次打上游（`retryCount > 0` 走 `selectNextChannel`）。
+      selectNextChannelMock.mockReturnValue({
+        channel: { id: 12, routeId: 22 },
+        site: { name: 'demo-site', url: 'https://upstream.example.com' },
+        account: { id: 33, username: 'demo-user' },
+        tokenName: 'default',
+        tokenValue: 'sk-demo',
+        actualModel: 'upstream-gpt',
+      });
+
+      const encoder = new TextEncoder();
+      const firstAttemptBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"id":"chatcmpl-o8-retry","choices":[{"delta":{"content":"partial"}}]}\n\n'));
+        },
+        pull(controller) {
+          controller.error(new Error('terminated'));
+        },
+      });
+      fetchMock
+        .mockResolvedValueOnce(new Response(firstAttemptBody, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        }))
+        .mockRejectedValueOnce(new Error('ECONNRESET'));
+
+      // 第 1 轮已 hijack（流已写出首帧）⇒ 不再断言 HTTP 状态码（那是本片不动的既有语义），
+      // 只断言两条落库行的观测列。
+      await injectChatStream();
+
+      const rows = proxyLogRowsInOrder();
+      expect(rows).toHaveLength(2);
+      // 第 1 轮：`handleExecutionError` 出口，已观测到首字节 ⇒ 真实值。
+      expect(rows[0]).toMatchObject({ status: 'failed', httpStatus: 0, isStream: true });
+      expect(rows[0].firstByteLatencyMs).toEqual(expect.any(Number));
+      // 第 2 轮：`handleUpstreamFailure` 出口（合成 502），本轮未观测到任何首字节 ⇒ 必须 NULL。
+      expect(rows[1]).toMatchObject({ status: 'failed', httpStatus: 502, isStream: true });
+      expect(rows[1].firstByteLatencyMs).toBeNull();
+    } finally {
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
+      (config as any).disableCrossProtocolFallback = previousFallback;
+    }
+  });
+
+  it('records a real first_byte_latency_ms on the responses outer-catch exit when the upstream throws (HTTP 429)', async () => {
+    // O8（responses 面）：与 chat 面同形的 `handleUpstreamFailure` 出口。
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'rate limited', type: 'rate_limit_exceeded' },
+    }), { status: 429, headers: { 'content-type': 'application/json; charset=utf-8' } }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: { model: 'gpt-5.2', input: 'hello' },
+    });
+    expect(response.statusCode).toBe(429);
+
+    const rows = proxyLogRowsInOrder();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'failed', httpStatus: 429 });
+    expect(rows[0].firstByteLatencyMs).toEqual(expect.any(Number));
+  });
+
+  // —— O8 R4（P1/P3）：租约忙 & 站点并发超时出口的观测列 ——
+  it('records the real is_stream value on the responses channel-busy failure row', async () => {
+    // O8 R4（P1）：responses 面的租约忙出口此前未传 `is_stream`（该列恒 NULL）。
+    // 本用例用**流式**请求：实现若写死成 `false` 会在此拆穿。
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    (config as any).proxyMaxChannelAttempts = 1;
+    const acquireLeaseSpy = vi.spyOn(proxyChannelCoordinator, 'acquireChannelLease')
+      .mockResolvedValue({ status: 'timeout', waitMs: 700 } as any);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        payload: { model: 'gpt-5.2', input: 'hello', stream: true },
+      });
+
+      // 对外语义不变：租约忙 + 无重试轮次 ⇒ 客户端仍是 503。
+      expect(response.statusCode).toBe(503);
+      const rows = proxyLogRowsInOrder();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'failed', httpStatus: 503 });
+      expect(rows[0].isStream).toBe(true);
+      // 有意 NULL：本出口从未触达上游。
+      expect(rows[0].firstByteLatencyMs).toBeNull();
+    } finally {
+      acquireLeaseSpy.mockRestore();
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
+    }
+  });
+
+  it('records the real client_http_status and an explicit first_byte_latency_ms on the chat site-concurrency-timeout row', async () => {
+    // O8 R4（P1/P3）：chat 面「站点并发超时」出口此前既没传 `client_http_status`（该列恒 NULL），
+    // 也没传 `first_byte_latency_ms`。
+    // `first_byte_latency_ms` 在本出口**结构上恒 null**（轮首重置 + 站点租约超时先于任何上游尝试，
+    // 不可能有首字节观测），而落库侧会对 null 做 `?? null` 归一 ⇒ 「没传」与「传了 null」落库后一模一样。
+    // 故除断言落库取值外，另用工厂壳子捕获 surface 传给 toolkit 的**原始入参**，锁住「确实显式传了该键」。
+    const poolSpy = vi.spyOn(siteApiEndpointService, 'runWithSiteApiEndpointPool')
+      .mockRejectedValue(Object.assign(
+        new siteApiEndpointService.SiteApiEndpointRequestError('site concurrency slot timeout', { status: 503 }),
+        { siteConcurrencyTimeout: true },
+      ));
+    const toolkitLogArgs: Array<Record<string, any>> = [];
+    const toolkitSpy = vi.spyOn(sharedSurfaceModule, 'createSurfaceFailureToolkit')
+      .mockImplementation(((input: any) => {
+        const real = realCreateSurfaceFailureToolkit(input);
+        return {
+          ...real,
+          log: async (args: Record<string, any>) => {
+            toolkitLogArgs.push(args);
+            return await real.log(args);
+          },
+        };
+      }) as any);
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    (config as any).proxyMaxChannelAttempts = 1;
+    try {
+      const response = await injectChatStream();
+
+      expect(response.statusCode).toBe(503);
+      const rows = proxyLogRowsInOrder();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'failed', httpStatus: 503, clientHttpStatus: 503, isStream: true });
+
+      expect(toolkitLogArgs).toHaveLength(1);
+      expect(Object.keys(toolkitLogArgs[0])).toContain('clientHttpStatus');
+      expect(Object.keys(toolkitLogArgs[0])).toContain('firstByteLatencyMs');
+      expect(toolkitLogArgs[0].firstByteLatencyMs).toBeNull();
+    } finally {
+      toolkitSpy.mockRestore();
+      poolSpy.mockRestore();
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
+    }
+  });
+
+  it('records the real client_http_status and an explicit first_byte_latency_ms on the responses site-concurrency-timeout row', async () => {
+    // O8 R4（P1/P3）：responses 面同形出口（与 chat 面同口径）。
+    const poolSpy = vi.spyOn(siteApiEndpointService, 'runWithSiteApiEndpointPool')
+      .mockRejectedValue(Object.assign(
+        new siteApiEndpointService.SiteApiEndpointRequestError('site concurrency slot timeout', { status: 503 }),
+        { siteConcurrencyTimeout: true },
+      ));
+    const toolkitLogArgs: Array<Record<string, any>> = [];
+    const toolkitSpy = vi.spyOn(sharedSurfaceModule, 'createSurfaceFailureToolkit')
+      .mockImplementation(((input: any) => {
+        const real = realCreateSurfaceFailureToolkit(input);
+        return {
+          ...real,
+          log: async (args: Record<string, any>) => {
+            toolkitLogArgs.push(args);
+            return await real.log(args);
+          },
+        };
+      }) as any);
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    (config as any).proxyMaxChannelAttempts = 1;
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        payload: { model: 'gpt-5.2', input: 'hello', stream: true },
+      });
+
+      expect(response.statusCode).toBe(503);
+      const rows = proxyLogRowsInOrder();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'failed', httpStatus: 503, clientHttpStatus: 503, isStream: true });
+
+      expect(toolkitLogArgs).toHaveLength(1);
+      expect(Object.keys(toolkitLogArgs[0])).toContain('clientHttpStatus');
+      expect(Object.keys(toolkitLogArgs[0])).toContain('firstByteLatencyMs');
+      expect(toolkitLogArgs[0].firstByteLatencyMs).toBeNull();
+    } finally {
+      toolkitSpy.mockRestore();
+      poolSpy.mockRestore();
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
     }
   });
 });

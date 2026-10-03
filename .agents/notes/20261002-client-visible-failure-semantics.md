@@ -192,7 +192,12 @@ oracle 独立复核 R1 后指出**一条仍可静默的路径**：`legacy` 失�
 - **O6 重试耗尽出口劫持后靠 Fastify 的 `sent` 门禁丢弃**：`src/server/proxy-core/surfaces/chatSurface.ts:475` 仍是裸 `reply.code(retryFailure.status).send(retryFailure.payload)`，未走 `respondTerminalFailure`；此时 `streamStarted` 已在轮首被重置为 false（`:441`），「已 hijack」的事实压根不在判定里，真正的兜底是 Fastify 5 的 `sent` 门禁（`node_modules/fastify/lib/reply.js:161-164`：只 `log.warn(FST_ERR_REP_ALREADY_SENT)` 后 return）⇒ 客户端拿不到任何失败信号。建议：该出口改用 `respondTerminalFailure`，并把「已 hijack」做成跨轮次不重置的事实（与 O1 护栏同一处修）。
 - **O7 已闭环，勿追**：`src/server/routes/api/upstreamObservations.test.ts:27` 的夹具时间炸弹（硬编码 `Date.UTC(2026, 8, 25, 7, 0, 0)` 被默认「now-7d」窗口排出）已修（改为由 `Date.now()` 派生，注释说明原因），本轮全量已全绿。
 - **Q4 drizzle meta 快照链无自动化守卫**：`drizzle/meta/_journal.json` 与 `drizzle/meta/*_snapshot.json` 的 `prevId` 链没有任何守卫——`scripts/` 与 `src/` 下 `prevId` 零命中，`npm run repo:drift-check` 也不覆盖。故把不变量写死在此：① head 快照 = 字典序最大的 `drizzle/meta/NNNN_snapshot.json` 文件名；② 用新快照取代 head 时，新快照 `prevId` 必须等于**被删**快照的 `id`，重命名只改文件名、不改 `id`（本轮实测：新 `0032_snapshot.json` 的 `prevId=db396b71-1ec0-4060-9e98-5782ee95be1f` == HEAD `0033_snapshot.json` 的 `id`；`_journal.json` 末条 tag `0032_proxy_logs_client_http_status` 与之对齐）。可选后续：加一条「prevId 链自检」单测（按字典序串链，断言链头/链尾与 `_journal.json` tag 一致）。
-- **O8（S1 顺带检查的观察项，按派单要求「只报告、不改」）**：`handleExecutionError` 出口除 `clientHttpStatus` 外还有三处与「已 hijack 后断流」的事实不符——① `src/server/proxy-core/surfaces/sharedSurface.ts:1060` 的 `httpStatus: 0` 及其注释（`:1081-1083`「从未拿到真实上游 HTTP 响应」）在该场景为假（上游已回 200 头，只是 body 中途断了）；② `firstByteLatencyMs` 三个调用点都没传（`chatSurface.ts:1550-1558`、`chatSurface.ts:2019`、`openAiResponsesSurface.ts:1607-1614`），真因是它声明在 `try` 内（`chatSurface.ts:848`）、catch（`:1464`）作用域取不到，故该列恒为 NULL、已 hijack 断流的首字延迟观测丢失；③ 出口 payload 的 `error.type = 'server_error'`（`:1090`，配 `status: 502` 于 `:1086`）与已 hijack 时实际写给客户端的 in-band 帧 `type=upstream_error`（`:690-693`）口径不一致（帧形由构造器固定，payload 只用到 message）。建议：另开一片处理，②可先做最小改动「把 `firstByteLatencyMs` 提升到 handler 作用域」。
+- **O8（S1 顺带检查的观察项；② 已修，见下）**：`handleExecutionError` 出口除 `clientHttpStatus` 外还有三处与「已 hijack 后断流」的事实不符——① `src/server/proxy-core/surfaces/sharedSurface.ts:1060` 的 `httpStatus: 0` 及其注释（`:1081-1083`「从未拿到真实上游 HTTP 响应」）在该场景为假（上游已回 200 头，只是 body 中途断了）；② `firstByteLatencyMs` 三个调用点都没传（`chatSurface.ts:1550-1558`、`chatSurface.ts:2019`、`openAiResponsesSurface.ts:1607-1614`），真因是它声明在 `try` 内（`chatSurface.ts:848`）、catch（`:1464`）作用域取不到，故该列恒为 NULL、已 hijack 断流的首字延迟观测丢失；③ 出口 payload 的 `error.type = 'server_error'`（`:1090`，配 `status: 502` 于 `:1086`）与已 hijack 时实际写给客户端的 in-band 帧 `type=upstream_error`（`:690-693`）口径不一致（帧形由构造器固定，payload 只用到 message）。建议：另开一片处理，②可先做最小改动「把 `firstByteLatencyMs` 提升到 handler 作用域」。
+  - **② 已修（`MARK-FIX-O8-OTOKENS-1790979`，未 commit）**：`firstByteLatencyMs` 提升到两个 handler 的 handler 作用域（`chatSurface.ts` 的 `handleChatSurfaceRequest`、`openAiResponsesSurface.ts` 的 `handleOpenAiResponsesSurfaceRequest`；原 `const` 改赋值），外层 catch 的两条失败出口（`handleUpstreamFailure` / `handleExecutionError`）按真实取值传参。
+    - **取值口径**：仍是「**上游**响应首字节延迟」（非下游）。两个来源：① 成功拿到上游响应时（`try` 内）；② **失败尝试的上游响应**——`onAttemptFailure(ctx)` 里的 `getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null`。②是「上游非 2xx」出口（`handleUpstreamFailure`）能落真实值所必需：`executeEndpointFlow` 失败回流只带 `{ok,status,errText,rawErrText?,upstreamPath?}`（`endpointFlow.ts:352-357`）**不含响应对象**，池回调抛 `SiteApiEndpointRequestError` 时 surface 手上没有 response ⇒ 不捕获就只能永远 NULL。该赋值是**纯观测**：不参与通道选择 / 重试 / 路由 / 计费，不改任何对外语义（`onAttemptFailure` 是既有钩子，只多读一次 WeakMap）。
+    - **重置口径**：**每轮轮首重置为 `null`**（与既有 `streamStarted = false` 同一处）。本轮未观测到首字节即落 NULL，**严禁**上一轮的值漏到下一轮；`onAttemptFailure` 用 `?? null` 赋值，故网络类失败（`endpointFlow` 合成的 502 无 meta）与首字节超时（`meta.firstByteLatencyMs = null`）都会把该值写回 NULL。
+    - **未动（有意）**：① `httpStatus: 0` 与 ③ 出口 payload 的 `error.type` 保持原样（本片只做观测列取值）；对外可见语义（响应码 / 重试次数与条件 / 路由 / 计费）零改动。
+    - **仍不在本片范围（登记）**：claude count-tokens 面的 `handleUpstreamFailure` / `handleExecutionError` 两个调用点也不传该列；该 handler 的上游请求经 `createSurfaceDispatchRequest` → `dispatchRuntimeRequest`，**不经过 `fetchWithObservedFirstByte`**（无 observed meta）⇒ 无真实值可传，保持 NULL。
 
 - **O-a 上游原文进入通道失败分类判据（`MARK-B4-FIX-R1` 增）**：`src/server/services/tokenRouter.ts:399/403/407/411`（`matchesAnyPattern(USAGE_LIMIT_RATE_LIMIT_PATTERNS \| SITE_MODEL_FAILURE_PATTERNS \| SITE_PROTOCOL_FAILURE_PATTERNS \| SITE_VALIDATION_FAILURE_PATTERNS, errorText)`）与 `:517-535`（分类）/`:578-581`（`parseCodexQuotaResetHint`）。带内失败现在会把**上游原文**（含 `Retry after 29s.` 与尾部 `(code=…, request_id=…)`）送进这些子串/正则判据，直接决定「限流冷却 / 模型级失败 / 站点级失败」分流。后缀在尾部、不命中关键词，但**发版后需以真实流量确认分类未被新文本改变**。
 - **O-b responses 面同形帧仍静默（`MARK-B4-FIX-R1` 增）**：`src/server/transformers/openai/responses/proxyStream.ts:167-173` 的 `isFailureEvent` 只认 `event`/`type` ∈ {`error`,`response.failed`}；`{"error":{…},"type":"stream_error"}` 这类形不认（落到 `normalizeEvent` → 无匹配 → 静默）。codex 新版只走 `/v1/responses` ⇒ **本轮的 chat 面修复对它们无效**，需另开一片把同一判据搬过去。
@@ -203,7 +208,7 @@ oracle 独立复核 R1 后指出**一条仍可静默的路径**：`legacy` 失�
   - **取值口径一：`isStream` = 本轮请求解析结果变量，不是字面量 `true`**。chat 面取自 `requestEnvelope.parsed.isStream`（`chatSurface.ts:357`）、responses 面取自 `requestEnvelope.stream`（`openAiResponsesSurface.ts:301`）；8 处都在各自的 `if (isStream)` 块内（chat `:895`、responses `:1024`），故运行期恒 `true`——但写的是同一个变量，块外的非流式出口会写 `false`（既有的 `onDowngrade` 出口 `chatSurface.ts:802` 就是这么写的，口径一致）。
   - **取值口径二：`firstByteLatencyMs` = 与各自成功出口同源的 `firstByteLatencyMs` 变量**（chat `:893`、responses `:983` = `getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null`，语义 = **上游**响应首字节延迟，非下游首字节）。观测不到 ⇒ `null`（**不编造**）。8 处上游响应都已由 `fetchWithObservedFirstByte` 读到首块（`!response.body` 时取响应到达耗时，见 `firstByteTimeout.ts:139-144`），或整段 body 已被读完，「失败发生在首字节之前 ⇒ 保持 NULL」这个分支由**同一个表达式**天然覆盖，不需要逐点特判：拿不到真实值就是 `null`。
   - **逐处情形**（前 6 处有集成用例证据，见本轮验证节）：① `:1091` 断流/失败发生在 reader 读到过上游块之后（首块已进 replay 缓冲）⇒ 延迟真实已知；② `:1156` / ⑤ `:1126` 整段 body 已由 `readRuntimeResponseText` 读完（首字节必已到达）；③ `:1263` / ⑥ `:1226` 同一路径的 JSON 体，body 已读完；④ `:1347` / ⑧ `:1387` reader 出口（空内容 / 带内失败帧）——reader 必然读到过块才会产生失败；⑦ `:1318` 与 ⑤ 同形状、同取值（websocket transport 请求的非 SSE 分支）。**没有任何一处在首字节之前失败**，故 8 处均落真实延迟；若将来某路径拿不到 meta，表达式即落 NULL。
-  - **不在本轮范围的相邻出口**：SSE 中途 `terminated`（`reader.read()` 抛）**不走**这 8 处——异常沿生命周期冒泡到外层 catch → `handleExecutionError`（其 `firstByteLatencyMs` 恒 NULL，见上条 **O8**）；`isStream` 那一列在 `handleExecutionError` 是**已有**行为。
+  - **不在本轮范围的相邻出口**：SSE 中途 `terminated`（`reader.read()` 抛）**不走**这 8 处——异常沿生命周期冒泡到外层 catch → `handleExecutionError`（该出口的 `firstByteLatencyMs` 当时恒 NULL，见上条 **O8**；**O8 ② 已在本轮 `MARK-FIX-O8-OTOKENS-1790979` 修复**）；`isStream` 那一列在 `handleExecutionError` 是**已有**行为。
   - **订正记录**：原文只写 chat 面那 4 处（`MARK-B4-FIX-R1` 当时只看 chat 面），漏了 responses 面同名 4 处；`MARK-FIX-A-R2-P1` 订正为 8 处；本轮补齐取值。
 - **O-e 未覆盖的带内失败形（`MARK-B4-FIX-R1` 增）**：本轮判据只认「顶层 `error` 对象 / `type` 为 `stream_error` / SSE 帧名 `error`」三类。① `choices[].finish_reason === 'error'` 但无顶层 `error` 对象；② SSE 帧名为 `response.failed` 而载荷无 `type` 字段；③ 字符串型 `error`（`{"error":"upstream failed"}`）——三者在 chat 面仍走原归一化链（静默或空内容兜底），需按实测流量决定是否补判据。
 - **R3-① 失败帧之后仍可能写出内容帧（`MARK-B4-R3-LEGACY-GATE-1790933` 增）**：失败帧处理完（`markFailed`）后 `handleEventBlock` **不停止消费上游**——new 形 `proxyStream.ts:457-472`（已写字节分支写帧后 `return`）与 legacy 已写字节分支（`:486-505`）都不终结本轮；上游若在错误帧之后还发内容帧，仍会被归一化并写出。**概率极低**（上游通常在错误帧后停写）但形态存在：客户端会看到「内容帧出现在失败帧之后」，若错误帧被客户端跳过，末态可能只剩上游自带的 `[DONE]`。建议：失败终态后的后续帧只计数不写出（另开一片）。**R4 后**：新加的 claude legacy 分支同样只在帧写完后退回（`proxyStream.ts:496-502`），不终止消费 ⇒ 本观察项对 claude 下游依然成立。
@@ -270,7 +275,7 @@ R4（R3-⑥ 闭环）：只改一处生产代码 + 一处用例 + 本文。
 - 取 -1：合法状态码是 `100..599`，-1 落在值域外、不可能被误读成真实状态码；「整数列用 -1 当『不适用 / 非值』哨兵」在本仓有先例（token 用量投影把 `sites.id = -1` 当「未知站点」哨兵）。
 - **影响面**：全仓**没有** `client_http_status` 的读侧消费（`src/**` 检索只有写侧、schema 契约、跨库迁移拷贝、db 列存在性门禁与用例），故新增哨兵值不动任何既有查询/统计。
 
-**登记（`MARK-FIX-OD-1790969` 后更新）**：O-d **已修**（8 处流式失败出口已按真实取值传 `isStream` / `firstByteLatencyMs`，取值口径见「遗留与跟进」O-d 与本轮验证节）；**O8** 仍成立（`handleExecutionError` 出口的 `firstByteLatencyMs` 恒 NULL，真因是它声明在 `try` 内、catch 取不到，待另开一片）；gemini 面的 `onDowngrade`（`geminiSurface.ts:1421-1427`）**不写 `proxy_logs`**（只更新 debug attempt）⇒ 不存在同类缺列，无需改。
+**登记（`MARK-FIX-O8-OTOKENS-1790979` 后更新）**：O-d **已修**（8 处流式失败出口已按真实取值传 `isStream` / `firstByteLatencyMs`，取值口径见「遗留与跟进」O-d 与本轮验证节）；**O8 ② 已修**（两个 handler 的 `firstByteLatencyMs` 提升到 handler 作用域 + 轮首重置 + 外层 catch 两条出口传参，取值/重置口径见「遗留与跟进」O8；O8 ①③ 有意未动）；**O8 相邻面 `handleDetectedFailure` 四处出口**（chat 2 + responses 2）也在追加轮 **已修**（同口径传参，见「遗留与跟进」O8 登记第 2 条末句）；gemini 面的 `onDowngrade`（`geminiSurface.ts:1421-1427`）**不写 `proxy_logs`**（只更新 debug attempt）⇒ 不存在同类缺列，无需改。
 
 ### ② 调试库头脱敏：上游凭据不再明文落库
 
@@ -279,7 +284,9 @@ R4（R3-⑥ 闭环）：只改一处生产代码 + 一处用例 + 本文。
 - **掩码策略**：只替换**值**（头名、头次序、非敏感头原文一律保留），固定占位 `[redacted]`；**不写定长哈希**——调试不需要跨行关联凭据，而任何由原文派生的取值都会让弱凭据（自定义站点头里的短口令）可离线爆破，任务允许但本次取更严的一侧。
 - **覆盖的敏感头名清单**（R2-1 后为**词元判定**，大小写不敏感；`_` 与空白先归一成 `-`，再按 `-` 切词；**任一词元**命中即敏感）：
   - 精确名单：`authorization`、`proxy-authorization`、`cookie`、`set-cookie`、`x-api-key`、`api-key`、`x-goog-api-key`；
-  - **词元表（主判据）**：`key` / `apikey` / `api-key` / `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth` ↦ 覆盖 `key`、`x-access-key`、`x-auth-key`、`x-upstream-key`、`x-litellm-key`、`x-amz-signature`、`x-custom-site-token` 等（站点 `customHeaders` 允许任意头名：`services/siteCustomHeaders.ts:24-40` 解析、`siteProxy.ts:432/489` 合并进上游请求头）；
+  - **词元表（主判据）**：`key` / `apikey` / `api-key` / `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth` / **`authorization`** / **`authentication`**（后两个为本轮 O-1 补） ↦ 覆盖 `key`、`x-access-key`、`x-auth-key`、`x-upstream-key`、`x-litellm-key`、`x-amz-signature`、`x-custom-site-token`、`x-authorization`、`authentication`、`x-authentication`、`proxy-authentication` 等（站点 `customHeaders` 允许任意头名：`services/siteCustomHeaders.ts:24-40` 解析、`siteProxy.ts:432/489` 合并进上游请求头）；
+    > **O-1 补词元（`MARK-FIX-O8-OTOKENS-1790979`）**：改前词元表不含 `authorization` / `authentication`。裸 `authorization` 由上方**精确名单**命中，但 `x-authorization` / `authentication` / `x-authentication` / `proxy-authentication` 切词后是整段词元 `authorization` / `authentication`，`auth` 词元盖不住（词元匹配是**整个短横段**，不是前缀）⇒ 这些头名的值改前明文落库（生产探针实测 0 命中，但站点 `customHeaders` 允许任意头名 ⇒ 余量不可接受）。**代价（已知的过掩码，有意接受）**：`x-authentication-method`（典型值 `basic` / `bearer` / `oauth2`，本身不是凭据）也会被掩码——取「宁多勿漏」：过掩码只损失一条非密钥的调试元数据，漏掩码则留下可离线爆破的凭据存量；不为此加例外表（例外表本身会成为新的漏网面），与 `auth` 词元的既有代价同口径。
+  - **`auth` 词元（存量）**：改前已在词元表内（`x-auth-key` 类名字本就命中），本轮**未改它**——O-1 的缺口只在长形变体，加 `auth` 与否对 `authorization` / `authentication` 无影响；保持原样以避免改变既有覆盖面。
   - 保底子串规则（保留不删，使「改前会被掩码的名字改后仍被掩码」）：`api-key` / `apikey` / `token` / `secret` / `password` / `passwd` / `credential`；
   - **不会判为敏感的（反例/控制组）**：`x-monkey`（含子串 `key`，但词元是 `monkey`）、`x-request-id`、`content-type`、`x-client`。
   > **R2-1 订正**：R1 只按**子串**判定，`key` / `x-access-key` / `x-auth-key` / `x-upstream-key` / `x-litellm-key` / `x-amz-signature` 全部漏网（oracle 探针复现）。
@@ -366,3 +373,179 @@ O-d 收尾：8 处流式失败出口按**真实取值**补 `isStream` / `firstBy
 - **未覆盖的 2 处出口及理由**：`chatSurface.ts:1091`（gemini 原生 runtime 路径，需上游路径命中 `/v1beta/models/<model>:streamGenerateContent`）与 `openAiResponsesSurface.ts:1318`（websocket transport 请求的非 SSE 分支，需 `isResponsesWebsocketTransportRequest` 夹具）——两处与已覆盖的 reader / 单块出口**同一表达式形状、同一 `upstream` 观测取值**，本轮以代码核对覆盖，未编造用例。
 - **计数**：`npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）；`npm run typecheck` 四段（web / web:test / server / desktop）exit 0｜`/tmp/od/typecheck.txt`；`npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3385 passed | 16 skipped (3401)`、223.12s（基线 3383 passed ⇒ +2 = 本轮新增 2 例，计数自洽）｜`/tmp/od/full-test.txt`；`npm run repo:drift-check` `Violations: 0`（5 条预存 tracked debt）｜`/tmp/od/drift.txt`。
 - **红线核对**：本轮只建分支，未做 commit / push / merge / checkout / stash / restore；未触碰容器、生产库、生产设置；`git status --porcelain` 仅 5 个本次预期文件。
+
+## 验证（本轮 `MARK-FIX-O8-OTOKENS-1790979`，未 commit）
+
+一轮清掉两处已登记缺口（都在观测/脱敏族）：**O8 ②**（外层失败出口的 `first_byte_latency_ms`）与 **O-1**（脱敏对长形变体头名不命中）。分支 `fix/observability-o8-and-mask-tokens`（从 `main` 建），**未 commit**；**无新测试文件**（全部落在既有 `chat.stream.test.ts` / `proxyDebugTraceStore.test.ts`）。
+
+**追加轮（`/tmp/o8-r2-append-1790994725.md`，同一分支，仍未 commit）**：清掉本文件「登记（相邻面）第 2 条」——`handleDetectedFailure` 四处出口（改后行号=增传参数行：chat `:1245` / `:1487`，responses `:1207` / `:1501`）按**同口径**增传 `firstByteLatencyMs`（handler 作用域真实值，未观测到即 `null`）。仍**无新测试文件**：扩写既有 4 例（chat 非流式 / chat 流式非 SSE / responses 非流式 / responses 流式非 SSE，都是既有的 empty-content 用例）。红（仅回退这 4 处传参）`Tests 4 failed | 5 passed | 112 skipped`，四例均为 `expected undefined to deeply equal Any<Number>`（该两列未进写侧取值 ⇒ 落库 NULL；`insertProxyLog` 在 `is_stream`/`first_byte_latency_ms` 都为 null 时**整组丢弃**，故表现为「无该键」）｜绿 `9 passed | 112 skipped`（`-t empty`；全量见文末）。同轮还改 `scripts/deploy-painless.sh`（切换注释不再累积，与观测列无关），细节与模拟证据见 `docs/change-log.md` 2026-10-03 第 6 条。
+
+### A. O8 ② 改动落点（行号为改后快照）
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/server/proxy-core/surfaces/chatSurface.ts` | `let firstByteLatencyMs: number \| null = null`（handler 作用域，`:442`）；轮首 `firstByteLatencyMs = null`（`:491`）；成功取值改为赋值（`:908`）；`onAttemptFailure` 钩子内捕获失败尝试的 meta（`:747`）；`handleUpstreamFailure`（`:1611`）与 `handleExecutionError`（`:1642`）两条外层出口传参 |
+| `src/server/proxy-core/surfaces/openAiResponsesSurface.ts` | 同形五处：声明（`:341`）、轮首重置（`:420`）、成功取值赋值（`:998`）、`onAttemptFailure` 捕获（`:852`）、两条外层出口传参（`:1618` / `:1649`） |
+
+### B. O8 用例（先红后绿；既有文件 `src/server/routes/proxy/chat.stream.test.ts`）
+
+- 新增 4 例 + 扩写既有 1 例：
+  1. `records a real first_byte_latency_ms on the chat outer-catch exit when the upstream body breaks mid-stream`——chat 面「中途断流」（SSE `reader.read()` 抛）→ `handleExecutionError` 出口，断言 `first_byte_latency_ms` 为真实 number（`is_stream` 亦断言）。
+  2. `… when the upstream throws (HTTP 429)`——chat 面「上游报错」（429 → 池回调抛 `SiteApiEndpointRequestError`）→ `handleUpstreamFailure` 出口，断言真实 number，且客户端仍实收 429。
+  3. `resets first_byte_latency_ms per retry iteration when a later attempt observes no first byte`——**跨轮次不串值**：第 1 轮 SSE 中途断（观测到 ⇒ number）→ 重试；第 2 轮网络类失败（合成 502 无 meta ⇒ 必须 `null`）。为让每轮只留一条终态行，本夹具把 `disableCrossProtocolFallback` 置真（否则 502 在每个非末端点各写一条既有降级行）。
+  4. `… on the responses outer-catch exit when the upstream throws (HTTP 429)`——responses 面 `handleUpstreamFailure` 出口。
+  5. 扩写既有 `writes exactly one in-band openai error frame … /v1/responses stream breaks mid-flight`：补断言该行（`handleExecutionError` 出口）落真实 `first_byte_latency_ms`。
+- 夹具说明：`proxy_debug_*` 与 `proxy_logs` 走同一个 `db.insert` mock，故按「含 `httpStatus` 与 `retryCount`」筛选出 `proxy_logs` 行（`proxyLogRowsInOrder()`）。该文件的 `hasProxyLogClientHttpStatusColumn` 为 `false` ⇒ `client_http_status` 整列丢弃，故**不**断言它。
+- **红**（仅把 3 个生产文件还原为 `HEAD`、保留用例）：`Test Files 2 failed (2)`、`Tests 6 failed | 119 passed (125)`。断言原文：5 处 `expected null to deeply equal Any<Number>`（O8 各出口的 `first_byte_latency_ms` 确为 NULL）；脱敏一处为 4 个新增长形名 `value-of-*` 明文未被掩码。日志 `/tmp/o8-red-backup/red.txt`。
+- **绿**（还原生产改动后）：`Test Files 2 passed (2)`、`Tests 125 passed (125)`｜`/tmp/o8-red-backup/green-focused.txt`。
+
+### C. O-1 用例（既有文件 `src/server/services/proxyDebugTraceStore.test.ts`）
+
+- 扩写既有 `judges sensitive header names by word token …`：正例加 `x-authorization` / `authentication` / `x-authentication` / `proxy-authentication`；反向控制组保持 `x-monkey` / `x-request-id` / `content-type` / `x-client`（值逐字保留）；新增显式「过掩码判定」块断言 `x-authentication-method` 被掩码，并写明理由（宁多勿漏；它与凭据头同一整段词元，不设例外表）。
+- 红证据同上（`/tmp/o8-red-backup/red.txt`：4 个新名明文未掩码的 diff）；绿：整文件 4 tests passed。
+
+### D. 计数（三条门槛）
+
+- `npx tsc --noEmit -p tsconfig.server.json` exit 0。
+- `npm run typecheck` 四段 exit 0。
+- `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3389 passed | 16 skipped (3405)`、224.09s（基线 3385 passed ⇒ +4 = 本轮新增 4 例，计数自洽）｜`/tmp/o8-red-backup/full-test.txt`。
+- `npm run repo:drift-check` `Violations: 0`。
+
+### E. 红线与遗留
+
+- 本轮只建分支，**未做** commit / push / merge / checkout / stash / restore；未触碰容器、生产库、生产设置；无凭据明文进入任何文件。
+- **O8 ①③ 有意未动**（`httpStatus: 0` 与其注释、出口 payload 的 `error.type`）。
+- **登记（相邻面，不在本片；便于后续一片清）**：
+  1. claude count-tokens handler 的 `handleUpstreamFailure` / `handleExecutionError` 也不传该列；其上游请求走 `createSurfaceDispatchRequest` → `dispatchRuntimeRequest`，**无 `fetchWithObservedFirstByte` meta** ⇒ 无真实值可传，保持 NULL（若要补需先给该路径接首字节观测）。
+  2. `handleDetectedFailure` 出口（改后行号=增传参数行：chat `:1245` / `:1487`，responses `:1207` / `:1501`；追加轮前的行号为 `:1238` / `:1477` / `:1200` / `:1491`）改前不传该列（同样 NULL）。这四处调用点在 `try` 内、**取值可达**（`firstByteLatencyMs` 已赋值；toolkit 签名也接受该参数）⇒ 纯“少传一参”缺口。**追加轮已修**（`/tmp/o8-r2-append-1790994725.md`，同一分支未 commit）：四处增传 `firstByteLatencyMs`（handler 作用域真实值，未观测到即 `null`），扩写既有 4 例先红后绿。**`is_stream` 也已修**（R3 轮：同口径传 `isStream`，行号=增传参数行 chat `:1245` / `:1488`、responses `:1207` / `:1502`，见文末「出口 × 三列 全量扫描」）。
+  3. `onDowngrade` 非终态行（chat / responses）仍不写该列（既有口径，与 `client_http_status = -1` 同一来源；本片不动）。
+
+## 出口 × 三列 全量扫描（`MARK-FIX-O8-OTOKENS-1790979` R3 追加轮，未 commit）
+
+任务：把**所有写 `proxy_logs` 的出口**列全，逐处核对 `is_stream` / `first_byte_latency_ms`（下称 fbl）/ `client_http_status`（下称 cHttp）三列。行号均为**本轮改后快照**。
+
+图例：`✓真实` = 已传真实值；`✗缺(可得)` = 未传但真实值可得；`✗缺(不可得)` = 未传且真值无法得到（有意 NULL）；`哨兵-1` / `既有NULL` = 既有有意口径。「fbl」= `first_byte_latency_ms`。
+
+### chat 面（`src/server/proxy-core/surfaces/chatSurface.ts`）
+
+| 出口（行号） | is_stream | fbl | cHttp | 诚实可得性 | 处置 |
+| --- | --- | --- | --- | --- | --- |
+| `:807` 降级（`onDowngrade`，非终态行） | ✓真实 | ✗缺（值可得：`ctx.response` 的 observed meta） | `哨兵-1`（既有口径） | fbl 可得 | **只核对不改**（既有口径；fbl 若主代理要补可另开） |
+| `:842` 租约超时（busy 503） | ✓真实（**R4 本轮补**：`isStream`，租约超时与请求本身是否流式无关） | ✗缺(不可得：本轮未观测) | `既有NULL` | is_stream 可得 | **本轮已闭环**；cHttp 既有口径不改，fbl 有意 NULL |
+| `:1106` / `:1171` / `:1282` / `:1366` `recordStreamFailure` ×4 | ✓真实 | ✓真实 | ✓真实（`resolveClientHttpStatus` 取值器） | — | O-d 已修，本轮只核对 |
+| `:1238` / `:1481` `handleDetectedFailure` ×2 | ✓真实（**R3 本轮补**） | ✓真实（R2 补） | ✓真实（=failure.status） | — | **本轮已闭环** |
+| `:1574` 站点并发超时失败行 | ✓真实 | ✓显式传（**R4 本轮补**：handler 作用域真值；该出口**结构上恒 `null`**——轮首重置 + 站点租约超时先于任何上游尝试） | ✓真实（**R4 本轮补**：`failure.status`，与本出口 respond 一致） | 两列可得 | **本轮已闭环**；fbl 落 NULL（无红绿差，见 R4 结论） |
+| `:1611` `handleUpstreamFailure` | ✓真实 | ✓真实 | ✓真实 | — | 已闭环 |
+| `:1644` `handleExecutionError` | ✓真实 | ✓真实 | ✓真实（取值器） | — | 已闭环 |
+
+### claude count-tokens 面（同文件 `:1850-2124`）
+
+| 出口（行号） | is_stream | fbl | cHttp | 诚实可得性 | 处置 |
+| --- | --- | --- | --- | --- | --- |
+| `:1901` 租约超时（busy 503） | ✓真实（`false`，该端点恒非流式；**R4 本轮补**） | ✗缺(不可得：未观测) | `既有NULL` | is_stream 可得 | **本轮已闭环**；cHttp 既有口径不改，fbl 有意 NULL |
+| `:2066` 站点并发超时失败行 | ✓真实（`false`） | ✗缺(**不可得**：该路径无 `fetchWithObservedFirstByte` 观测) | ✓真实（**R4 本轮补**：`failure.status`） | cHttp 可得 | **本轮已闭环**；fbl **登记为设计如此** |
+| `:2091` `handleUpstreamFailure` | ✓真实（`false`） | ✗缺(**不可得**⇒有意 NULL) | ✓真实（=status） | fbl 不可得 | fbl **登记为设计如此**（要真值需先给该路径接首字节观测） |
+| `:2114` `handleExecutionError` | ✓真实（`false`） | ✗缺(**不可得**⇒有意 NULL) | ✓真实（取值器） | 同上 | 同上 |
+| （参照）`:2021` 成功行 | ✓真实（`false`） | ✗缺（未观测⇒NULL） | ✗缺(可得) | — | 成功行不在本表范围；cHttp 同属“该 helper 能力缺口” |
+
+### openAiResponses 面（`openAiResponsesSurface.ts`）
+
+| 出口（行号） | is_stream | fbl | cHttp | 诚实可得性 | 处置 |
+| --- | --- | --- | --- | --- | --- |
+| `:916` 降级（`onDowngrade`） | ✓真实 | ✗缺（值可得） | `哨兵-1`（既有口径） | fbl 可得 | **只核对不改** |
+| `:952` 租约超时（busy 503） | ✓真实（**R4 本轮补**：`isStream`） | ✗缺(不可得) | `既有NULL` | is_stream 可得 | **本轮已闭环** |
+| `:1141` / `:1245` / `:1337` / `:1406` `recordStreamFailure` ×4 | ✓真实 | ✓真实 | ✓真实（取值器） | — | O-d 已修，只核对 |
+| `:1200` / `:1495` `handleDetectedFailure` ×2 | ✓真实（**R3 本轮补**） | ✓真实（R2 补） | ✓真实 | — | **本轮已闭环** |
+| `:1597` 站点并发超时失败行 | ✓真实 | ✓显式传（**R4 本轮补**：handler 真值；该出口**结构上恒 `null`**） | ✓真实（**R4 本轮补**：`failure.status`） | 两列可得 | **本轮已闭环**；fbl 落 NULL（无红绿差，见 R4 结论） |
+| `:1618` `handleUpstreamFailure` | ✓真实 | ✓真实 | ✓真实 | — | 已闭环 |
+| `:1651` `handleExecutionError` | ✓真实 | ✓真实 | ✓真实（取值器） | — | 已闭环 |
+
+### gemini 面（`geminiSurface.ts`；该面 `logProxy` 是独立 helper，**无 cHttp 参数**）
+
+| 出口（行号） | is_stream | fbl | cHttp | 诚实可得性 | 处置 |
+| --- | --- | --- | --- | --- | --- |
+| `:853` 上游非 2xx/失败 | ✓真实（`isStreamAction`，由 `action` 派生非硬编码） | ✓真实（observed meta） | ✓真实（**R4 本轮补**：本出口 respond 的 `lastStatus`） | cHttp 可得 | **本轮已闭环**（helper 新增**可选** `clientHttpStatus`，成功行不传即行为不变） |
+| `:1077` 流式中途失败 | ✓真实 | ✓真实（observed meta） | ✓真实（**R4 本轮补**：`200`——本出口在 `reply.hijack()` 之后且不再写 respond） | 同上 | **本轮已闭环** |
+| `:1482` 端点层失败（R3/R4 表里的 `:1470`） | ✓真实 | ✓真实（**R6 本轮补**：既有 `onAttemptFailure` 钩子捕获 observed meta） | ✓真实（**R4 本轮补**：`lastStatus`） | fbl **可得** | **R6 已闭环**（改前写死 `null`，理由写「无 upstream 响应对象」——**不成立**，该出口手上有 response） |
+| `:1610` 外层 catch 网络失败（R3/R4 表里的 `:1592`） | ✓真实 | `null`（**R6 措辞订正为事实：该 catch 处没有 response 对象**——`endpointFlow` 的网络类异常已在内部归一、不冒泡到此；能拿到 response 的端点层失败由上一条出口落库） | ✓真实（**R4 本轮补**：`lastStatus`，与上一条同表达式） | fbl 不可得（作用域内无 response） | **已闭环**；fbl 有意 `null` |
+| `:1421` `onDowngrade` | — | — | — | **不写 `proxy_logs`**（只更新 debug attempt） | 无同类缺列，无需改 |
+
+### rerank 面（`rerankSurface.ts`）
+
+| 出口（行号） | is_stream | fbl | cHttp | 诚实可得性 | 处置 |
+| --- | --- | --- | --- | --- | --- |
+| `:159` 站点并发 busy | ✓真实（`false`，rerank 恒非流式；**R4 本轮补**） | ✗缺(不可得：未观测⇒有意 NULL) | `既有NULL`（busy 行口径） | is_stream 可得 | **本轮已闭环** |
+| `:182` `handleUpstreamFailure` | ✓真实（`false`；**R4 本轮补**） | ✓真实（**R4 本轮补**：新增 `onAttemptFailure` 纯观测捕获 + 轮首重置，与 chat/responses 同法） | ✓真实（=status） | 两列可得 | **本轮已闭环** |
+
+### 其它协议路由（各自独立 `logProxy` helper，**均无 cHttp 参数**；is_stream/fbl 已传）
+
+| 出口（行号） | is_stream | fbl | cHttp | 诚实可得性 | 处置 |
+| --- | --- | --- | --- | --- | --- |
+| `embeddings.ts:238` 失败行 | ✓真实（`false`，该端点非流式） | ✓真实（含 `SiteApiEndpointRequestError.firstByteLatencyMs`） | ✓真实（**R4 本轮补**：`status || 502`） | cHttp 可得 | **本轮已闭环**（helper 新增**可选** `clientHttpStatus`） |
+| `completions.ts:321` / `:459` 失败行 ×2 | ✓真实（真值 `isStream`） | ✓真实 | ✓真实（**R4 本轮补**：前者 `failure.status`，后者 `status || 502`） | 同上 | **本轮已闭环** |
+| `images.ts:135` / `:208` / `:359` / `:432` 失败行 ×4 | ✓真实（`false`） | ✓真实 | ✓真实（**R4 本轮补**：两处 malformed 出口写 `502`，两处 catch 写 `status || 502`） | 同上 | **本轮已闭环** |
+| `search.ts:191` 失败行 | ✓真实（`false`） | ✓真实 | ✓真实（**R4 本轮补**：`status || 502`） | 同上 | **本轮已闭环** |
+
+### 结论（R3 快照，**已被 R4 取代**；保留供对照）
+
+- **待补出口 = 20 处**（远超前轮定下的保险线 8 处）：cHttp **15 处**（surface 直写行 3 + gemini 4 + embeddings/completions/images/search 8）、is_stream **5 处**（3 处 busy + rerank 2）、fbl **3 处**（2 处 surface 站点并发超时行 + rerank `:160`，其中 rerank 那处需先补取值捕获）。
+- **触发了第二条保险丝「需重构（而非逐处补参数）」**：15 处 cHttp 里有 **12 处**要动 **6 个路由级 `logProxy` helper 的签名**（gemini + embeddings + completions + images + search；rerank 的 busy 行属既有口径），而每个 helper 有 4–9 个调用点（含成功行）⇒ 属于「helper 能力缺口」级别，不是逐处补参。
+- 另外两个**口径问题需主代理拍板**（不能自行决定）：
+  1. 路由级 helper 的失败行 cHttp 该写什么——真实 respond 状态码（与 surface 的 `handleUpstreamFailure` 同口径），还是对**预重试行**写 `哨兵-1`？surface 侧的既有裁定是「预重试出口写真实码」，但这四个路由的 busy/overload 行原本是「既有 NULL」，直接改会改变既有口径。
+  2. 是否一并给这些 helper 的**成功行**补 cHttp（=200），否则同表内「失败行有值、成功行 NULL」会形成新的不一致。
+- **本轮已闭环**：`handleDetectedFailure` 四处出口的 is_stream（本文件上一轮的最后尾巴）+ fbl（R2）。
+- **登记为「设计如此」的有意 NULL（R6 复核后收缩为事实成立的条目）**：count-tokens `:2091` / `:2114` 与站点并发超时行的 fbl——该路径**直接 `dispatchRequest`、不经 `fetchWithObservedFirstByte`** ⇒ 响应上根本没有观测 meta（真值不可得，要真值需先接首字节观测）；gemini 外层 catch 的 fbl——**该 catch 处没有 response 对象**（非「无 upstream 响应对象」这种含混说法）；3 处 busy 行（chat / responses / count-tokens）与 rerank busy 行的 fbl——未发出上游请求，未观测。**已从本清单移出**：gemini 端点层失败的 fbl（R6 已修，见文末）；chat / responses 站点并发超时行虽结构上恒 `null`，但那四行是主代理裁定「保留」的显式传参，不属本清单。
+
+## R4 收口：20 处全部补完（`/tmp/o8-r4-p1p2p3-1790996311.md`，未 commit）
+
+用户拍板「20 处全补」，口径由主代理给定。本轮把上表里所有 `待补` 一次性闭环，**未触发保险丝**（无一处真值不可得，也不需要真重构：6 个路由 helper 只**追加可选参数**）。
+
+### 落地口径（与主代理指令逐条对应）
+
+1. **cHttp（失败行）写真实下发码**，与 surface `handleUpstreamFailure` 同口径（本出口不重试时的 respond 状态）：
+   - surface 直写行 3 处 = `failure.status`（chat `:1574` / responses `:1597` / count-tokens `:2066`）。
+   - gemini 4 处：`:853` / `:1470` / `:1592` = `lastStatus`；`:1077` = **`200`**（该出口在 `reply.hijack()` 之后、不再写 respond，客户端 HTTP 层早已收到 200）。
+   - embeddings `:238` / completions `:459` / images `:208` / `:431` / search `:191` = `status || 502`（网络类失败 `status = 0`，respond 兜底 502）；completions `:321` = `failure.status`；images 两处 malformed 出口 = `502`（结构性无法解析，固定码）。
+   - **不使用 `-1` 哨兵**（哨兵只属 `onDowngrade` 非终态行）。
+2. **helper 内部新增参数一律可选**（`clientHttpStatus: number | null = null`）：成功行传参不变 ⇒ 行为不变（测试里用 `Object.keys(...)` 锁了「成功行不带该键」）。
+3. **is_stream 5 处**：3 处 busy 取真值（chat/responses 传 `isStream`；count-tokens 与 rerank 的结构性真值为 `false`，注释说明）；rerank `busy` + `handleUpstreamFailure` 同为 `false`。
+4. **fbl 3 处**：rerank `:182` 新补 `onAttemptFailure` 纯观测捕获（+ 轮首重置，与 chat/responses 同法，真值在测试里可见 = 夹具的 `3`）；chat `:1577` / responses `:1600` 传 handler 真值。
+5. **不动**：成功行传参、`onDowngrade` 的 `-1`、busy 行 cHttp 与 4 处 busy 的 fbl（有意 NULL）、count-tokens `:2091` / `:2114` 与 gemini `:1592` 的 fbl（**gemini `:1470` 那条已于 R6 补齐，见文末**）、路由里 `is_stream` 的结构性字面量 `false`（embeddings/images/search 非流式端点，真值即 `false`）。
+
+### 验证与红绿（均为 `--no-file-parallelism`）
+
+- 红：临时反向掺掉 R4 新增行（71 行 / 8 文件，备份在 `/tmp/o8-r4-red/backup/`，回退脚本 `/tmp/o8-r4-red/revert_r4.py`）⇒ 9 个测试文件 **18 个断言全红**，每条都显示「该列 NULL / 该码缺失」（日志 `/tmp/o8-r4-red/red-run-serial.log`）。
+- 绿：恢复后同 9 文件全绿（201 例，`/tmp/o8-r4-verify/green-9files.log`）。
+
+### R4 唯一的口径偏离（需主代理知晓）
+
+- **chat `:1577` / responses `:1600` 的 fbl 实际上永远落 NULL**（落库后与「未传」无法区分）：该出口在站点并发租约超时处，而 fbl 每轮开头重置、租约超时**先于**任何上游尝试 ⇒ 结构上无观测。改动只是让取值链路口径统一。测试用工厂壳子（`createSurfaceFailureToolkit` 的 spy）锁「surface 确实显式传了该键（值 = `null`）」，并已在注释里写明「无红绿差」。**若主代理要最小 diff，这 4 行（chat 2 + responses 2）可回退。**
+
+**主代理裁定（1.4.18 发版准备轮登记，`MARK-REL1418-PREP-1790987`）：保留**——理由＝调用点整齐，且未来若该路径有上游尝试会自动填值（上述「可回退」提示据此收口，不再作为待办）。
+
+## R6：gemini 端点层失败的 `first_byte_latency_ms` 闭环（`/tmp/r6-oracle-tails-1790999299.md`，未 commit）
+
+oracle 指出 gemini 调 `executeEndpointFlow` 时**已带** `onAttemptFailure` 钩子（原用于写 debug attempt），而 `ctx.response` 上带着观测 meta（该 flow 的每次派发都过 `fetchWithObservedFirstByte`，**无条件** `setObservedResponseMeta`）⇒ 端点层失败出口的 fbl **本来就可捕获**，R3/R4 记的「诚实：无 upstream 响应对象」是把托词当事实。
+
+### 改动（`geminiSurface.ts`，行号为改后快照）
+
+- handler 作用域 `let firstByteLatencyMs: number | null = null`（`:597`）+ **每轮轮首重置**（`:644`，紧接 `const startTime = Date.now()`）——`handleGenerateContent` 确**有重试循环**（`while (retryCount <= getProxyMaxChannelRetries())`，默认 3 次尝试），故重置与 chat / responses / rerank 同法。
+- **既有** `onAttemptFailure` 钩子（`:1385`）首行加**纯观测**赋值：`firstByteLatencyMs = getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null;`（无分支、不参与选择 / 重试 / 降级 / 计费）。
+- 端点层失败出口的 `logProxy` 把该列从写死 `null` 改为传 `firstByteLatencyMs`（`:1482`）。
+- 外层 catch 的该列**仍传 `null`**，但注释按事实写明理由（`:1604`）。
+
+### 诚实性复核
+
+- **端点层失败（`:1482`）**：真值可得——钩子对每次失败尝试的无条件赋值，未观测到（网络类失败由 `endpointFlow` 合成 502，无 meta；首字节超时 `meta.firstByteLatencyMs = null`）则落 `null`。
+- **外层 catch（`:1610`）**：该 catch 处**没有 response 对象**（已核对：`endpointFlow` 的 `dispatchAttempt` 把网络类异常就地归一成合成响应、**不 throw**；能拿到 response 的失败由上一条出口落库）⇒ 真值不可得，保持 `null` 并在代码注释里写明，不借用同轮其它尝试的观测值。
+- **残留（不改，属实）**：catch 还能接住「端点成功但本地后续抛错」（如 `readRuntimeResponseText` 断流）——此时上游确实观测到了首字节，但该值属于「成功尝试」，本出口按设计不写（要写需另给 `onAttemptSuccess` 加同一变量，改变本变量的语义，超出本轮范围）。
+
+### 用例与红/变异证据（`src/server/routes/proxy/gemini.test.ts`，2 例新用例，均 `--no-file-parallelism`）
+
+- **用例 1**「records the observed first-byte latency on the Gemini compat endpoint-layer failure exit」：compat 路径（platform `openai`）+ 上游 500 JSON（错误文本命中同站端点中止模式 ⇒ 本轮只试一个端点）⇒ 该行 `httpStatus: 500`、`clientHttpStatus: 500`、`isStream: false`、**`firstByteLatencyMs: any(Number)`**（改前恒 `null`），且 `errorMessage` 含 `[upstream:/v1/responses]`（`withUpstreamPath` 打的）⇒ 确实来自上游端点层的真实失败。
+- **用例 2**「does not carry a previous round first-byte latency into a later round Gemini failure」：轮 0 = 500（观测到 ⇒ 真值）、轮 1 = `ECONNRESET`（无 meta）⇒ 轮 1 的行必须 `null`。
+- **顺带订正一条错注释**（纯注释）：R4 那条名为「writes the endpoint-layer failure code…」的用例（`ECONNRESET` + 默认夹具 platform `gemini`）实际走**直连路径的外层 catch**，不是它注释里写的 compat 端点层失败出口。探针实证：该用例落库行的 `errorMessage` 为 `[upstream:/v1beta/models/gemini-2.5-flash:generateContent] ECONNRESET`（直连；compat 出口会带 `/v1/responses`）。注释已按事实改写，断言未动。
+- **红/变异矩阵**（脚本 `/tmp/r6-red/mutate.py`，日志 `/tmp/r6-red/logs/*.txt`）：
+  - **A**（把出口传参改回 `null`，保留钩子）⇒ 用例 1 + 2 全红，两例 diff 均为 `firstByteLatencyMs: null`（而期望 `Any<Number>`）；同时 `tsc -p tsconfig.server.json` 在红态 exit 0（变异只动观测）。
+  - **B**（去掉轮首重置，钩子保持无条件赋值）⇒ 两例**仍绿**：本路径下钩子对每次失败尝试都无条件赋值（`?? null`）⇒ 后一轮自己就写了 `null`，重置不是当前实现的必需项（**如实记下**）。
+  - **C**（钩子改为「只在观测到时赋值」，保留重置）⇒ 两例绿；**D** = C + 去掉重置 ⇒ 用例 2 红（轮 1 的行报出轮 0 的值 `firstByteLatencyMs: 0`，即串值）⇒ 该重置对「只在观测到时赋值」这类很自然的等价改写是**有效守护**，用例 2 的判別力即在此。

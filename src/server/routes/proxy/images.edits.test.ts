@@ -10,10 +10,13 @@ const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const estimateProxyCostMock = vi.fn(async () => 0);
+const proxyLogValuesMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
+  values: (values?: any) => {
+    // O8 R4：把每次写入的取值原样留证，才能断言 `client_http_status` 真的进了写侧。
+    proxyLogValuesMock(values);
+    return { run: () => undefined };
+  },
 }));
 
 vi.mock('undici', async () => {
@@ -79,7 +82,7 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
-  hasProxyLogClientHttpStatusColumn: async () => false,
+  hasProxyLogClientHttpStatusColumn: async () => true,
   hasProxyLogStreamTimingColumns: async () => false,
   schema: {
     proxyLogs: {},
@@ -127,6 +130,7 @@ describe('/v1/images/edits route', () => {
     reportTokenExpiredMock.mockReset();
     estimateProxyCostMock.mockClear();
     dbInsertMock.mockClear();
+    proxyLogValuesMock.mockClear();
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -211,6 +215,67 @@ describe('/v1/images/edits route', () => {
     });
     expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // O8 R4（P2）：本条失败行来自「上游响应结构性无法解析」出口，客户端实收固定 502 ⇒ 同时写该列。
+    const malformedRow = proxyLogValuesMock.mock.calls
+      .map((call) => call[0])
+      .find((values) => values && values.status === 'failed');
+    expect(malformedRow).toMatchObject({
+      status: 'failed',
+      httpStatus: 502,
+      clientHttpStatus: 502,
+    });
+  });
+
+  it('writes the real client_http_status when an image edit upstream body is malformed', async () => {
+    // O8 R4（P2）：images 的第二个 handler（`/v1/images/edits`）里同形的 malformed 出口也要写真实下发码。
+    fetchMock.mockResolvedValue(new Response('not-json', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const boundary = 'metapi-boundary-malformed';
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/images/edits',
+      headers: {
+        authorization: 'Bearer sk-demo',
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      payload: buildMultipartBody(boundary),
+    });
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(proxyLogValuesMock.mock.calls.map((call) => call[0])).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      httpStatus: 502,
+      clientHttpStatus: 502,
+    }));
+  });
+
+  it('writes the real client_http_status on the image generation network-failure row', async () => {
+    // O8 R4（P2）：images 的 catch 失败行（网络类失败）此前未传 `client_http_status`（该列恒 NULL）。
+    // 网络类失败：日志 `http_status = 0`，respond 兜底 502 ⇒ 两列必须不同。
+    fetchMock.mockRejectedValue(new Error('ECONNRESET'));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/images/generations',
+      headers: {
+        authorization: 'Bearer sk-demo',
+      },
+      payload: {
+        model: 'gpt-image-1',
+        prompt: 'draw a cat',
+      },
+    });
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(proxyLogValuesMock.mock.calls.map((call) => call[0])).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      httpStatus: 0,
+      clientHttpStatus: 502,
+    }));
   });
 
   it('keeps returning a successful image edit response when post-success accounting fails', async () => {

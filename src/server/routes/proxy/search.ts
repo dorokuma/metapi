@@ -187,6 +187,8 @@ export async function searchProxyRoute(app: FastifyInstance) {
           downstreamPath,
           false,
           firstByteLatencyMs,
+          // 客户端实收：`status > 0` 时原样回传，网络类失败（status = 0）由 respond 兜底 502。
+          status || 502,
         );
         if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
           await reportTokenExpired({
@@ -228,6 +230,7 @@ async function logProxy(
   downstreamPath = '/v1/search',
   isStream = false,
   firstByteLatencyMs: number | null = null,
+  clientHttpStatus: number | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -241,6 +244,7 @@ async function logProxy(
       modelActual: selected.actualModel || modelRequested,
       status,
       httpStatus,
+      clientHttpStatus,
       isStream,
       firstByteLatencyMs,
       latencyMs,

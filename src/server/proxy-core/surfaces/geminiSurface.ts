@@ -262,6 +262,7 @@ async function logProxy(
   usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   isStream = false,
   firstByteLatencyMs: number | null = null,
+  clientHttpStatus: number | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -283,6 +284,7 @@ async function logProxy(
       modelActual: selected.actualModel || modelRequested,
       status,
       httpStatus,
+      clientHttpStatus,
       isStream,
       firstByteLatencyMs,
       latencyMs,
@@ -587,6 +589,12 @@ export async function geminiProxyRoute(app: FastifyInstance) {
     let lastStatus = 503;
     let lastText = 'No available channels for this model';
     let lastContentType = 'application/json';
+    /**
+     * 观测列：本面失败出口要写出的「上游响应首字节延迟」真值（未观测到 ⇒ null）。
+     * 与 chat / responses / rerank 面同法：只在端点尝试失败时由既有 `onAttemptFailure` 钩子捕获，
+     * 每轮轮首重置，**纯观测**（不参与任何选择 / 重试 / 路由 / 计费决策）。
+     */
+    let firstByteLatencyMs: number | null = null;
 
     while (retryCount <= getProxyMaxChannelRetries()) {
       const selected = forcedChannelId !== null
@@ -632,6 +640,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
       const isInternalGemini = isInternalGeminiPlatform(selected.site.platform);
       const isDirectGeminiFamily = isDirectGeminiFamilyPlatform(selected.site.platform);
       const startTime = Date.now();
+      // 轮首重置：新的一轮不能沿用上一轮的观测值（与 chat / responses / rerank 面同口径）。
+      firstByteLatencyMs = null;
       const firstByteTimeoutMs = Math.max(0, Math.trunc((config.proxyFirstByteTimeoutSec || 0) * 1000));
       let upstreamPath = '';
 
@@ -847,6 +857,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               null,
               isStreamAction,
               getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
+              // 客户端实收：本出口非 SSE 分支的 respond 就是 `lastStatus`（重试耗尽分支同码）。
+              lastStatus,
             );
             if (canRetryChannelSelection(retryCount, forcedChannelId)) {
               retryCount += 1;
@@ -1069,6 +1081,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 streamResolvedUsage.usageSource,
                 isStreamAction,
                 getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null,
+                // 客户端实收：本出口在 `reply.hijack()` 之后（SSE 已在途）且不再写 respond ⇒ 恒 200。
+                200,
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -1369,6 +1383,10 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             ctx.rawErrText || ctx.errText,
           ),
           onAttemptFailure: async (ctx) => {
+            // 纯观测取值（不参与任何选择 / 重试 / 降级决策，不改任何对外语义）：失败尝试拿到的上游响应
+            // 若已读到首字节，就把真实延迟留给本轮失败出口；网络类失败（`endpointFlow` 合成的 502 无 meta）
+            // 与首字节超时（`meta.firstByteLatencyMs = null`）在此落 NULL。与 chat / responses / rerank 同法。
+            firstByteLatencyMs = getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null;
             const memoryWrite = recordUpstreamEndpointFailure({
               ...endpointRuntimeContext,
               endpoint: ctx.request.endpoint,
@@ -1459,7 +1477,11 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             null,
             null,
             isStreamAction,
-            null,
+            // 观测列：`first_byte_latency_ms` 取本轮 `onAttemptFailure` 钩子捕获的上游首字节延迟
+            //（未观测到 ⇒ null，不编造）；`is_stream` 取本轮请求解析值。
+            firstByteLatencyMs,
+            // 客户端实收：本出口的 respond 就是 `lastStatus`（重试耗尽分支同码）。
+            lastStatus,
           );
           if (canRetryChannelSelection(retryCount, forcedChannelId)) {
             retryCount += 1;
@@ -1579,7 +1601,13 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           null,
           null,
           isStreamAction,
+          // 观测列：`first_byte_latency_ms` 在本出口**有意保持 null**——外层 catch 自身没有 response 对象
+          //（`endpointFlow` 的网络类异常已在内部归一、不冒泡到这里；能拿到 response 的端点层失败
+          // 已由上方的 `!endpointResult.ok` 出口落库），不借用同轮其它尝试的观测值，
+          // 避免把不相关延迟挂到本条失败上。
           null,
+          // 客户端实收：本出口（外层 catch）的 respond 就是 `lastStatus`（重试耗尽分支同码）。
+          lastStatus,
         );
         if (canRetryChannelSelection(retryCount, forcedChannelId)) {
           retryCount += 1;

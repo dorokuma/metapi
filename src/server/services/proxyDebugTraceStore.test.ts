@@ -206,6 +206,8 @@ describe('proxyDebugTraceStore', () => {
     // `x-litellm-key` / `x-amz-signature` 全部漏网（站点 `customHeaders` 允许任意头名并被合并进上游请求，
     // 故配 `{"x-upstream-key":"…"}` 即可把自家 key 明文写进调试库）。判定升为**词元判定**后它们都命中；
     // 同时 `x-monkey`（含 `key` 子串）等名字不得被误伤——这是本用例的反向控制组。
+    // O-1：词元表当时**不含**长形变体 `authorization` / `authentication`（词元是整段短横段，`auth` 盖不住），
+    // 故 `x-authorization` / `authentication` / `x-authentication` / `proxy-authentication` 的值仍明文落库。
     const sensitiveNames = [
       'authorization',
       'key',
@@ -216,10 +218,20 @@ describe('proxyDebugTraceStore', () => {
       'x-litellm-key',
       'x-amz-signature',
       'x-custom-site-token',
+      // O-1 补的词元：长形变体头名（改前这一组整组明文落库）。
+      'x-authorization',
+      'authentication',
+      'x-authentication',
+      'proxy-authentication',
     ];
     const plainNames = ['x-monkey', 'x-request-id', 'content-type', 'x-client'];
+    // 已知且**有意接受**的过掩码：`x-authentication-method` 的整段词元是 `authentication` ⇒ 与凭据头
+    // 同一判据、一并掩码。典型值 `basic`/`bearer`/`oauth2` 本身不是凭据，但取「宁多勿漏」：过掩码只
+    // 损失一条非密钥的调试元数据，漏掩码则留下可离线爆破的凭据存量（理由同 `auth` 词元的既有代价）。
+    const overMaskedNames = ['x-authentication-method'];
     const requestHeaders = Object.fromEntries([
       ...sensitiveNames.map((name) => [name, `value-of-${name}`]),
+      ...overMaskedNames.map((name) => [name, `value-of-${name}`]),
       ...plainNames.map((name) => [name, `value-of-${name}`]),
     ]);
 
@@ -247,8 +259,14 @@ describe('proxyDebugTraceStore', () => {
     ).toEqual(
       Object.fromEntries(plainNames.map((name) => [name, `value-of-${name}`])),
     );
+    // 过掩码判定（有意接受）：与凭据头同口径，值变占位。
+    expect(
+      Object.fromEntries(overMaskedNames.map((name) => [name, headers[name]])),
+    ).toEqual(
+      Object.fromEntries(overMaskedNames.map((name) => [name, store.REDACTED_DEBUG_HEADER_VALUE])),
+    );
     // 明文消失：敏感头的值不得以任何形式留在落库文本里（含被截断预览）。
-    for (const name of sensitiveNames) {
+    for (const name of [...sensitiveNames, ...overMaskedNames]) {
       expect(String(requestHeaders[name])).toBe(`value-of-${name}`);
       expect(JSON.stringify(headers)).not.toContain(`value-of-${name}`);
     }

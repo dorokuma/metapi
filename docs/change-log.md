@@ -542,6 +542,182 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：版本号（两文件）、CHANGELOG 条目、笔记事实订正、本条日志 + P-0 命令结果。
 - **状态**：已完成（**未提交**）。本次**未执行任何 git 写操作**（不 add / commit / push / merge / branch / checkout / stash），未触碰容器 / 生产库 / 生产设置；发版动作（`scripts/deploy-painless.sh --version 1.4.17 --yes` 及验收 / 收尾）不在本条范围，待复核指示。
 
+### 3. 外层失败出口补齐 `first_byte_latency_ms`（遗留 O8 ② 收尾）
+
+- **类型**：缺陷修复（观测列缺口）
+- **需求来源**：本会话需求（任务标记 `MARK-FIX-O8-OTOKENS-1790979`；无 GitHub Issue 链接）——笔记 `.agents/notes/20261002-client-visible-failure-semantics.md` 遗留清单 O8 ②
+- **目标**：chat / responses 两个 surface handler 的**外层 catch 失败出口**（`handleUpstreamFailure` / `handleExecutionError`）此前 `proxy_logs.first_byte_latency_ms` 恒 NULL。真因：`firstByteLatencyMs` 声明在 `try` 内，catch 作用域取不到（真实流量已命中 2 次）。
+- **实现范围**：
+  - `firstByteLatencyMs` 提升到两个 handler 的 handler 作用域（`chatSurface.ts` 的 `handleChatSurfaceRequest`、`openAiResponsesSurface.ts` 的 `handleOpenAiResponsesSurfaceRequest`；原 `const` 改赋值）；**每轮轮首重置为 `null`**（与既有 `streamStarted = false` 同一处）——本轮未观测到首字节即落 NULL，**绝不**沿用上一轮值（两审点名的主要风险）。
+  - **取值口径**：仍是「**上游**响应首字节延迟」（非下游）。两个来源：① 成功拿到上游响应时（原表达式）；② **失败尝试的上游响应**——`onAttemptFailure(ctx)` 里 `getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null`。②是「上游非 2xx」出口（`handleUpstreamFailure`）能落真实值所必需：`executeEndpointFlow` 失败回流只有 `{ok,status,errText,rawErrText?,upstreamPath?}`、**不含响应对象**。该赋值是**纯观测**：不参与通道选择 / 重试 / 路由 / 计费，不改任何对外语义（`onAttemptFailure` 是既有钩子，只多读一次 WeakMap）；因用 `?? null` 赋值，网络类失败（`endpointFlow` 合成的 502 无 meta）与首字节超时（`meta.firstByteLatencyMs = null`）都会把该值写回 NULL。
+  - 两条外层出口按真实取值传参（chat `handleUpstreamFailure` / `handleExecutionError`、responses 同形两处）。
+  - **有意未动**：O8 ①（`handleExecutionError` 的 `httpStatus: 0` 与其注释）与 ③（出口 payload 的 `error.type`）；对外可见语义（响应码 / 重试次数与条件 / 路由 / 计费）**零改动**。
+  - **登记（相邻面，不在本片）**：① claude count-tokens handler 的两个外层出口也不传该列；其上游请求走 `createSurfaceDispatchRequest` → `dispatchRuntimeRequest`，**不经过 `fetchWithObservedFirstByte`**（无 observed meta）⇒ 无真实值可传，保持 NULL；② `handleDetectedFailure` 出口（chat `:1238` / `:1477`，responses `:1200` / `:1491`）也不传该列，但那四处取值**可达**（纯「少传一参」缺口），本片未改、待后续一片按同一口径补齐；③ `onDowngrade` 非终态行仍不写该列（既有口径）。
+- **主要文件**：`src/server/proxy-core/surfaces/chatSurface.ts`、`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`、`src/server/routes/proxy/chat.stream.test.ts`、`.agents/notes/20261002-client-visible-failure-semantics.md`、本文件
+- **验证**（先红后绿；既有文件 `chat.stream.test.ts`，无新测试文件）：
+  - 新增 4 例：chat「中途断流」（SSE `reader.read()` 抛 → `handleExecutionError`，断言真实 number）、chat「上游抛错」（HTTP 429 → `handleUpstreamFailure`，断言真实 number 且客户端仍实收 429）、**跨重试轮次不串值**（第 1 轮观测到 ⇒ number；第 2 轮网络类失败未观测到 ⇒ 必须 `null`）、responses「上游抛错」（HTTP 429）。另扩写既有 responses 中途断流用例，补断言该行落真实 `first_byte_latency_ms`。
+  - **红**（仅把 3 个生产文件还原为 `HEAD`、保留用例）：`Test Files 2 failed (2)`、`Tests 6 failed | 119 passed (125)`；O8 各出口断言原文为 `expected null to deeply equal Any<Number>`（确认改前该列确为 NULL）｜`/tmp/o8-red-backup/red.txt`。
+  - **绿**（还原生产改动后）：`Test Files 2 passed (2)`、`Tests 125 passed (125)`｜`/tmp/o8-red-backup/green-focused.txt`。
+- **交付物**：代码、测试、笔记 O8 条目（改「已修」+ 取值/重置口径）、本条日志。
+- **状态**：已完成（**未提交**，分支 `fix/observability-o8-and-mask-tokens`）。发布版本号留到发版准备轮；本轮未做任何 git 写操作（仅建分支），未触碰容器 / 生产库 / 生产设置。
+
+### 4. 调试库脱敏补齐长形变体授权头名词元（遗留 O-1 收尾）
+
+- **类型**：缺陷修复（安全 / 脱敏覆盖面）
+- **需求来源**：本会话需求（任务标记 `MARK-FIX-O8-OTOKENS-1790979`；无 GitHub Issue 链接）——oracle 实证：`x-authorization`、`authentication` 这类头名不被掩码（生产当前 0 命中）
+- **目标**：`proxyDebugTraceStore.ts` 的敏感头判定是**词元判定**（头名 `trim`/`lowercase`、下划线与空白归一成短横后按 `-` 切词，任一词元命中即敏感）。词元表不含 `authorization` / `authentication`，而裸 `authorization` 只由**精确名单**命中 ⇒ `x-authorization` / `authentication` / `x-authentication` / `proxy-authentication` 的值仍明文落库。
+- **实现范围**：
+  - `SENSITIVE_HEADER_TOKENS` 补 `authorization`、`authentication`（词元表补词元，判定结构不变）；同步扩写词元表注释。
+  - **`auth` 不改**：它早已在词元表内（`x-auth-key` 类名字本就命中），且对 `authorization` / `authentication` 无影响（词元匹配是整段短横段，不是前缀）——保持原样以避免改变既有覆盖面。
+  - **代价（已知的过掩码，有意接受）**：`x-authentication-method`（典型值 `basic` / `bearer` / `oauth2`，本身不是凭据）会被一并掩码。取「宁多勿漏」：过掩码只损失一条非密钥的调试元数据，漏掩码则留下可离线爆破的凭据存量；不为此加例外表（例外表本身会成为新的漏网面），与 `auth` 词元的既有代价同口径。
+- **主要文件**：`src/server/services/proxyDebugTraceStore.ts`、`src/server/services/proxyDebugTraceStore.test.ts`、`.agents/notes/20261002-client-visible-failure-semantics.md`、本文件
+- **验证**（先红后绿；改既有用例，无新测试文件）：
+  - 正例加 `x-authorization` / `authentication` / `x-authentication` / `proxy-authentication`（值必须变固定占位 `[redacted]`）；反向控制组保持 `x-monkey` / `x-request-id` / `content-type` / `x-client`（值逐字保留）；另加显式「过掩码判定」块断言 `x-authentication-method` 被掩码。
+  - **红**（生产文件还原为 `HEAD`）：diff 逐条显示 4 个新增长形名的 `value-of-*` 明文未被掩码｜`/tmp/o8-red-backup/red.txt`。
+  - **绿**：`src/server/services/proxyDebugTraceStore.test.ts` 4 tests passed。
+- **交付物**：代码、测试、笔记脱敏段落（词元清单 + 代价判定）、本条日志。
+- **状态**：已完成（**未提交**，与第 3 条同一分支）。
+
+### 5. 本批次复核（`MARK-FIX-O8-OTOKENS-1790979`，最终树）
+
+- `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）。
+- `npm run typecheck` 四段（web / web:test / server / desktop）exit 0｜`/tmp/o8-red-backup/typecheck.txt`。
+- `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3389 passed | 16 skipped (3405)`、224.09s（基线 3385 passed ⇒ +4 = 本轮新增 4 例，计数自洽）｜`/tmp/o8-red-backup/full-test.txt`。
+- `npm run repo:drift-check` `Violations: 0`（5 条预存 tracked debt）｜`/tmp/o8-red-backup/drift.txt`。
+
+### 6. `handleDetectedFailure` 四处出口补齐 `first_byte_latency_ms` + 部署脚本切换注释不再累积（`MARK-FIX-O8-OTOKENS-1790979` 追加轮）
+
+- **类型**：缺陷修复（观测列缺口）+ 工具脚本加固
+- **需求来源**：本会话需求（追加指令 `/tmp/o8-r2-append-1790994725.md`；无 GitHub Issue 链接）——第 3 条登记的「相邻面」第 2 项收尾，以及用户批准的部署脚本注释累积整改（随 1.4.18 发）
+- **目标**：① 第 3 条登记②的四处 `handleDetectedFailure` 出口按与已修出口**同一口径**补 `firstByteLatencyMs`；② `scripts/deploy-painless.sh` 每次发版在 `image:` 上方插入的两行切换注释改为只保留最近 1–2 条，不再只追加不清理。
+- **实现范围**：
+  - **① 观测列**：chat（`chatSurface.ts:1245` 流式非 SSE 单块出口 / `:1487` 非流式出口）、responses（`openAiResponsesSurface.ts:1207` / `:1501`）四处 `handleDetectedFailure({…})` 增传 `firstByteLatencyMs`（handler 作用域真实值；四处都在 `try` 内、上游响应已到手，取值可达；未观测到即 `null`，**未编造**）。纯观测：不参与通道选择 / 重试 / 路由 / 计费，对外语义零改动；`onAttemptFailure` 纯观测捕获按主代理裁定保留。
+  - **② 部署脚本**：仅改第 4 步的 python heredoc——先向上扫出紧贴 `image:` 行的注释/空行区间，再只保留最近 `KEEP_ENTRIES-1 = 1` 条旧条目，其余**只删本脚本自己生成的两行**（`# <日期> switched to …` / `# rollback: 恢复 …`），人工注释与空行永不删；本次新条目的两行文案与位置（紧贴 `image:` 上方）与旧行为**逐字一致**（新镜像、`prev`、compose 备份路径 `COMPOSE_BAK`、恢复指引）。构建 / 快照 / canary / 切换 / 验收 / 锁 / 退出码及其余行为**未动**。
+  - **影响面**：只影响 `/var/lib/metapi/docker-compose.yml` 中 `image:` 行上方的注释条数（无限累积 → 恒 ≤ 2 条 = 4 行）；`image:` 行本身、compose 其余内容、切换与回滚语义均不变；`image:` 行之后出现的第二个 `image:`（如旁路服务）从旧行为起就不动，本轮仍不动。
+  - **未触碰**：`src/**` 其它生产代码、`CHANGELOG.md` / 版本号（留发版准备轮）。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/chatSurface.ts`、`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`
+  - `src/server/routes/proxy/chat.stream.test.ts`（扩写既有 4 例，无新测试文件）
+  - `scripts/deploy-painless.sh`、`scripts/dev/docker.workflow.test.ts`（按既有「读文件断言」惯例加 1 例）
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`、本文件
+- **验证**：
+  - **① 先红后绿**（扩写既有 4 例：chat 非流式 / chat 流式非 SSE / responses 非流式 / responses 流式非 SSE，各断言该行 `first_byte_latency_ms` 为真实 number）：
+    - **红**（仅回退这 4 处传参、保留用例）：`Tests 4 failed | 5 passed | 112 skipped`，4 例均为 `expected undefined to deeply equal Any<Number>`——该两列未进写侧取值 ⇒ 落库 NULL；因 `insertProxyLog` 在 `is_stream`/`first_byte_latency_ms` **都为 null 时整组丢弃**（`proxyLogStore.ts` 的 `requestedStreamTimingFields`），故表现为「无该键」而非 `null`｜`/tmp/o8-r2-red/red-detected.txt`。
+    - **绿**（还原生产改动后）：`9 passed | 112 skipped`（`-t empty`）｜同上文件末段。
+  - **② 模拟验证（不真跑部署）**：从 `git show HEAD:scripts/deploy-painless.sh` 与工作区**各提取同一段 heredoc**，在 `/tmp` 的 compose 副本上跑（`/tmp/o8-r2-sim/sim.py`，18 项断言全 PASS）：① 无历史（首次切换）旧/新输出**逐字节相同**（行为等价）；② 4 轮历史现状上：旧逻辑 → 10 行注释（继续累积）、新逻辑 → 4 行（= 2 条），保留下的是**最新**那条旧条目且新条目与旧逻辑逐字等价、位置紧贴 `image:` 上方；③ `image:` 行已切换、文件里第二个 `image:`（sidecar）未被动、非注释非 image 行逐字不变；④ 在 `image:` 上方插人工注释：注释保留且条目仍修剪为 2 条；⑤ 找不到 `image:` 行时两版退出码 1 且报错文案一致｜`/tmp/o8-r2-sim/sim-output.txt`（含「改前副本 → 改后副本」diff）。
+  - `bash -n scripts/deploy-painless.sh` exit 0；`scripts/dev/docker.workflow.test.ts` 7 passed（含新增 1 例；仓库**无** shellcheck / `scripts/**` lint 规则，既有校验惯例即此读文件断言）。
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）｜`/tmp/o8-r2-verify/tsc-server.txt`。
+  - `npm run typecheck` 四段（web / web:test / server / desktop）exit 0、0 处 `error TS`｜`/tmp/o8-r2-verify/typecheck.txt`。
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3390 passed | 16 skipped (3406)`、219.56s（基线 3389 passed ⇒ +1 = 本轮新增 1 例，计数自洽；同一文件内扩写的 4 例不增计数）｜`/tmp/o8-r2-verify/full-test.txt`。
+  - `npm run repo:drift-check` exit 0、`Violations: 0`｜`/tmp/o8-r2-verify/drift.txt`。
+- **交付物**：代码、测试、脚本改动、模拟证据（`/tmp/o8-r2-sim/`）、笔记登记更新、本条日志。
+- **状态**：已完成（**未提交**，与第 3 条同分支 `fix/observability-o8-and-mask-tokens`）。本轮**未做任何 git 写操作**（仅沿用已建分支），未真跑部署，未触碰容器 / 生产库 / 生产设置。**遗留**：这四处出口的 `is_stream` 列仍未传（改后仍写 NULL）——属可选收尾，已有意保留待主代理定夺。
+
+### 7. `handleDetectedFailure` 补 `is_stream` + 全量「出口 × 三列」扫描（`MARK-FIX-O8-OTOKENS-1790979` R3 追加轮；扫出 20 处待补，**按保险丝停下**）
+
+- **类型**：缺陷修复（观测列缺口）+ 盘点（未扩面）
+- **需求来源**：本会话需求（追加指令 `/tmp/o8-r3-sweep-1790995453.md`；无 GitHub Issue 链接）——第 6 条 Notes 3 登记的 `handleDetectedFailure` 四处 `is_stream` 尾巴 + 要求“别再一轮一轮挤牙膏”的全量扫描
+- **目标**：① 把 `handleDetectedFailure` 四处出口的 `is_stream` 按同口径补上（取本轮请求解析值，**不硬编码**）；② 把**所有写 `proxy_logs` 的失败出口**列全，逐处核对 `is_stream` / `first_byte_latency_ms` / `client_http_status` 三列，产出表并定处置。
+- **实现范围（①，已做）**：
+  - chat（`chatSurface.ts:1245` 流式非 SSE 单块出口 / `:1488` 非流式出口）、responses（`openAiResponsesSurface.ts:1207` / `:1502`）四处 `handleDetectedFailure({…})` 增传 `isStream`（handler 作用域的本轮解析值；四处都在 `if (isStream)` / 非流式分支内，**两处真值 `true`、两处 `false`**，断言能拆穿硬编码）；同时把原先只讲 `firstByteLatencyMs` 的两行注释扩成两列共同口径。纯观测，对外语义零改动。
+  - 扩写既有 4 例（无新测试文件），先红后绿。
+- **实现范围（②，**未做——保险丝**）**：全量扫描产出表（写入本笔记「出口 × 三列 全量扫描」节）。**待补出口 20 处**，远超派单保险线 8 处；其中 12 处 cHttp 需动 **6 个路由级 `logProxy` helper 的签名**（gemini/embeddings/completions/images/search）⇒ 同时命中第二条保险丝「需重构而非逐处补参」。**已停下回传表格与方案，未自行扩面**（待主代理定分批与口径后再做）。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/chatSurface.ts`、`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`
+  - `src/server/routes/proxy/chat.stream.test.ts`（扩写既有 4 例）
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`（新增全量表 + 登记三种「设计如此」的有意 NULL）、本文件
+- **验证**：
+  - **① 先红后绿**（扩写既有 4 例：chat 非流式 / chat 流式非 SSE / responses 非流式 / responses 流式非 SSE）：
+    - **红**（仅回退这 4 处 `isStream` 传参、保留用例）：`Tests 4 failed | 5 passed | 112 skipped`，四例原文 `expected null to be false` ×2 / `expected null to be true` ×2——确认改前该列确为 NULL，且断言真区分 `true`/`false`｜`/tmp/o8-r3-red/red-isstream.txt`。
+    - **绿**（还原后）：`9 passed | 112 skipped`（`-t empty`）｜`/tmp/o8-r3-red/green-isstream.txt`。
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）｜`/tmp/o8-r3-verify/tsc-server.txt`。
+  - `npm run typecheck` 四段 exit 0、0 处 `error TS`｜`/tmp/o8-r3-verify/typecheck.txt`。
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3390 passed | 16 skipped (3406)`（基线 3390，本就无新增用例计数）｜`/tmp/o8-r3-verify/full-test.txt`。
+  - `npm run repo:drift-check` exit 0、`Violations: 0`｜`/tmp/o8-r3-verify/drift.txt`；`bash -n scripts/deploy-painless.sh` exit 0（本轮**未再动**脚本）。
+- **交付物**：代码、测试、全量扫描表（笔记）、本条日志。
+- **状态**：① 已完成；② **按保险丝停下，等主代理定方案**（同分支 `fix/observability-o8-and-mask-tokens`，**未提交**）。本轮**未做任何 git 写操作**，未真跑部署，未触碰容器/生产库/生产设置。
+
+### 8. 三列收口：20 处失败出口全补 `is_stream` / `first_byte_latency_ms` / `client_http_status`（`MARK-FIX-O8-OTOKENS-1790979` R4 收口轮）
+
+- **类型**：缺陷修复（观测列缺口）
+- **需求来源**：本会话需求（派单文件 `/tmp/o8-r4-p1p2p3-1790996311.md`；无 GitHub Issue 链接）——第 7 条按保险丝停下后，用户拍板「20 处全补、并入同一分支与 1.4.18」，口径由主代理给定
+- **目标**：把笔记「出口 × 三列 全量扫描」表里 20 处 `待补` 一次性闭环：`is_stream` 5 处、`client_http_status`（cHttp）15 处、`first_byte_latency_ms`（fbl）3 处。
+- **实现范围**（均为纯观测列，对外可见语义——响应码 / 重试条件 / 路由 / 计费——零改动）：
+  - **P1 surface 直写行 8 处**（零签名改动）：`chatSurface.ts` 租约忙行 `:842` 补 `isStream`、`:1574` 站点并发超时行补 `clientHttpStatus`、`:1577` 补 `firstByteLatencyMs`、`:1901` count-tokens 租约忙行补 `isStream: false`、`:2066` count-tokens 站点并发超时行补 `clientHttpStatus`；`openAiResponsesSurface.ts` `:952` / `:1597` / `:1600` 同形。取值均为 handler 作用域真值（busy 行 = 本轮请求解析结果，不写死；count-tokens 与 rerank 端点结构上非流式 ⇒ 注释说明后传 `false`）。
+  - **P2 路由 helper 扩可选参数 12 处**：`geminiSurface.ts` / `embeddings.ts` / `completions.ts` / `images.ts` / `search.ts` 五处 `logProxy` 各**追加可选参数** `clientHttpStatus: number | null = null`（不传 ⇒ 行为逐字不变，成功行调用点一个没改），仅失败行传真实下发码：gemini `:853` / `:1470` / `:1592` = `lastStatus`、gemini `:1077` = **`200`**（该出口在 `reply.hijack()` 之后、不再写 respond）；embeddings `:238` / completions `:459` / images `:208` / `:431` / search `:191` = `status || 502`（网络类失败 `status = 0`，respond 兜底 502）；completions `:321` = `failure.status`；images 两处 malformed 出口 `:135` / `:359` = `502`（结构性无法解析，固定码）。**未用 `-1` 哨兵**（哨兵只属 `onDowngrade` 非终态行）。
+  - **P3 fbl 3 处**：rerank `rerankSurface.ts:182`（`handleUpstreamFailure`）新增 `onAttemptFailure` 纯观测捕获 + handler 作用域变量 + **每轮轮首重置**，与 chat / responses 面同法（不参与任何选择 / 重试 / 路由 / 计费决策）；surface 两处站点并发超时行按主代理指令传 handler 真值。
+  - **有意未动**：helper 成功行现有传参、`onDowngrade` 的两处 `-1`、4 个 busy 行的 cHttp（既有 NULL）与 fbl（未触达上游）、count-tokens `:2091` / `:2114` 与 gemini `:1470` / `:1592` 的 fbl、路由里 `is_stream` 的结构性字面量 `false`（非流式端点真值即 `false`）。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/{chatSurface,openAiResponsesSurface,rerankSurface,geminiSurface}.ts`
+  - `src/server/routes/proxy/{embeddings,completions,images,search}.ts`
+  - 测试（**全部扩写既有文件，无新测试文件**）：`chat.singleChannelFailure.test.ts`、`chat.stream.test.ts`、`chat.count-tokens.test.ts`、`rerank.test.ts`、`gemini.test.ts`、`embeddings.siteApiEndpoint.test.ts`、`completions.siteApiEndpoint.test.ts`、`images.edits.test.ts`、`search.test.ts`
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`（逐行表改为「已修 + 新行号」+ 新增 R4 收口节）、本文件
+- **验证**（全量命令带 `--no-file-parallelism`，与平台基线一致）：
+  - **先红后绿**（每类均覆盖；9 个测试文件、18 个新断言）：
+    - **红**：临时反向掺掉 R4 新增行（71 行 / 8 个生产文件，备份 `/tmp/o8-r4-red/backup/`、回退脚本 `/tmp/o8-r4-red/revert_r4.py`），`Test Files 9 failed (9)`、`Tests 18 failed | 183 passed (201)`，18 条全为「该列 NULL / 该码缺失」（如 `expected null to be true`、`expected undefined to be true`、`to match object {status:'failed',…}` 缺列）｜`/tmp/o8-r4-red/red-run-serial.log`；同时 `npx tsc --noEmit -p tsconfig.server.json` 在红态 exit 0（证明反向掺除只去掉了本轮的观测列改动、未伤及语法 / 类型）。
+    - **绿**（还原后）：`Test Files 9 passed (9)`、`Tests 201 passed (201)`｜`/tmp/o8-r4-verify/green-9files.log`。
+    - 夹具侧说明：`chat.stream.test.ts` / `gemini.test.ts` / `chat.count-tokens.test.ts` / `search.test.ts` / `images.edits.test.ts` 把 `hasProxyLogClientHttpStatusColumn` 夹具置真（`gemini` / `chat.count-tokens` 另置 `hasProxyLogStreamTimingColumns`），否则 `insertProxyLog` 按设计整列丢弃该列，断言无法区分「未传」与「传了但被丢」；三份 `db.insert(...).values` 夹具改为留证取值（只增不外泄行为）。`rerank.test.ts` 的 `firstByteTimeout` 模块 mock 补上失败路径会用到的 `isObservedFirstByteTimeoutResponse`（原先缺该导出，会把失败路径变成夹具自身抛错）。
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）｜`/tmp/o8-r4-verify/tsc-server.log`。
+  - `npm run typecheck` 四段（web / web:test / server / desktop）exit 0、0 处 `error TS`｜`/tmp/o8-r4-verify/typecheck.log`。
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3406 passed | 16 skipped (3422)`、220.56s（基线 3390 passed ⇒ **+16** = 本轮新增 16 个用例：chat busy 1 + chat.stream 3 + count-tokens 2 + rerank 2 + gemini 2 + embeddings 1 + completions 2 + images 2 + search 1；另扩写 3 个既有用例不增计数）｜`/tmp/o8-r4-verify/full-suite.log`；**文档定稿后又对最终树重跑一次**：同计数、211.20s、exit 0｜`/tmp/o8-r4-verify/full-suite-final.log`。
+  - `npm run repo:drift-check` exit 0、`Violations: 0`（5 条预存 tracked debt）｜`/tmp/o8-r4-verify/drift.log`。
+  - `git status --porcelain`：**23 个**已跟踪文件被修改（均为本分支预期：4 surface + 4 路由 + 9 测试 + 脚本 2 + 笔记 + 本文件 + fix-A 遗留的 `proxyDebugTraceStore(.test).ts`），**无 untracked 遗留**。
+- **交付物**：代码、测试、笔记表格更新与 R4 收口节、本条日志、红绿与三条静态验证日志。
+- **状态**：已完成（**未提交**，分支 `fix/observability-o8-and-mask-tokens`，并入 1.4.18）。**本轮未做任何 git 写操作**，未真跑部署，未触碰容器 / 生产库 / 生产设置；`CHANGELOG.md` / 版本号仍留发版准备轮。
+- **遗留（需主代理知晓）**：chat `:1577` / responses `:1600` 的 fbl 在**结构上恒 `null`**（轮首重置 + 站点并发租约超时先于任何上游尝试 ⇒ 无观测），落库值与「未传」不可区分，测试只能锁到「surface 确实显式传了该键（值 `null`）」。若主代理要最小 diff，这 4 行（chat 2 + responses 2）可回退，不影响其余 18 处。
+
+### 9. 版本 1.4.18 与发版准备（`MARK-REL1418-PREP-1790987`；不含发版动作）
+
+- **类型**：版本与文档（发版准备）
+- **需求来源**：本会话需求（派单文件 `/tmp/rel1418-prep-1790997882.md`，任务标记 `MARK-REL1418-PREP-1790987`；无 GitHub Issue 链接）——O8 家族（第 6–8 条）收口后的发版准备。
+- **目标**：按**上一版发版提交的确切文件集合**为模板做 1.4.18 准备（版本号 + `CHANGELOG.md` + 本文件），并在最终树跑齐五条门槛。
+- **模板与文件集合（先查明，未凭印象）**：`git show dbc887e1 --stat`（`chore(release): 1.4.17`，本分支上一版发版提交）= `CHANGELOG.md` / `docs/change-log.md` / `package-lock.json` / `package.json` **四个文件**（对照：1.4.16 `0207d0a1` 为这四项 + 笔记；1.4.15 `9baafb39` 只改 `CHANGELOG.md` + `package.json`）。本轮按 1.4.17 模板改**同四个文件**；第五个文件是笔记——派单明确要求把主代理裁定「记一句」，与 1.4.16 轮的同类做法一致，不属于新增文件类。
+- **实现范围**：
+  - **版本**：`package.json` `1.4.17 → 1.4.18`；`package-lock.json` 的**根 `version`** 与 **`packages[""].version`** 两处同步 `1.4.17 → 1.4.18`（延续 1.4.16 / 1.4.17 的两处一致口径）。
+  - **`CHANGELOG.md`**：顶部新增 `## [1.4.18] - 2026-10-03`，四条修复——① **三列收口**（20 处出口 / 列级 23 格：外层失败出口 4 处、站点并发超时行 3 处、6 个路由级 `logProxy` helper 追加**可选** `clientHttpStatus`、`is_stream` 5 处、`first_byte_latency_ms` 跨轮次不串值 + rerank 纯观测捕获）；② **脱敏词元**补 `authorization` / `authentication`（含 `x-authentication-method` 的已知过掩码，宁多勿漏）；③ **`deploy-painless.sh` 切换注释有界**（恒 ≤2 条、人工注释与空行不删、插入位置与文案不变）；④ 条目内写清**「有意为 NULL」的口径**（count-tokens 路径无首字节观测、gemini 端点层失败与外层 catch 无 upstream 对象、4 处租约忙行未发出上游请求）。**未写任何未经实测的性能 / 效果论断**，未改动 1.4.17 及更早条目。
+  - **笔记（派单要求的一句裁定）**：chat `:1577` / responses `:1600` 显式传 `firstByteLatencyMs`（结构上恒 `null`）**保留** —— 理由＝调用点整齐 + 未来若该路径有上游尝试会自动填值；R4 节里「若主代理要最小 diff 可回退这 4 行」的提示据此收口。
+  - **本文件**：补本条。
+- **主要文件**：`package.json`、`package-lock.json`、`CHANGELOG.md`、`docs/change-log.md`、`.agents/notes/20261002-client-visible-failure-semantics.md`
+- **验证（五条门槛；两轮均全绿：首轮 = 版本号与 `CHANGELOG.md` 就位后，复跑 = 本条日志与笔记裁定写入后对最终树）**：
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 **0 字节**）。
+  - `npm run typecheck` 四段（web / web:test / server / desktop）exit 0、`error TS` **0** 处、四处横幅均打 `metapi@1.4.18`。
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3406 passed | 16 skipped (3422)`（首轮 `210.19s` / 复跑 `209.19s`；与第 8 条同计数——本轮无代码 / 测试改动，只有版本号与文档）。
+  - `npm run repo:drift-check` exit 0、`Violations: 0`、`Tracked debt: 5`（均为预存项；两轮同）。
+  - `npm run build:web && npm run build:server` 均 exit 0（首轮 web `✓ built in 5.90s` / 复跑 `6.27s`；server = `tsc -p tsconfig.server.json` + `tsx scripts/dev/copy-runtime-db-generated.ts`）。
+  - 日志：首轮 `/tmp/rel1418/{tsc-server,typecheck,full-test,drift,build-web,build-server}.txt`；最终树复跑 `/tmp/rel1418/final/` 同名文件（均含 exit 码）。
+  - **口径说明**：复跑之后只剩本文件（markdown）的文案订正；全仓 `src/**` 与 `scripts/**` 检索 `CHANGELOG` / `change-log` **命中 0 处**，即五条门槛均不读取发版文档，结果不受影响。
+- **交付物**：版本号（两文件）、`CHANGELOG.md` 1.4.18 段、笔记裁定句、本条日志、五条门槛日志、准备件 diff 与 `git status --porcelain`。
+- **状态**：已完成（**未提交**，分支 `fix/observability-o8-and-mask-tokens`）。本轮**未做任何 git 写操作**（不 add / commit / push / merge / branch / checkout / stash），未真跑部署、未触碰容器 / 生产库 / 生产设置；发版动作（`scripts/deploy-painless.sh --version 1.4.18 --yes` 及验收 / 收尾）不在本条范围。
+
+### 10. R6：gemini 端点层失败补 `first_byte_latency_ms` + 部署脚本 compose 改写窗口纳入恢复路径（`MARK-R6-ORACLE-TAILS-1790993`）
+
+- **类型**：缺陷修复（观测列 + 脚本健壮性）
+- **需求来源**：本会话需求（派单文件 `/tmp/r6-oracle-tails-1790999299.md`，任务标记 `MARK-R6-ORACLE-TAILS-1790993`；无 GitHub Issue 链接）——oracle 在 1.4.18 发版前指出的两条 P2 尾巴，用户裁定「两条都补」、并入 1.4.18。
+- **目标**：① gemini 端点层失败行的 `first_byte_latency_ms` 按 rerank 同法用**既有** `onAttemptFailure` 钩子闭环，并把文档里「无 upstream 对象」的托词按事实改对；② 把 `deploy-painless.sh` 的 compose 改写窗口纳入恢复路径（不改变正常路径行为）。
+- **实现范围（①，均为纯观测 / 注释）**：
+  - `geminiSurface.ts`：handler 作用域 `let firstByteLatencyMs: number | null = null`（`handleGenerateContent`，`:597`）+ **每轮轮首重置**（`:644`，紧接 `const startTime = Date.now()`；该 handler 确有重试循环 `while (retryCount <= getProxyMaxChannelRetries())`）+ 在**既有** `onAttemptFailure` 钩子里加**无分支纯观测赋值**（`:1385-1389`，`getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null`）+ 端点层失败出口的 `logProxy` 把该列从写死 `null` 改为传 `firstByteLatencyMs`（`:1482`）；外层 catch（`:1610`）**仍传 `null`**，但注释按事实写明理由（该 catch 处没有 response 对象）。
+  - **口径订正（文档）**：笔记与 `CHANGELOG.md` 里 gemini 两处措辞——端点层失败＝**已在该 hook 捕获（本轮已补）**（`endpointFlow` 的每次派发都经 `fetchWithObservedFirstByte`，无条件打点）；外层 catch ＝**该 catch 处无 response 对象**（真因是 `endpointFlow` 把网络类异常就地归一、不 throw，能拿到 response 的失败已由上一条出口落库）。笔记 gemini 表两行由「有意 NULL」改为「已修 / 措辞订正」，并把「设计如此」清单收缩为事实成立的条目（count-tokens 那组另补了真因：该路径**直接 `dispatchRequest`**、不经首字节观测）。
+- **实现范围（②，一行级）**：`scripts/deploy-painless.sh` 把 `SWITCHED=1` 从「`compose up -d` 之前」提前到**备份成功之后、python 改写之前**。效果：python 改写 + 改后 `compose config -q` 这个窗口里任何非零退出（含信号）都归 trap 的 `rollback` 管（恢复 `.pre-*` 备份 → `compose up -d`）；正常路径的步骤顺序 / 验收 / 退出码不变，trap 语义除该窗口外一律不变。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/geminiSurface.ts`、`src/server/routes/proxy/gemini.test.ts`（**扩写既有文件**，+2 例）
+  - `scripts/deploy-painless.sh`、`scripts/dev/docker.workflow.test.ts`（按既有惯例最小扩写，+1 例文本断言）
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`（表行 + 新增 R6 节）、`CHANGELOG.md`、本文件
+- **验证**：
+  - **① 先红后变异**（`gemini.test.ts` 新 2 例，`-t 'first-byte latency'`；变异脚本 `/tmp/r6-red/mutate.py`，日志 `/tmp/r6-red/logs/`）：
+    - **红 A**（把出口传参改回 `null`、保留钩子）⇒ 两例全红，diff 均为 `firstByteLatencyMs: null`（期望 `Any<Number>`）；同时 `npx tsc --noEmit -p tsconfig.server.json` 在红态 exit 0（证明变异只动了观测列）。
+    - **绿**：还原后两例绿（整文件 36 例）。
+    - **跨轮用例的判別力（如实记录）**：变异 B（去掉轮首重置、钩子保持无条件赋值）⇒ **仍绿**（本路径下钩子对每次失败尝试都赋值，后一轮自己写了 `null`，重置不是当前实现的必需项）；变异 C（钩子改为「只在观测到时赋值」、保留重置）⇒ 绿；**变异 D（C + 去掉重置）⇒ 用例 2 红**（轮 1 的行报出轮 0 的值，即串值）⇒ 该重置对「只在观测到时赋值」这类很自然的等价改写是有效守护。
+    - 用例细节：compat 路径（platform `openai`）+ 上游 500 JSON（错误文本命中同站端点中止模式 ⇒ 本轮只试一个端点）⇒ 行内 `httpStatus: 500` / `clientHttpStatus: 500` / `isStream: false` / `firstByteLatencyMs: any(Number)`，`errorMessage` 含 `[upstream:/v1/responses]`（`withUpstreamPath` 打的）⇒ 确认来自端点层真实失败；跨轮用例轮 0 = 500（真值）、轮 1 = `ECONNRESET`（无 meta ⇒ `null`）。
+    - **顺带订正一条错注释（纯注释，无断言改动）**：R4 那条名为「端点层失败码」的用例（`fetchMock.mockRejectedValue('ECONNRESET')` + **默认夹具 platform `gemini`**）实际走的是**直连路径的外层 catch**，而非它注释里写的 compat 端点层失败出口。证据：临时探针打印该用例落库行，`errorMessage = "[downstream:…generateContent] [upstream:/v1beta/models/gemini-2.5-flash:generateContent] ECONNRESET"`（`/v1beta/…` ⇒ 直连路径；compat 出口会带 `/v1/responses`）。已把注释改写为事实（该用例钉的是「网络类失败行 cHttp = 502」），断言一字未改。
+  - **② 脚本**（**不真跑部署**；模拟器 `/tmp/r6-sim/sim.py`，输出 `/tmp/r6-sim/sim-output.txt`，证据目录 `/tmp/r6-sim/r6sim-*`）：从**真实脚本文件**原样抽取「故障工具链（含 `rollback` / `on_exit` / `trap`）+ 第 4 步切换区块」拼成 harness，在 `/tmp` 的 compose 副本上跑，`docker` 用桩（记录调用、可令 `compose config -q` 失败），两组对照（OLD = `git show HEAD:scripts/deploy-painless.sh`，NEW = 工作区）。
+    - **正常路径**：OLD 与 NEW **compose 结果逐字节相同**、docker 调用序列**逐字相同**、均 exit 0、均未触发回滚、均恰好一次 `config -q` + 一次 `up -d`；NEW 保留人工注释、不动第二个 `image:`（sidecar）、只写 1 条切换注释。
+    - **改后 `config -q` 失败**：OLD（改动前）exit 1 且**不回滚**（改写后的 compose 留在盘上、无任何 `up -d`——旧容器未被顶过）＝复现原缺口；NEW exit 1 且**已由 `.pre-*` 备份恢复**（内容与备份逐字节相等）、打印「已恢复切换前 compose」、唯一一次 `up -d` 发生在**恢复之后**（桩记录到重建时 compose 里已是旧镜像）。
+    - 共 **29 条断言全 PASS**；`bash -n scripts/deploy-painless.sh` exit 0。
+  - **脚本既有测试的红 / 绿**：把工作区脚本临时换成 `HEAD` 版 → 新增断言红（`expected 6314 to be less than 5595`：`SWITCHED=1` 在改写之后）；换回工作区版 → `scripts/dev/docker.workflow.test.ts` 8 passed。
+  - **五条门槛（对最终树跑，全绿）**：`npx tsc --noEmit -p tsconfig.server.json` exit 0（**0 字节**）；`npm run typecheck` 四段 exit 0、`error TS` 0 处、均打 `metapi@1.4.18`；`npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3409 passed | 16 skipped (3425)`（首轮 `219.65s` / 注释订正后的最终树复跑 `218.66s`，计数相同；基线 3406 ⇒ **+3** = gemini 2 例 + 脚本 1 例）；`npm run repo:drift-check` exit 0、`Violations: 0`、`Tracked debt: 5`；`npm run build:web && npm run build:server` 均 exit 0（web `built in 6.44s` / 复跑 `5.90s`）。日志：首轮 `/tmp/r6-verify/*`、最终树 `/tmp/r6-verify/tree-final/*`（另有本步之前的 `/tmp/r6-verify/final/*` 静态三件）。
+- **交付物**：代码与测试改动、脚本改动 + `/tmp` 模拟证据与红 / 变异日志、笔记表与 R6 节、CHANGELOG 两条、本条日志。
+- **状态**：已完成（**未提交**，分支 `fix/observability-o8-and-mask-tokens`，并入 1.4.18）。本轮**未做任何 git 写操作**（不 add / commit / push / merge / branch / checkout / stash），**未真跑部署**、未触碰容器 / 生产库 / 生产设置。**遗留**：外层 catch 的 fbl 仍为 `null`（该处无 response 对象，属事实不可得）；count-tokens 路径的 fbl 仍为 `null`（未接首字节观测，属真值不可得）。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

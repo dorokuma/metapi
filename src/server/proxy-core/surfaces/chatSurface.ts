@@ -432,6 +432,15 @@ export async function handleChatSurfaceRequest(
   // 提升到 handler 作用域：`failureToolkit` 的观测取值器要跨重试轮次读取它，轮首重置。
   let streamStarted = false;
   /**
+   * 本轮上游首字节延迟（观测列 `first_byte_latency_ms` 的取值；语义 = **上游**响应首字节，非下游）。
+   *
+   * 与 `streamStarted` 同因提升到 handler 作用域：外层 catch 的两条失败出口（`handleUpstreamFailure` /
+   * `handleExecutionError`）要读它，而它原先 `const` 声明在 `try` 内 ⇒ catch 作用域取不到 ⇒ 这些行该列恒 NULL。
+   * **轮首重置为 null**（见 while 循环首行）：本轮未观测到首字节就必须落 NULL，严禁上一轮的值漏到下一轮。
+   * 取值只有两个来源：① 成功拿到上游响应时（`try` 内）；② 失败尝试的上游响应（`onAttemptFailure` 钩子）。
+   */
+  let firstByteLatencyMs: number | null = null;
+  /**
    * 终态失败出口写 debug trace。
    *
    * `capturedUpstreamText` 是本次尝试已读到的**上游原始字节**（流式路径累积的 `rawText`）。采集开关
@@ -476,8 +485,10 @@ export async function handleChatSurfaceRequest(
   let lastRetryFailure: SurfaceRetryTerminalFailure | null = null;
 
   while (retryCount <= maxRetries) {
-    // 轮首重置：`streamStarted` 已提升到 handler 作用域，新的一轮不能沿用上一轮是否已 hijack 的事实。
+    // 轮首重置：`streamStarted` / `firstByteLatencyMs` 都已提升到 handler 作用域，新的一轮不能沿用
+    // 上一轮「是否已 hijack」「是否观测到上游首字节」的事实（跨轮次串值会让失败出口写出假的首字节延迟）。
     streamStarted = false;
+    firstByteLatencyMs = null;
     const stickyPreferredChannelId = retryCount === 0
       ? getSurfaceStickyPreferredChannelId(stickySessionKey)
       : null;
@@ -730,6 +741,10 @@ export async function handleChatSurfaceRequest(
           ctx.rawErrText || ctx.errText,
         ),
         onAttemptFailure: async (ctx) => {
+          // 纯观测取值（不参与任何选择/重试决策，不改任何对外语义）：失败尝试拿到的上游响应若已读到
+          // 首字节，就把真实延迟留给外层失败出口；网络类失败（`endpointFlow` 合成的 502 无 meta）与
+          // 首字节超时（meta.firstByteLatencyMs = null）在此落 NULL。
+          firstByteLatencyMs = getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null;
           const memoryWrite = recordUpstreamEndpointFailure({
             ...endpointRuntimeContext,
             endpoint: ctx.request.endpoint,
@@ -823,6 +838,9 @@ export async function handleChatSurfaceRequest(
         modelRequested: requestedModel,
         status: 'failed',
         httpStatus: 503,
+        // 观测列：`is_stream` 取本轮请求真值（本出口在租约超时，与请求本身是否流式无关）；
+        // `first_byte_latency_ms` 本出口未触达上游、无观测 ⇒ **有意不传**（NULL）。
+        isStream,
         latencyMs: leaseResult.waitMs,
         errorMessage: busyMessage,
         retryCount,
@@ -890,7 +908,7 @@ export async function handleChatSurfaceRequest(
 
       const upstream = endpointResult.upstream;
       const successfulUpstreamPath = endpointResult.upstreamPath;
-      const firstByteLatencyMs = getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null;
+      firstByteLatencyMs = getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null;
 
       if (isStream) {
         const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
@@ -1225,6 +1243,10 @@ export async function handleChatSurfaceRequest(
               requestedModel,
               modelName,
               failure,
+              // 观测列：本出口在 `try` 内、上游响应已到手 ⇒ 两列取真实值——`isStream` 取自本轮请求解析结果
+              // （非硬编码），`firstByteLatencyMs` 取上游响应观测到的首字节延迟（未观测到 ⇒ null，**不编造**）。
+              isStream,
+              firstByteLatencyMs,
               latencyMs: latency,
               retryCount,
               promptTokens: parsedUsage.promptTokens,
@@ -1464,6 +1486,10 @@ export async function handleChatSurfaceRequest(
           requestedModel,
           modelName,
           failure,
+          // 观测列：本出口在 `try` 内、上游响应已到手 ⇒ 两列取真实值——`isStream` 取自本轮请求解析结果
+          // （非硬编码），`firstByteLatencyMs` 取上游响应观测到的首字节延迟（未观测到 ⇒ null，**不编造**）。
+          isStream,
+          firstByteLatencyMs,
           latencyMs: latency,
           retryCount,
           promptTokens: parsedUsage.promptTokens,
@@ -1544,7 +1570,11 @@ export async function handleChatSurfaceRequest(
           modelRequested: requestedModel,
           status: 'failed',
           httpStatus: failure.status,
+          // 客户端实收：与本出口的 respond 状态一致（重试耗尽分支也用同一状态）。
+          clientHttpStatus: failure.status,
           isStream,
+          // 观测列：取 handler 作用域真值（该出口在站点并发租约超时处，正常路径上恒 null ⇒ 落 NULL，不编造）。
+          firstByteLatencyMs,
           latencyMs: Date.now() - startTime,
           errorMessage: failure.message,
           retryCount,
@@ -1593,6 +1623,7 @@ export async function handleChatSurfaceRequest(
           errText: err.message || 'unknown error',
           rawErrText: err.rawErrText || err.message || 'unknown error',
           isStream,
+          firstByteLatencyMs,
           latencyMs: Date.now() - startTime,
           retryCount,
         });
@@ -1623,6 +1654,7 @@ export async function handleChatSurfaceRequest(
         modelName,
         errorMessage: formatErrorCause(err) || 'network failure',
         isStream,
+        firstByteLatencyMs,
         latencyMs: Date.now() - startTime,
         retryCount,
       });
@@ -1865,6 +1897,9 @@ export async function handleClaudeCountTokensSurfaceRequest(
         modelRequested: requestedModel,
         status: 'failed',
         httpStatus: 503,
+        // 观测列：claude count-tokens 端点自身无流式语义（请求体里的 `stream` 被忽略）⇒ `is_stream` 真值恒 `false`；
+        // `first_byte_latency_ms` 本出口未触达上游、无观测 ⇒ **有意不传**（NULL）。
+        isStream: false,
         latencyMs: leaseResult.waitMs,
         errorMessage: busyMessage,
         retryCount,
@@ -2027,6 +2062,8 @@ export async function handleClaudeCountTokensSurfaceRequest(
           modelRequested: requestedModel,
           status: 'failed',
           httpStatus: failure.status,
+          // 客户端实收：与本出口的 respond 状态一致（重试耗尽分支也用同一状态）。
+          clientHttpStatus: failure.status,
           isStream: false,
           latencyMs: Date.now() - startTime,
           errorMessage: failure.message,

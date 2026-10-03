@@ -131,6 +131,8 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             clientContext,
             false,
             firstByteLatencyMs,
+            // 客户端实收：本出口固定 502（上游响应结构性无法解析；不重试时就用该码）。
+            502,
           );
           if (canRetryChannelSelection(retryCount, forcedChannelId)) {
             retryCount++;
@@ -202,6 +204,8 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           clientContext,
           false,
           firstByteLatencyMs,
+          // 客户端实收：`status > 0` 时原样回传，网络类失败（status = 0）由 respond 兜底 502。
+          status || 502,
         );
         if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
           await reportTokenExpired({
@@ -351,6 +355,8 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             clientContext,
             false,
             firstByteLatencyMs,
+            // 客户端实收：本出口固定 502（上游响应结构性无法解析；不重试时就用该码）。
+            502,
           );
           if (canRetryChannelSelection(retryCount, forcedChannelId)) {
             retryCount++;
@@ -422,6 +428,8 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           clientContext,
           false,
           firstByteLatencyMs,
+          // 客户端实收：`status > 0` 时原样回传，网络类失败（status = 0）由 respond 兜底 502。
+          status || 502,
         );
         if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
           await reportTokenExpired({
@@ -473,6 +481,7 @@ async function logProxy(
   clientContext: DownstreamClientContext | null = null,
   isStream = false,
   firstByteLatencyMs: number | null = null,
+  clientHttpStatus: number | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -495,6 +504,7 @@ async function logProxy(
       modelActual: selected.actualModel || modelRequested,
       status,
       httpStatus,
+      clientHttpStatus,
       isStream,
       firstByteLatencyMs,
       latencyMs,

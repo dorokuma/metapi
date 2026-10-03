@@ -18,6 +18,7 @@ import {
   getTesterForcedChannelId,
 } from '../channelSelection.js';
 import { executeEndpointFlow } from '../orchestration/endpointFlow.js';
+import { getObservedResponseMeta } from '../firstByteTimeout.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY } from '../../services/downstreamPolicyTypes.js';
@@ -56,6 +57,8 @@ export async function handleRerankSurfaceRequest(
     downstreamApiKeyId,
   });
   const excludeChannelIds: number[] = [];
+  /** 观测列：失败出口要写出的「上游响应首字节延迟」真值（未观测到 ⇒ null）。 */
+  let firstByteLatencyMs: number | null = null;
   let retryCount = 0;
 
   while (retryCount <= maxRetries) {
@@ -76,6 +79,8 @@ export async function handleRerankSurfaceRequest(
     const upstreamModel = selected.actualModel || requestedModel;
     const forwardBody = { ...body, model: upstreamModel };
     const startTime = Date.now();
+    // 轮首重置：新的一轮不能沿用上一轮的观测值（与 chat / responses 面同口径）。
+    firstByteLatencyMs = null;
 
     try {
       const endpointResult = await runWithSurfaceSiteConcurrency(selected.site, async (siteBaseUrl) => {
@@ -98,6 +103,12 @@ export async function handleRerankSurfaceRequest(
             siteUrl: siteBaseUrl,
             accountExtraConfig: selected.account.extraConfig,
           }),
+          // 纯观测取值（不参与任何选择/重试决策，不改任何对外语义）：失败尝试拿到的上游响应若已读到
+          // 首字节，就把真实延迟留给外层失败出口；网络类失败（`endpointFlow` 合成的 502 无 meta）与
+          // 首字节超时（`meta.firstByteLatencyMs = null`）在此落 NULL。与 chat / responses 面同法。
+          onAttemptFailure: async (ctx) => {
+            firstByteLatencyMs = getObservedResponseMeta(ctx.response)?.firstByteLatencyMs ?? null;
+          },
         });
         if (result.ok) return result;
         const failure = new SiteApiEndpointRequestError(result.errText || 'unknown error', {
@@ -144,6 +155,9 @@ export async function handleRerankSurfaceRequest(
           modelRequested: requestedModel,
           status: 'failed',
           httpStatus: failure.status,
+          // 观测列：Rerank 端点结构上无流式语义 ⇒ `is_stream` 真值恒 `false`；
+          // `first_byte_latency_ms` 本出口在站点并发繁忙、未走到上游尝试 ⇒ **有意不传**（NULL）。
+          isStream: false,
           latencyMs: Date.now() - startTime,
           errorMessage: failure.message,
           retryCount,
@@ -164,6 +178,10 @@ export async function handleRerankSurfaceRequest(
         status: failure.status,
         errText: failure.message,
         rawErrText: (error as { rawErrText?: string | null })?.rawErrText || failure.message,
+        // 观测列：`is_stream` 取真值（Rerank 端点结构上恒非流式 ⇒ `false`，与上述 busy 出口同口径）；
+        // `first_byte_latency_ms` 取 `onAttemptFailure` 捕获的上游首字节延迟（未观测到 ⇒ null，不编造）。
+        isStream: false,
+        firstByteLatencyMs,
         latencyMs: Date.now() - startTime,
         retryCount,
       });

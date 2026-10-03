@@ -147,26 +147,57 @@ fi
 
 info "[4/6] 切换 compose image: → $IMAGE"
 cp -f "$COMPOSE_FILE" "$COMPOSE_BAK"
+# `SWITCHED=1` 提前到**备份成功之后、改写之前**：python 改写与改后的 `compose config -q` 都落在
+# 「已备份、未 up -d」这个窗口内。窗口里任何非零退出（含信号）若不归 trap 管，改写后的 compose 就
+# 会留在盘上不恢复（容器还是旧镜像，下次有人 `compose up -d` 就静默换镜像）⇒ 现纳入恢复路径。
+SWITCHED=1
 PREV_IMAGE="$(sed -n 's/^ *image: *//p' "$COMPOSE_FILE" | head -1)"
 python3 - "$COMPOSE_FILE" "$IMAGE" "$PREV_IMAGE" "$COMPOSE_BAK" "$(date +%F)" <<'PY'
-import sys
+import re, sys
 path, image, prev, bak, day = sys.argv[1:6]
 note = ("    # %s switched to %s; prev %s\n"
         "    # rollback: 恢复 %s 或把 image 改回 %s 后 docker compose up -d\n") % (day, image, prev, bak, prev)
-out, done = [], False
-for line in open(path, encoding="utf-8"):
-    if not done and line.strip().startswith("image:"):
-        out += [note, "    image: %s\n" % image]
-        done = True
-    else:
-        out.append(line)
-if not done:
+
+# 历史切换注释只保留最近 KEEP_ENTRIES 条（含本次新写这条）：旧条目在插入前移除，不再无限累积。
+# 生成顺序是「旧→新」，最新一条总是紧贴 image: 行上方。只识别并删除本脚本自己生成的
+# 两行（`<日期> switched to …` 与 `rollback: 恢复 …`）：其它注释与空行永远不动。
+KEEP_ENTRIES = 2
+entry_head = re.compile(r'^\s*#\s*\d{4}-\d{2}-\d{2} switched to ')
+entry_rollback = re.compile(r'^\s*#\s*rollback: 恢复 ')
+
+def is_note_line(line):
+    return bool(entry_head.match(line) or entry_rollback.match(line))
+
+lines = open(path, encoding="utf-8").readlines()
+image_idx = next((i for i, line in enumerate(lines) if line.strip().startswith("image:")), None)
+if image_idx is None:
     sys.exit("compose 里找不到 image: 行")
+
+# 紧贴 image: 行的注释/空行区间（人们手写的注释也在内，它们永远不被删，只是分隔条目）。
+region_start = image_idx
+while region_start > 0:
+    prev = lines[region_start - 1]
+    if prev.strip() == "" or prev.lstrip().startswith("#"):
+        region_start -= 1
+    else:
+        break
+region = lines[region_start:image_idx]
+
+# 只保留最近 KEEP_ENTRIES-1 条旧条目；它们位于区间尾部（最新处）。
+heads = [i for i, line in enumerate(region) if entry_head.match(line)]
+keep_count = max(0, KEEP_ENTRIES - 1)
+if heads and len(heads) > keep_count:
+    cut = heads[len(heads) - keep_count]
+    kept = [line for line in region[:cut] if not is_note_line(line)] + region[cut:]
+else:
+    kept = region
+
+# 本次这条写在最下方（紧贴 image: 行），与旧行为的位置/文案一致。
+out = lines[:region_start] + kept + [note, "    image: %s\n" % image] + lines[image_idx + 1:]
 open(path, "w", encoding="utf-8").write("".join(out))
 PY
 compose config -q || die "改后 compose 校验失败"
 info "       $(compose config --images | tr '\n' ' ')"
-SWITCHED=1
 compose up -d
 
 # ── 5 验收 ───────────────────────────────────────────────────────────────────

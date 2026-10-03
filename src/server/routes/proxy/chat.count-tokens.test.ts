@@ -1,5 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
+import * as siteApiEndpointService from '../../services/siteApiEndpointService.js';
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
@@ -20,10 +22,13 @@ const safeUpdateSurfaceProxyDebugCandidatesMock = vi.fn();
 const safeInsertSurfaceProxyDebugAttemptMock = vi.fn();
 const safeFinalizeSurfaceProxyDebugTraceMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
+  values: (values?: any) => {
+    // O8 R4：把每次写入的取值原样留证，才能断言 `is_stream` / `client_http_status` 真的进了写侧。
+    proxyLogValuesMock(values);
+    return { run: () => undefined };
+  },
 }));
+const proxyLogValuesMock = vi.fn();
 
 vi.mock('undici', async () => {
   const actual = await vi.importActual<typeof import('undici')>('undici');
@@ -112,8 +117,10 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
-  hasProxyLogClientHttpStatusColumn: async () => false,
-  hasProxyLogStreamTimingColumns: async () => false,
+  hasProxyLogClientHttpStatusColumn: async () => true,
+  // O8 R4：本文件现在要断言 `is_stream` / `client_http_status` 是否真的进写侧取值，故两列夹具均置真
+  //（置假时 `insertProxyLog` 按设计整列丢弃，断言无法区分「未传」与「传了但被丢」）。
+  hasProxyLogStreamTimingColumns: async () => true,
   schema: {
     proxyLogs: {},
     siteApiEndpoints: {
@@ -149,6 +156,7 @@ describe('claude count_tokens proxy route', () => {
     safeInsertSurfaceProxyDebugAttemptMock.mockReset();
     safeFinalizeSurfaceProxyDebugTraceMock.mockReset();
     dbInsertMock.mockClear();
+    proxyLogValuesMock.mockClear();
 
     startSurfaceProxyDebugTraceMock.mockResolvedValue({
       traceId: 701,
@@ -314,5 +322,65 @@ describe('claude count_tokens proxy route', () => {
       },
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('writes is_stream=false on the claude count-tokens channel-busy failure row', async () => {
+    // O8 R4（P1）：count-tokens 的租约忙出口此前未传 `is_stream`（该列恒 NULL）。
+    // 该端点自身无流式语义（请求体里的 `stream` 被忽略）⇒ 真值恒 `false`；
+    // `first_byte_latency_ms` 本出口未触达上游 ⇒ **有意不传**（落 NULL）。
+    const acquireLeaseSpy = vi.spyOn(proxyChannelCoordinator, 'acquireChannelLease')
+      .mockResolvedValue({ status: 'timeout', waitMs: 800 } as any);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages/count_tokens',
+        payload: {
+          model: 'claude-opus-4-6',
+          messages: [{ role: 'user', content: 'count these tokens' }],
+        },
+      });
+
+      expect(response.statusCode).toBe(503);
+      const failedRow = proxyLogValuesMock.mock.calls
+        .map((call) => call[0])
+        .find((values) => values && values.status === 'failed');
+      expect(failedRow).toMatchObject({ status: 'failed', httpStatus: 503, isStream: false });
+      expect(failedRow.firstByteLatencyMs).toBeNull();
+    } finally {
+      acquireLeaseSpy.mockRestore();
+    }
+  });
+
+  it('writes the real client_http_status on the claude count-tokens site-concurrency-timeout row', async () => {
+    // O8 R4（P1）：count-tokens 的站点并发超时出口此前未传 `client_http_status`（该列恒 NULL）；
+    // 本出口与 respond 同码，故写 `failure.status`；`is_stream` 真值同 `false`。
+    const poolSpy = vi.spyOn(siteApiEndpointService, 'runWithSiteApiEndpointPool')
+      .mockRejectedValue(Object.assign(
+        new siteApiEndpointService.SiteApiEndpointRequestError('site concurrency slot timeout', { status: 503 }),
+        { siteConcurrencyTimeout: true },
+      ));
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages/count_tokens',
+        payload: {
+          model: 'claude-opus-4-6',
+          messages: [{ role: 'user', content: 'count these tokens' }],
+        },
+      });
+
+      expect(response.statusCode).toBe(503);
+      const failedRow = proxyLogValuesMock.mock.calls
+        .map((call) => call[0])
+        .find((values) => values && values.status === 'failed');
+      expect(failedRow).toMatchObject({
+        status: 'failed',
+        httpStatus: 503,
+        clientHttpStatus: 503,
+        isStream: false,
+      });
+    } finally {
+      poolSpy.mockRestore();
+    }
   });
 });

@@ -369,6 +369,36 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
     }
   });
 
+  it('writes the real is_stream value on the channel-busy failure row and keeps first_byte_latency_ms NULL', async () => {
+    // O8 R4（P1）：租约忙出口此前既没传 `is_stream`（该列恒 NULL），也没传 `first_byte_latency_ms`。
+    // 后者**有意保持 NULL**（本出口从未触达上游，无首字节可观测）；前者必须取本轮请求真值。
+    // 本用例刻意用**流式**请求：若实现写死成 `false` 就会在此拆穿。
+    const acquireLeaseSpy = vi.spyOn(proxyChannelCoordinator, 'acquireChannelLease')
+      .mockResolvedValue({ status: 'timeout', waitMs: 1200 });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        payload: {
+          model: 'gpt-4o-mini',
+          stream: true,
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+
+      // 对外语义不变：租约忙 + 下一轮选不出通道 ⇒ 客户端仍是 503。
+      expect(response.statusCode).toBe(503);
+      const proxyLogRows = await db.select().from(schema.proxyLogs).all();
+      const busyRows = proxyLogRows.filter((row) => Number(row.httpStatus) === 503);
+      expect(busyRows).toHaveLength(1);
+      expect(busyRows[0].isStream).toBe(true);
+      expect(busyRows[0].firstByteLatencyMs).toBeNull();
+    } finally {
+      acquireLeaseSpy.mockRestore();
+    }
+  });
+
   it('returns the last round real status when every channel fails (502 then 429)', async () => {
     selectChannelMock.mockReturnValue(buildSelectedChannel({ token: 'sk-first', id: 11 }));
     selectNextChannelMock

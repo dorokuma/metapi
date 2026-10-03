@@ -97,8 +97,10 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
-  hasProxyLogClientHttpStatusColumn: async () => false,
-  hasProxyLogStreamTimingColumns: async () => false,
+  hasProxyLogClientHttpStatusColumn: async () => true,
+  // O8 R4：本文件现在要断言 `is_stream` / `client_http_status` 是否真的进写侧取值，故两列夹具均置真
+  //（置假时 `insertProxyLog` 按设计整列丢弃，断言无法区分「未传」与「传了但被丢」）。
+  hasProxyLogStreamTimingColumns: async () => true,
   schema: {
     proxyLogs: {},
     modelAvailability: {
@@ -2225,6 +2227,11 @@ describe('gemini native proxy routes', () => {
       status: 'failed',
       httpStatus: 500,
       retryCount: 0,
+      // O8 R4（P1/P2）：本行由非 SSE 失败出口（`!upstream.ok`）写。
+      // `is_stream` 以前未传（恒 NULL）⇒ 取该请求的真值（本用例是 stream 动作 ⇒ true）；
+      // `client_http_status` 以前未传（恒 NULL）⇒ 与本出口 respond 同码（`lastStatus` = 500）。
+      isStream: true,
+      clientHttpStatus: 500,
       errorMessage: '[downstream:/v1beta/models/gemini-2.5-flash:streamGenerateContent] [upstream:/v1beta/models/gemini-2.5-flash:streamGenerateContent] {\"error\":{\"message\":\"upstream unavailable\"}}',
     }));
     expect(dbInsertValuesMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
@@ -2237,6 +2244,157 @@ describe('gemini native proxy routes', () => {
       totalTokens: 17,
       errorMessage: '[downstream:/v1beta/models/gemini-2.5-flash:streamGenerateContent] [upstream:/v1beta/models/gemini-2.5-flash:streamGenerateContent]',
     }));
+    // O8 R4（P2）：成功行不动——helper 新增参数必须可选，不传即维持既有行为（该列不写）。
+    expect(Object.keys(dbInsertValuesMock.mock.calls[1][0])).not.toContain('clientHttpStatus');
     expect(recordSuccessMock).toHaveBeenCalledWith(12, expect.any(Number), 0, 'gemini-2.5-flash');
+  });
+
+  it('writes 200 into client_http_status for a Gemini-native stream that breaks after the first byte', async () => {
+    // O8 R4（P2）：流中断出口（上游 SSE 读到一半失败）在 `reply.hijack()` 之后、不再写 respond，
+    // 客户端实收恒 200（HTTP 层早已发头）⇒ `client_http_status` 必须是 200，而不是日志里的 502。
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"responseId":"resp-broken","candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}\r\n\r\n'));
+      },
+      pull(controller) {
+        // 首块被消费后才拉第二次 ⇒ 首帧已下发（已 hijack），随后断流。
+        controller.error(new Error('terminated'));
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
+      headers: { 'x-goog-api-key': 'fixture-managed-gemini-key' },
+      payload: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(dbInsertValuesMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      httpStatus: 502,
+      isStream: true,
+      clientHttpStatus: 200,
+    }));
+  });
+
+  it('writes the endpoint-layer failure code into client_http_status when the Gemini upstream is unreachable', async () => {
+    // O8 R4（P2）+ R6 措辞订正：本夹具的 platform 是 `gemini`（走直连路径），ECONNRESET 实际落在
+    // **外层 catch**；本用例钉的是「网络类失败行 cHttp = 502」（与直连 `!upstream.ok` 出口同码）。
+    // compat 路径的端点层失败出口（`endpointResult.ok === false`）由本文件下一条 R6 用例覆盖。
+    fetchMock.mockRejectedValue(new Error('ECONNRESET'));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: { 'x-goog-api-key': 'fixture-managed-gemini-key' },
+      payload: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(dbInsertValuesMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      httpStatus: 502,
+      clientHttpStatus: 502,
+    }));
+  });
+
+  it('records the observed first-byte latency on the Gemini compat endpoint-layer failure exit', async () => {
+    // R6：compat 路径的端点层失败出口（`endpointResult.ok === false`）此前把 `first_byte_latency_ms`
+    // 写死 null（托词是「无 upstream 对象」）；实际上 `executeEndpointFlow` 的尝试响应带着观测 meta
+    // （`fetchWithObservedFirstByte` 无条件打点）⇒ 现由既有 `onAttemptFailure` 钩子捕获真实首字节延迟。
+    selectChannelMock.mockReturnValue({
+      channel: { id: 41, routeId: 22 },
+      site: { id: 77, name: 'openai-site', url: 'https://api.openai.com', platform: 'openai' },
+      account: { id: 37, username: 'openai-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'openai-access-token',
+      actualModel: 'gpt-4.1',
+    });
+    // 上游**确实回了**（500 +  JSON 体 ⇒ 已观测到首字节）；错误文本命中同站点端点中止模式，
+    // 保证本轮只尝试一个端点，取值归属明确。
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'upstream rate limit exceeded' },
+    }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: { authorization: 'Bearer fixture-managed-gemini-key' },
+      payload: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+    });
+
+    expect(response.statusCode).toBe(500);
+    const failedRows = dbInsertValuesMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .filter((values) => values.status === 'failed');
+    // 只应有 1 行（重试轮在 `selectNextChannel` mock 返回空后就地收尾，不再写行）。
+    expect(failedRows).toHaveLength(1);
+    expect(failedRows[0]).toMatchObject({
+      status: 'failed',
+      httpStatus: 500,
+      isStream: false,
+      clientHttpStatus: 500,
+      // 关键断言：改前恒为 null。
+      firstByteLatencyMs: expect.any(Number),
+    });
+    // 该行的 errText 带 `[upstream:…]` 前缀（`withUpstreamPath` 打的）⇒ 证明这行来自上游端点层的
+    // 真实失败（而非本地异常），且 `first_byte_latency_ms` 已由本轮 `onAttemptFailure` 捕获。
+    expect(String(failedRows[0]?.errorMessage)).toContain('upstream rate limit exceeded');
+    expect(String(failedRows[0]?.errorMessage)).toContain('[upstream:/v1/responses]');
+  });
+
+  it('does not carry a previous round first-byte latency into a later round Gemini failure', async () => {
+    // R6 跨轮：轮 0 上游 500（观测到首字节 ⇒ 真值），轮 1 网络类失败（`endpointFlow` 合成的 502 无 meta）。
+    // 轮 1 的失败行必须是 null（不得把轮 0 的延迟当成自己的值写出去）。
+    selectChannelMock.mockReturnValue({
+      channel: { id: 41, routeId: 22 },
+      site: { id: 77, name: 'openai-site', url: 'https://api.openai.com', platform: 'openai' },
+      account: { id: 37, username: 'openai-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'openai-access-token',
+      actualModel: 'gpt-4.1',
+    });
+    selectNextChannelMock.mockReturnValue({
+      channel: { id: 42, routeId: 22 },
+      site: { id: 78, name: 'openai-site-2', url: 'https://api.openai.com', platform: 'openai' },
+      account: { id: 38, username: 'openai-user-2@example.com' },
+      tokenName: 'fallback',
+      tokenValue: 'openai-access-token-2',
+      actualModel: 'gpt-4.1',
+    });
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'upstream rate limit exceeded' },
+      }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockRejectedValue(new Error('ECONNRESET'));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: { authorization: 'Bearer fixture-managed-gemini-key' },
+      payload: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+    });
+
+    expect(response.statusCode).toBe(502);
+    const failedRows = dbInsertValuesMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .filter((values) => values.status === 'failed');
+    expect(failedRows.length).toBeGreaterThanOrEqual(2);
+    // 轮 0 确实观测到了（证明夹具真能产出真值，不是「全都为 null 蒙对了」）。
+    expect(failedRows[0]).toMatchObject({ httpStatus: 500, firstByteLatencyMs: expect.any(Number) });
+    // 轮 1（及之后）没有观测 ⇒ null，不得沿用轮 0 的值。
+    expect(failedRows.at(-1)).toMatchObject({ httpStatus: 502, firstByteLatencyMs: null });
   });
 });

@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asc, eq } from 'drizzle-orm';
+import { config } from '../../config.js';
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
@@ -221,5 +222,135 @@ describe('/v1/completions site api endpoint rotation', () => {
       url: 'https://api-b.example.com',
     });
     expect(storedEndpoints[1]?.lastSelectedAt).toBeTruthy();
+  });
+
+  it('writes the real client_http_status on the in-band completion failure row', async () => {
+    // O8 R4（P2）：completions 的「带内失败」出口（`detectProxyFailure` 命中失败关键词）此前未传
+    // `client_http_status`（该列恒 NULL）。本出口不重试时 respond `failure.status` ⇒ 客户端实收 502。
+    // 重试次数钉成 0，保证只走一轮、只写一条失败行。
+    const previousAttempts = (config as any).proxyMaxChannelAttempts;
+    const previousKeywords = config.proxyErrorKeywords;
+    (config as any).proxyMaxChannelAttempts = 1;
+    config.proxyErrorKeywords = ['bad gateway'];
+    try {
+      const site = await db.insert(schema.sites).values({
+        name: 'completion-in-band-failure',
+        url: 'https://console.example.com',
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: 'completion-in-band-user',
+        accessToken: '',
+        apiToken: 'sk-inband',
+        status: 'active',
+        checkinEnabled: false,
+        extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+      }).returning().get();
+
+      await db.insert(schema.siteApiEndpoints).values({
+        siteId: site.id,
+        url: 'https://api-inband.example.com',
+        enabled: true,
+        sortOrder: 0,
+      }).run();
+
+      selectChannelMock.mockResolvedValue({
+        channel: { id: 11, routeId: 22 },
+        site,
+        account,
+        tokenName: 'default',
+        tokenValue: 'sk-inband',
+        actualModel: 'gpt-4o-mini',
+      });
+      selectNextChannelMock.mockResolvedValue(null);
+      // 200 + 命中失败关键词的正文 ⇒ 走带内失败出口（不是端点池的 5xx 轮换）。
+      fetchMock.mockResolvedValue(new Response('bad gateway', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/completions',
+        headers: {
+          authorization: 'Bearer fixture-downstream-key',
+        },
+        payload: {
+          model: 'gpt-4o-mini',
+          prompt: 'hello',
+        },
+      });
+
+      expect(response.statusCode).toBe(502);
+      expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed',
+        httpStatus: 502,
+        clientHttpStatus: 502,
+      }));
+    } finally {
+      (config as any).proxyMaxChannelAttempts = previousAttempts;
+      config.proxyErrorKeywords = previousKeywords;
+    }
+  });
+
+  it('writes the real client_http_status on the completion network-failure row', async () => {
+    // O8 R4（P2）：completions helper 的 catch 失败行此前未传 `client_http_status`（该列恒 NULL）。
+    // 网络类失败：日志 `http_status = 0`，respond 兜底 502 ⇒ 两列必须不同。
+    const site = await db.insert(schema.sites).values({
+      name: 'completion-network-failure',
+      url: 'https://console.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'completion-network-user',
+      accessToken: '',
+      apiToken: 'sk-network',
+      status: 'active',
+      checkinEnabled: false,
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-network.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).run();
+
+    selectChannelMock.mockResolvedValue({
+      channel: { id: 11, routeId: 22 },
+      site,
+      account,
+      tokenName: 'default',
+      tokenValue: 'sk-network',
+      actualModel: 'gpt-4o-mini',
+    });
+    selectNextChannelMock.mockResolvedValue(null);
+    fetchMock.mockRejectedValue(new Error('ECONNRESET'));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/completions',
+      headers: {
+        authorization: 'Bearer fixture-downstream-key',
+      },
+      payload: {
+        model: 'gpt-4o-mini',
+        prompt: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      httpStatus: 0,
+      clientHttpStatus: 502,
+    }));
   });
 });

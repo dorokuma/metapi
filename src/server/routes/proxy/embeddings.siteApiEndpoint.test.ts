@@ -212,4 +212,63 @@ describe('/v1/embeddings usage source logging', () => {
       resolvedUsage: expect.objectContaining({ cacheCreationTokens1h: 330 }),
     }));
   });
+
+  it('writes the real client_http_status on the embedding upstream-failure row', async () => {
+    // O8 R4（P2）：embeddings helper 的失败行此前未传 `client_http_status`（该列恒 NULL）。
+    // 本用例取「网络类失败（拿不到上游响应）」：日志 `http_status = 0`，而 respond 兜底 502 ⇒
+    // 两列必须不同（写 `-1` 哨兵或直接抄 `httpStatus` 都会在此拆穿）。
+    const site = await db.insert(schema.sites).values({
+      name: 'failure-site',
+      url: 'https://console.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'failure-user',
+      accessToken: '',
+      apiToken: 'sk-failure',
+      status: 'active',
+      checkinEnabled: false,
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-failure.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).run();
+
+    selectChannelMock.mockResolvedValue({
+      channel: { id: 11, routeId: 22 },
+      site,
+      account,
+      tokenName: 'default',
+      tokenValue: 'sk-failure',
+      actualModel: 'text-embedding-3-large',
+    });
+
+    fetchMock.mockRejectedValue(new Error('ECONNRESET'));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: {
+        authorization: 'Bearer fixture-downstream-key',
+      },
+      payload: {
+        model: 'text-embedding-3-large',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      httpStatus: 0,
+      clientHttpStatus: 502,
+    }));
+  });
 });

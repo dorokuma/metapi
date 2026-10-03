@@ -62,4 +62,40 @@ describe('docker workflows', () => {
     expect(workflow).toContain('tag="${GHCR_IMAGE}:${IMAGE_TAG}"');
     expect(workflow).not.toContain('tag="${GHCR_IMAGE}:${{ inputs.tag }}"');
   });
+
+  it('bounds the compose switch-note history the deploy script writes', () => {
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-painless.sh'), 'utf8');
+
+    // 切换注释块只保留最近 KEEP_ENTRIES 条（本次 + 上一条），不再只追加不清理。
+    expect(script).toContain('KEEP_ENTRIES = 2');
+    expect(script).toContain('entry_head = re.compile(');
+    expect(script).toContain('entry_rollback = re.compile(');
+    expect(script).toContain('if heads and len(heads) > keep_count:');
+    expect(script).toContain('if not is_note_line(line)');
+    // 本次这条的文案/位置与旧行为一致（镜像、prev、compose 备份路径、恢复指引）。
+    expect(script).toContain('# %s switched to %s; prev %s');
+    expect(script).toContain('# rollback: 恢复 %s 或把 image 改回 %s 后 docker compose up -d');
+    expect(script).toContain('kept + [note, "    image: %s\\n" % image]');
+    // 旧的无界写法（只追加、从不清理）不得回归。
+    expect(script).not.toContain('out += [note, "    image: %s\\n" % image]');
+    expect(script).not.toContain('out, done = [], False');
+  });
+
+  it('covers the compose rewrite window with the rollback path', () => {
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-painless.sh'), 'utf8');
+
+    // 切换前的备份、python 改写、改后 `compose config -q` 三道动作的相对次序：
+    const backupIdx = script.indexOf('cp -f "$COMPOSE_FILE" "$COMPOSE_BAK"');
+    const rewriteIdx = script.indexOf('python3 - "$COMPOSE_FILE"');
+    const configCheckIdx = script.indexOf('compose config -q || die "改后 compose 校验失败"');
+    // `SWITCHED=1` 必须在备份之后、改写之前 ⇒ 改写窗口内的任何退出（含 `config -q` 失败与信号）
+    // 都归 trap 的 rollback 管（恢复 `.pre-*` 备份），不会把改写后的 compose 留在盘上。
+    const switchedIdx = backupIdx < 0 ? -1 : script.indexOf('SWITCHED=1', backupIdx);
+    expect(backupIdx).toBeGreaterThan(-1);
+    expect(switchedIdx).toBeGreaterThan(backupIdx);
+    expect(switchedIdx).toBeLessThan(rewriteIdx);
+    expect(switchedIdx).toBeLessThan(configCheckIdx);
+    // 旧的置位位置（`compose up -d` 之前）不得回归：整脚本只有一处 `SWITCHED=1`。
+    expect(script.split('\n').filter((line) => line.trim() === 'SWITCHED=1')).toHaveLength(1);
+  });
 });

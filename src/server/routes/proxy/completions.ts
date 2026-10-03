@@ -317,6 +317,8 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             downstreamPath,
             isStream,
             firstByteLatencyMs,
+            // 客户端实收：本出口不重试时响应 `failure.status`（重试耗尽分支同码）。
+            failure.status,
           );
 
           if (shouldRetryProxyRequest(failure.status, errText) && canRetryChannelSelection(retryCount, forcedChannelId)) {
@@ -453,6 +455,8 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           downstreamPath,
           isStream,
           firstByteLatencyMs,
+          // 客户端实收：`status > 0` 时原样回传，网络类失败（status = 0）由 respond 兜底 502。
+          status || 502,
         );
         if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
           await reportTokenExpired({
@@ -502,6 +506,7 @@ async function logProxy(
   downstreamPath = '/v1/completions',
   isStream: boolean,
   firstByteLatencyMs: number | null,
+  clientHttpStatus: number | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -524,6 +529,7 @@ async function logProxy(
       modelActual: selected.actualModel || modelRequested,
       status,
       httpStatus,
+      clientHttpStatus,
       isStream,
       firstByteLatencyMs,
       latencyMs,

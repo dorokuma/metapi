@@ -147,7 +147,15 @@ const SENSITIVE_HEADER_NAMES = new Set([
  * - `api-key`：切词后不可达（`api-key` → `['api','key']`）——保留为清单镜像，两种写法已分别由 `key` 词元与
  *   下方既有 `api-key` 子串规则覆盖；
  * - `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth`：各自写法
- *   （`x-amz-signature` / `x-auth-key` / `x-custom-site-token` …）。
+ *   （`x-amz-signature` / `x-auth-key` / `x-custom-site-token` …）；
+ * - `authorization` / `authentication`：**长形变体头名**。裸 `authorization` 早就在上方精确名单里，但
+ *   `x-authorization` / `authentication` / `x-authentication` 这类变体切词后是 `authorization` /
+ *   `authentication`，`auth` 词元盖不住（词元是**整个**短横段，不是前缀）⇒ 改前这些名字的值明文落库
+ *   （生产探针实测 0 命中，不排除客户端/网关未发这类头；站点 `customHeaders` 允许任意头名，故必须补上）。
+ *
+ * **代价（已知的过掩码）**：`x-authentication-method`（典型值 `basic` / `bearer` / `oauth2`，本身不是凭据）
+ * 会被一并掩码。取「宁多勿漏」：过掩码只损失一条非密钥的调试元数据，漏掩码则是一个可离线爆破的凭据
+ * 存量（与 `auth` 词元的既有代价一致，不为此加例外表——例外表本身会成为新的漏网面）。
  */
 const SENSITIVE_HEADER_TOKENS = new Set([
   'key',
@@ -160,6 +168,8 @@ const SENSITIVE_HEADER_TOKENS = new Set([
   'credential',
   'signature',
   'auth',
+  'authorization',
+  'authentication',
 ]);
 
 /**

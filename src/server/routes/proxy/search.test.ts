@@ -10,10 +10,13 @@ const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const estimateProxyCostMock = vi.fn(async () => 0);
+const proxyLogValuesMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
+  values: (values?: any) => {
+    // O8 R4：把每次写入的取值原样留证，才能断言 `client_http_status` 真的进了写侧。
+    proxyLogValuesMock(values);
+    return { run: () => undefined };
+  },
 }));
 
 vi.mock('undici', async () => {
@@ -79,7 +82,7 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogBillingDetailsColumn: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
-  hasProxyLogClientHttpStatusColumn: async () => false,
+  hasProxyLogClientHttpStatusColumn: async () => true,
   hasProxyLogStreamTimingColumns: async () => false,
   schema: {
     proxyLogs: {},
@@ -157,6 +160,33 @@ describe('/v1/search route', () => {
       query: 'axonhub',
       max_results: 10,
       model: '__search',
+    });
+  });
+
+  it('writes the real client_http_status on the search upstream-failure row', async () => {
+    // O8 R4（P2）：search helper 的失败行此前未传 `client_http_status`（该列恒 NULL）。
+    // 网络类失败（拿不到上游响应）：日志 `http_status = 0`，而 respond 兜底 502 ⇒ 两列必须不同。
+    fetchMock.mockRejectedValue(new Error('ECONNRESET'));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: {
+        authorization: 'Bearer sk-demo',
+      },
+      payload: {
+        query: 'axonhub',
+      },
+    });
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    const failedValues = proxyLogValuesMock.mock.calls
+      .map((call) => call[0])
+      .find((values) => values && values.status === 'failed');
+    expect(failedValues).toMatchObject({
+      status: 'failed',
+      httpStatus: 0,
+      clientHttpStatus: 502,
     });
   });
 

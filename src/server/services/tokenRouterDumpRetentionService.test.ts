@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { retainTokenRouterDumps, TokenRouterDumpRetentionDeps } from './tokenRouterDumpRetentionService.js';
 
 const PREFIX = 'metapi-token-router-selection-';
@@ -23,8 +23,109 @@ function getLockPath(): string {
   return join(ensurePrivateRoot(), '.metapi-token-router-dump-retention.lock');
 }
 
+const FLOCK_BIN = '/usr/bin/flock';
+
+/** A detached `flock` process used as an external lock holder. */
+type LockHolder = ReturnType<typeof spawn>;
+
+/**
+ * Spawns a detached `flock` holder on `lockPath`.
+ *
+ * `/usr/bin/flock` forks the command it is given and both processes inherit the
+ * same open file description (fd 3), so a flock(2) lock — which belongs to the
+ * file description, not to an individual fd — is released only once the *last*
+ * fd on that description is closed, i.e. after the forked command (`sleep`) has
+ * exited as well. Always kill holders via `killLockHolder` so the whole process
+ * group is taken down.
+ */
+function spawnLockHolder(lockPath: string): LockHolder {
+  const child = spawn(FLOCK_BIN, ['-x', lockPath, '-c', 'echo LOCKED; sleep 1000'], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (!child.pid) {
+    throw new Error('spawn flock child failed');
+  }
+  return child;
+}
+
+/**
+ * Resolves once the holder signalled that it owns the lock (up to ~5s), so the
+ * caller never has to poll for the lock to be in place.
+ */
+async function waitForLockAcquisition(child: LockHolder): Promise<void> {
+  let ready = false;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 5000);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (chunk.toString().includes('LOCKED')) {
+        ready = true;
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+  });
+  if (!ready) {
+    killLockHolder(child);
+    throw new Error('flock child did not acquire lock within 5s');
+  }
+}
+
+/** SIGKILLs the holder's whole process group (`flock` plus the command it forked). */
+function killLockHolder(child: LockHolder): void {
+  if (!child.pid) return;
+  // Once the direct child has been reaped its pid (hence its process group id)
+  // can be recycled by an unrelated group: signalling -pid then would kill
+  // innocent processes. Nothing to release either — a dead holder implies the
+  // group kill already ran (or the group is empty).
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+}
+
+/** Bounded wait. A timeout throws loudly — a wait gate must never fail silently. */
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs: number,
+  description: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for ${description}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/**
+ * True when an exclusive flock on `lockPath` can be taken right now.
+ *
+ * Uses the same kernel primitive as the service but only probes it: nothing is
+ * enumerated or deleted, so it is safe to call from a wait loop. Probe failures
+ * report "not free" so a broken environment fails the bound instead of hanging.
+ */
+function isLockFree(lockPath: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, 'a+');
+  } catch {
+    return false;
+  }
+  try {
+    const probe = spawnSync(FLOCK_BIN, ['-x', '-n', '3'], {
+      stdio: ['ignore', 'ignore', 'ignore', fd],
+      encoding: 'utf8',
+    });
+    return !probe.error && probe.status === 0;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 describe('tokenRouterDumpRetentionService', () => {
   let createdDirs: string[] = [];
+  let lockHolders: LockHolder[] = [];
 
   function countMatchingDirs(root: string): number {
     let count = 0;
@@ -53,6 +154,11 @@ describe('tokenRouterDumpRetentionService', () => {
 
   beforeEach(() => {
     createdDirs = [];
+    // Reap lock holders left behind by an earlier (possibly failed) test: a
+    // surviving `sleep` still owns an fd on the lock file's file description,
+    // which would keep the flock alive into the next test's window.
+    for (const holder of lockHolders) killLockHolder(holder);
+    lockHolders = [];
     const root = ensurePrivateRoot();
     // Clean up any leftover dump dirs in our private root from previous tests.
     try {
@@ -67,6 +173,8 @@ describe('tokenRouterDumpRetentionService', () => {
   });
 
   afterAll(() => {
+    for (const holder of lockHolders) killLockHolder(holder);
+    lockHolders = [];
     for (const dir of createdDirs) {
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
@@ -210,31 +318,9 @@ describe('tokenRouterDumpRetentionService', () => {
     // Spawn a detached child that holds an exclusive flock on lockPath.
     // The child echoes LOCKED once it has acquired the lock, so we can
     // deterministically wait for that marker instead of polling pkill.
-    const child = spawn('/usr/bin/flock', ['-x', lockPath, '-c', 'echo LOCKED; sleep 1000'], {
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (!child.pid) {
-      throw new Error('spawn flock child failed');
-    }
-
-    // Wait for the child to signal that it holds the lock (up to ~5s).
-    let childReady = false;
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => resolve(), 5000);
-      child.stdout?.on('data', (chunk: Buffer) => {
-        const text = chunk.toString();
-        if (text.includes('LOCKED')) {
-          childReady = true;
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-    });
-    if (!childReady) {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
-      throw new Error('flock child did not acquire lock within 5s');
-    }
+    const child = spawnLockHolder(lockPath);
+    lockHolders.push(child);
+    await waitForLockAcquisition(child);
 
     const originalWarn = console.warn;
     const warnSpy = vi.fn((...args: unknown[]) => originalWarn(...args));
@@ -260,7 +346,7 @@ describe('tokenRouterDumpRetentionService', () => {
     expect(result.deletedExcess).toBe(0);
 
     // Cleanup: kill child and remove lock file
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+    killLockHolder(child);
     try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
   });
 
@@ -365,38 +451,16 @@ describe('tokenRouterDumpRetentionService', () => {
     expect(lockFileContent).toBe(`${process.pid}\t${fixedNow}\n`);
   });
 
-  it('recovers immediately after lock holder is SIGKILLd', async () => {
+  it('recovers immediately after lock holder is SIGKILLd', { timeout: 30_000 }, async () => {
     const root = ensurePrivateRoot();
     const dir = createDumpDir(root);
     const lockPath = getLockPath();
 
     // Spawn a detached child that holds an exclusive flock on lockPath.
     // The child echoes LOCKED once it has acquired the lock.
-    const child = spawn('/usr/bin/flock', ['-x', lockPath, '-c', 'echo LOCKED; sleep 1000'], {
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (!child.pid) {
-      throw new Error('spawn flock child failed');
-    }
-
-    // Wait for the child to signal that it holds the lock (up to ~5s).
-    let childReady = false;
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => resolve(), 5000);
-      child.stdout?.on('data', (chunk: Buffer) => {
-        const text = chunk.toString();
-        if (text.includes('LOCKED')) {
-          childReady = true;
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-    });
-    if (!childReady) {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
-      throw new Error('flock child did not acquire lock within 5s');
-    }
+    const child = spawnLockHolder(lockPath);
+    lockHolders.push(child);
+    await waitForLockAcquisition(child);
 
     // First call should skip (lock held)
     const blockedResult = retainTokenRouterDumps({
@@ -407,10 +471,32 @@ describe('tokenRouterDumpRetentionService', () => {
     });
     expect(blockedResult.deletedExpired).toBe(0);
 
-    // SIGKILL the child — kernel closes fd, lock released immediately
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+    // SIGKILL the holder's whole process group, then wait until the kernel has
+    // really released the lock before asserting recovery.
+    //
+    // Why the direct child's 'exit' event is not enough (root cause of the CI
+    // flake in run 37098506495, test file unchanged since 8e127dae):
+    // /usr/bin/flock forks the command it was given (`sh -c 'echo LOCKED; sleep
+    // 1000'`, dash execs the trailing `sleep`), and *both* processes inherit the
+    // same open file description (fd 3, verified via /proc/<pid>/fd and lsof).
+    // flock(2) attaches the lock to the file description, so the kernel drops it
+    // only when the last fd on that description is closed — i.e. after `sleep`
+    // has exited too, not when the `flock` process itself is reaped. The two
+    // deaths are not ordered against this process: on an idle machine the
+    // forked command's fd is released ~1-2ms *before* 'exit' is observed (so the
+    // old version passed by a hair), but under load the ordering flips. A repro
+    // with 3x CPU oversubscription measured the release lagging 'exit' by
+    // 50-135ms, and the second call — which needs ~2ms — then raced the
+    // still-held lock and returned deletedExpired=0 together with the service's
+    // "[token-router-dump-retention] cleanup lock held by another process" warn.
+    //
+    // The bounded wait below gates on the *kernel* state (lock is free), which is
+    // the precondition this test needs; it is not a retry of the service call:
+    // the service must still succeed on its very first attempt after the release,
+    // and the gate throws (fails) if the lock is never released.
+    killLockHolder(child);
 
-    // Wait for child to die (async once on 'exit', with ~5s fallback)
+    // Wait for the direct child to die (async once on 'exit', with ~5s fallback)
     const deathPromise = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => resolve(), 5000);
       child.once('exit', () => {
@@ -420,6 +506,12 @@ describe('tokenRouterDumpRetentionService', () => {
     });
     await deathPromise;
 
+    await waitForCondition(
+      () => isLockFree(lockPath),
+      5_000,
+      'the kernel to release the flock after the holder process group was SIGKILLd',
+    );
+
     // Second call should succeed (lock released by kernel on child death)
     const recoveredResult = retainTokenRouterDumps({
       prefix: PREFIX,
@@ -428,10 +520,15 @@ describe('tokenRouterDumpRetentionService', () => {
       maxCount: 10,
     });
 
-    expect(recoveredResult.deletedExpired).toBeGreaterThanOrEqual(1);
+    expect(
+      recoveredResult.deletedExpired,
+      'the lock is free and the dump dir is expired, so the first call after the release must delete it '
+        + '(if the service reported the lock as held again, see its [token-router-dump-retention] warning above)',
+    ).toBeGreaterThanOrEqual(1);
     expect(require('node:fs').existsSync(dir)).toBe(false);
 
     // Cleanup
     try { rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+    killLockHolder(child);
   });
 });

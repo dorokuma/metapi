@@ -192,7 +192,7 @@ describe('/v1/embeddings usage source logging', () => {
       method: 'POST',
       url: '/v1/embeddings',
       headers: {
-        authorization: 'Bearer sk-downstream',
+        authorization: 'Bearer downstream-token',
       },
       payload: {
         model: 'text-embedding-3-large',

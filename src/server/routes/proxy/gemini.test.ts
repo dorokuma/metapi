@@ -233,7 +233,7 @@ describe('gemini native proxy routes', () => {
     authorizeDownstreamTokenMock.mockResolvedValue({
       ok: true,
       source: 'global',
-      token: 'sk-managed-gemini',
+      token: 'managed-gemini-token',
       policy: {},
     });
     fetchModelPricingCatalogMock.mockResolvedValue(null);
@@ -276,7 +276,7 @@ describe('gemini native proxy routes', () => {
       method: 'GET',
       url: '/v1beta/models',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
     });
 
@@ -321,7 +321,7 @@ describe('gemini native proxy routes', () => {
       method: 'GET',
       url: '/v1beta/models',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
     });
 
@@ -363,7 +363,7 @@ describe('gemini native proxy routes', () => {
       url: '/v1beta/models',
       remoteAddress: '127.0.0.1',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
         'x-metapi-tester-request': '1',
         'x-metapi-tester-forced-channel-id': '77',
       },
@@ -421,7 +421,7 @@ describe('gemini native proxy routes', () => {
       method: 'GET',
       url: '/v1beta/models',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
     });
 
@@ -459,7 +459,7 @@ describe('gemini native proxy routes', () => {
       method: 'GET',
       url: '/v1beta/models',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
     });
 
@@ -503,7 +503,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -584,7 +584,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-pro:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -695,7 +695,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-pro:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -774,7 +774,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-pro:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -837,7 +837,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -949,7 +949,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1023,7 +1023,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1internal:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         model: 'gpt-4.1',
@@ -1130,7 +1130,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1190,7 +1190,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-3-pro-preview:generateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1288,7 +1288,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1internal:streamGenerateContent',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         model: 'gemini-2.5-pro',
@@ -1343,7 +1343,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1internal:countTokens',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
       payload: {
         model: 'gemini-2.5-pro',
@@ -1384,7 +1384,7 @@ describe('gemini native proxy routes', () => {
     authorizeDownstreamTokenMock.mockResolvedValue({
       ok: true,
       source: 'managed',
-      token: 'sk-managed-gemini',
+      token: 'managed-gemini-token',
       key: { id: 91 },
       policy: { supportedModels: ['gemini-2.5-flash'], allowedRouteIds: [], siteWeightMultipliers: {} },
     });
@@ -1408,7 +1408,7 @@ describe('gemini native proxy routes', () => {
       method: 'GET',
       url: '/v1beta/models',
       headers: {
-        authorization: 'Bearer sk-managed-gemini',
+        authorization: 'Bearer managed-gemini-token',
       },
     });
 
@@ -1450,7 +1450,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1510,7 +1510,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1566,7 +1566,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/gemini/v1/models/gemini-2.5-flash:generateContent?alt=json',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1621,7 +1621,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         systemInstruction: {
@@ -1742,7 +1742,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1787,7 +1787,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-3-pro:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         reasoning_effort: 'high',
@@ -1835,7 +1835,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1920,7 +1920,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [
@@ -1973,7 +1973,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -2026,7 +2026,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -2072,7 +2072,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -2115,7 +2115,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:generateContent',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -2163,7 +2163,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -2213,7 +2213,7 @@ describe('gemini native proxy routes', () => {
       method: 'POST',
       url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
       headers: {
-        'x-goog-api-key': 'sk-managed-gemini',
+        'x-goog-api-key': 'managed-gemini-token',
       },
       payload: {
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],

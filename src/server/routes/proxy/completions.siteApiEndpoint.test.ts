@@ -189,7 +189,7 @@ describe('/v1/completions site api endpoint rotation', () => {
       method: 'POST',
       url: '/v1/completions',
       headers: {
-        authorization: 'Bearer sk-downstream',
+        authorization: 'Bearer downstream-token',
       },
       payload: {
         model: 'gpt-4o-mini',

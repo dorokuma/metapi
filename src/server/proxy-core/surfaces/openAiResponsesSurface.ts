@@ -1127,6 +1127,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	                  selected,
 	                  requestedModel,
                   modelName,
+                  // 观测列：本出口只在 `if (isStream)` 内可达，`isStream` 取自本轮请求解析结果（非硬编码）；
+                  // `firstByteLatencyMs` 取上游响应观测到的首字节延迟（未观测到 ⇒ null），与成功出口同源。
+                  isStream,
+                  firstByteLatencyMs,
                   errorMessage: streamResult.errorMessage,
                   latencyMs: latency,
                   retryCount,
@@ -1223,6 +1227,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	                selected,
 	                requestedModel,
                 modelName,
+                // 观测列：同上，本出口只在 `if (isStream)` 内可达；首字节已在读取上游 body 时到达。
+                isStream,
+                firstByteLatencyMs,
                 errorMessage: streamResult.errorMessage,
                 latencyMs: latency,
                 retryCount,
@@ -1312,6 +1319,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   selected,
                   requestedModel,
                   modelName,
+                  // 观测列：同上，本出口只在 `if (isStream)` 内可达；首字节已在 `readRuntimeResponseText` 时到达。
+                  isStream,
+                  firstByteLatencyMs,
                   errorMessage: streamResult.errorMessage,
                   latencyMs: latency,
                   retryCount,
@@ -1378,6 +1388,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	              selected,
 	              requestedModel,
               modelName,
+              // 观测列：同上，本出口只在 `if (isStream)` 内可达；断流发生在首字节之后（reader 已读到过块）。
+              isStream,
+              firstByteLatencyMs,
               errorMessage: streamResult.errorMessage,
               latencyMs: latency,
               retryCount,

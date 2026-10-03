@@ -469,7 +469,7 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
   - `.agents/notes/20261002-client-visible-failure-semantics.md`、本文件
 - **验证**：见下方第 6 条（本片与 R2 合跑的最终全量 / typecheck / drift 统计）；逐轮先红后绿证据：R1 `/tmp/mark1790955/{red,green}`（3 例红：两处降级行两列俱 NULL + 调试库含明文）、R2-1 `/tmp/mark1790985034/{red,green}`（仅回退词元判定 ⇒ 6 个头名漏网整组变红）。
 - **交付物**：代码、测试、笔记与本条持续变更日志。
-- **状态**：已完成（**未提交**）。遗留登记：O-d（**8 处**流式失败出口仍未传 `is_stream` / `firstByteLatencyMs`：chat 面 4 + responses 面 4，行号清单见笔记「遗留与跟进」O-d）；URL 侧 `key=`（`target_url` 落库，生产命中 0，未处理）；历史明文行是否提前清理 / 轮换密钥由用户决定（`proxy_debug_*` 默认 24h 保留期会自然过期）。
+- **状态**：已完成（**未提交**）。遗留登记：O-d（**8 处**流式失败出口仍未传 `is_stream` / `firstByteLatencyMs`：chat 面 4 + responses 面 4，行号清单见笔记「遗留与跟进」O-d；**该遗留已于 2026-10-03 第 1 条收尾——本条保留为当时的事实记录**）；URL 侧 `key=`（`target_url` 落库，生产命中 0，未处理）；历史明文行是否提前清理 / 轮换密钥由用户决定（`proxy_debug_*` 默认 24h 保留期会自然过期）。
 
 ### 6. fix-A 本批全量与静态检查统计（验证记录）
 
@@ -493,6 +493,34 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **验证**：`npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）；`npm run typecheck` 四段 exit 0（均打 `metapi@1.4.16`）；`npm run build` exit 0（web `✓ built in 6.84s` + build:server + build:desktop）；`npm run repo:drift-check` `Violations: 0`（5 条预存 tracked debt）。日志 `/tmp/mark1790986024-*.txt`。
 - **交付物**：版本号、CHANGELOG 条目、文档口径订正、本条日志。
 - **状态**：已完成（**未提交**）。发版动作（`scripts/deploy-painless.sh --version 1.4.16 --yes` 及验收/收尾）不在本条范围：本步**未执行任何 git 写操作，未触碰容器 / 生产库 / 生产设置**。
+
+## 2026-10-03
+
+### 1. 流式失败出口补齐 `is_stream` / `first_byte_latency_ms`（遗留 O-d 收尾）
+
+- **类型**：缺陷修复（观测列缺口）
+- **需求来源**：本会话需求（任务标记 `MARK-FIX-OD-1790969`；无 GitHub Issue 链接）——1.4.16 上线后复核发现的观测缺口收尾项（笔记 `.agents/notes/20261002-client-visible-failure-semantics.md` 遗留清单 O-d）
+- **目标**：`recordStreamFailure` 的 **8 处**调用点（chat 面 4 + responses 面 4）此前都没传 `isStream` / `firstByteLatencyMs`，导致这类流式失败落的 `proxy_logs` 行 `is_stream` 与 `first_byte_latency_ms` 恒 NULL；本轮按**真实取值**补齐（不硬编码 `true`、不编造延迟）。
+- **实现范围**：
+  - chat 面 4 处（`src/server/proxy-core/surfaces/chatSurface.ts`）：gemini 原生 reader 出口、非 SSE content-type 的「单块」出口、非 SSE JSON 体的 `consumeUpstreamFinalPayload` 出口、SSE reader 出口；
+  - responses 面 4 处（`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`）：单块出口、`consumeUpstreamFinalPayload` 出口、websocket transport 单块出口、SSE reader 出口；
+  - **取值口径**：`isStream` 传本轮请求解析结果变量（chat `requestEnvelope.parsed.isStream` / responses `requestEnvelope.stream`——8 处都在各自 `if (isStream)` 块内 ⇒ 运行期恒 `true`，但未写死字面量，与既有 `onDowngrade` 出口同口径）；`firstByteLatencyMs` 传与成功出口同源的 `getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null`（语义 = **上游**响应首字节延迟；观测不到就是 NULL，天然覆盖「失败发生在首字节之前 ⇒ 保持 NULL」而不需逐点特判）。8 处的上游 response 都已取到首块 / 已读完 body ⇒ 均落真实延迟（逐处情形见笔记 O-d 条目）。
+  - **相邻出口不在本轮**：SSE 中途 `terminated`（`reader.read()` 抛）**不走**这 8 处，异常冒泡到外层 catch → `handleExecutionError`，其 `firstByteLatencyMs` 恒 NULL 属遗留 **O8**（未修）。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/chatSurface.ts`
+  - `src/server/proxy-core/surfaces/openAiResponsesSurface.ts`
+  - `src/server/routes/proxy/chat.stream.test.ts`
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`、本文件
+- **验证**：
+  - **先红后绿**：`chat.stream.test.ts` 新增 2 例（分别覆盖 chat / responses 面各 3 个出口：reader / 单块 / final payload），断言落库取值 `isStream === true` + `firstByteLatencyMs` 为真实 number。
+    - 红（仅回退 8 处传参、保留用例）：`Tests 2 failed | 115 skipped`，两例 diff 逐条显示 6 个子场景均为 `isStream: undefined` / `firstByteLatencyMs: undefined`（两列未进写侧取值 ⇒ 落库 NULL）｜`/tmp/od/red-focused.txt`。
+    - 绿（还原后）：`Tests 117 passed (117)`（整文件）｜`/tmp/od/green-focused-file.txt`。
+    - 夹具侧说明：该测试文件的 `hasProxyLogStreamTimingColumns` 夹具由 `false` 改为 `true`（置假时 `insertProxyLog` 按设计整列丢弃这两列，断言无法区分「未传」与「传了但被丢」），并新增落库取值留证 mock。
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）；`npm run typecheck` 四段（web / web:test / server / desktop）exit 0｜`/tmp/od/typecheck.txt`。
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3385 passed | 16 skipped (3401)`、223.12s（基线 3383 passed ⇒ +2 = 本轮新增 2 例，计数自洽）｜`/tmp/od/full-test.txt`。
+  - `npm run repo:drift-check` `Violations: 0`（仅预存 tracked debt）｜`/tmp/od/drift.txt`。
+- **交付物**：代码、测试、笔记 O-d 条目（改为「已修」并写清 8 处取值口径）、本条持续变更日志。
+- **状态**：已完成（**未提交**，分支 `fix/stream-failure-observability`）。发布版本号留到发版准备轮；本轮未做任何 git 写操作（仅建分支），未触碰容器 / 生产库 / 生产设置。
 
 ## 后续记录模板
 

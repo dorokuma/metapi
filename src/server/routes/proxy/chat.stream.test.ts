@@ -20,11 +20,31 @@ const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) =>
   estimatedCostFromQuota: 0,
   recoveredFromSelfLog: false,
 }));
+const proxyLogValuesMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
+  values: (values?: any) => {
+    // O-d 回归：把每次写入的取值原样留证，才能断言 `is_stream` / `first_byte_latency_ms` 真的进了写侧。
+    proxyLogValuesMock(values);
+    return {
+      run: () => undefined,
+    };
+  },
 }));
+
+/**
+ * 取最近一次写向 `proxy_logs` 的取值对象（`proxy_debug_*` 走同一个 `db.insert`，用只属于 `proxy_logs` 的
+ * `httpStatus` / `retryCount` 两个字段区分）。夹具把 `hasProxyLogStreamTimingColumns` 置真，否则
+ * `insertProxyLog` 会按设计整列丢弃 `is_stream` / `first_byte_latency_ms`，断言就看不出「缺列」。
+ */
+const lastProxyLogValues = (): Record<string, any> | null => {
+  for (let index = proxyLogValuesMock.mock.calls.length - 1; index >= 0; index -= 1) {
+    const values = proxyLogValuesMock.mock.calls[index][0];
+    if (values && typeof values === 'object' && 'httpStatus' in values && 'retryCount' in values) {
+      return values as Record<string, any>;
+    }
+  }
+  return null;
+};
 
 vi.mock('undici', async () => {
   const actual = await vi.importActual<typeof import('undici')>('undici');
@@ -96,7 +116,9 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
   hasProxyLogClientHttpStatusColumn: async () => false,
-  hasProxyLogStreamTimingColumns: async () => false,
+  // 本文件现在要断言 `is_stream` / `first_byte_latency_ms` 是否真的进写侧取值，故置真（置假时
+  // `insertProxyLog` 按设计整列丢弃这两列，断言无法区分「未传」与「传了但被丢」）。
+  hasProxyLogStreamTimingColumns: async () => true,
   schema: {
     proxyLogs: {},
     siteApiEndpoints: {
@@ -135,6 +157,7 @@ describe('chat proxy stream behavior', () => {
     fetchModelPricingCatalogMock.mockReset();
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     dbInsertMock.mockClear();
+    proxyLogValuesMock.mockClear();
     resetUpstreamEndpointRuntimeState();
 
     selectChannelMock.mockReturnValue({
@@ -5455,6 +5478,108 @@ describe('chat proxy stream behavior', () => {
     } finally {
       (config as any).proxyMaxChannelAttempts = previousAttempts;
     }
+  });
+
+  it('records is_stream / first_byte_latency_ms on the chat stream failure exits', async () => {
+    // O-d：这三处非抛异类流式失败出口（① SSE reader 出口，②「看起来像 responses SSE 的单块」出口，
+    // ③ `consumeUpstreamFinalPayload` 出口）此前都没传 `is_stream` / `first_byte_latency_ms` ⇒ 观测列恒 NULL。
+    // 出口由夹具的 upstream content-type 决定（SSE ⇒ reader 出口；非 SSE 文本/JSON ⇒ 另两处）。
+    // 三处取值先收集、最后一次性断言——这样一跑就能看到三处各自的取值，不被首个断言短路。
+    config.proxyEmptyContentFailEnabled = true;
+    const observed: Array<{ exit: string; isStream: unknown; firstByteLatencyMs: unknown }> = [];
+    const captureObserved = (exit: string) => {
+      const row = lastProxyLogValues();
+      // 三个出口都写终态失败行；`errorMessage` 由调用方断言以对应到各夹具。
+      expect(row?.status).toBe('failed');
+      observed.push({ exit, isStream: row?.isStream, firstByteLatencyMs: row?.firstByteLatencyMs });
+      return row;
+    };
+
+    // ① SSE content-type + 空内容 ⇒ `streamSession.run` 返回 failed（不抛异常）。
+    streamSseUpstream('data: {"id":"chatcmpl-empty","choices":[{"delta":{}}]}\n\ndata: [DONE]\n\n');
+    const sseResponse = await injectChatStream();
+    expect(sseResponse.statusCode).toBe(502);
+    expect(String(captureObserved('sse-reader')?.errorMessage)).toContain('empty content');
+
+    // ② content-type 非 SSE，正文是「看起来像 responses SSE」的带内失败帧 ⇒ 单块流出口。
+    proxyLogValuesMock.mockClear();
+    fetchMock.mockResolvedValue(new Response(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"boom-single-chunk"}}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+    ));
+    await injectChatStream();
+    expect(String(captureObserved('non-sse-single-chunk')?.errorMessage)).toContain('boom-single-chunk');
+
+    // ③ content-type 非 SSE、正文是 JSON：带可见正文但被判为带内失败 ⇒ `consumeUpstreamFinalPayload` 出口。
+    proxyLogValuesMock.mockClear();
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-inband-json',
+      type: 'stream_error',
+      message: 'boom-final-payload',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'partial' }, finish_reason: 'stop' }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    await injectChatStream();
+    expect(String(captureObserved('non-sse-final-payload')?.errorMessage)).toContain('boom-final-payload');
+
+    // O-d 判据：三处都必须是「真实流式取值 true」（取自请求解析结果，非硬编码）+「真实首字节延迟」。
+    expect(observed).toEqual([
+      { exit: 'sse-reader', isStream: true, firstByteLatencyMs: expect.any(Number) },
+      { exit: 'non-sse-single-chunk', isStream: true, firstByteLatencyMs: expect.any(Number) },
+      { exit: 'non-sse-final-payload', isStream: true, firstByteLatencyMs: expect.any(Number) },
+    ]);
+  });
+
+  it('records is_stream / first_byte_latency_ms on the responses stream failure exits', async () => {
+    // O-d：responses 面与 chat 面对称的三处非抛异类流式失败出口（reader / 单块 / final payload）。
+    config.proxyEmptyContentFailEnabled = true;
+    const observed: Array<{ exit: string; isStream: unknown; firstByteLatencyMs: unknown }> = [];
+    const captureObserved = (exit: string) => {
+      const row = lastProxyLogValues();
+      expect(row?.status).toBe('failed');
+      observed.push({ exit, isStream: row?.isStream, firstByteLatencyMs: row?.firstByteLatencyMs });
+      return row;
+    };
+    const injectResponsesStream = () => app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: { model: 'gpt-5.2', input: 'hello', stream: true },
+    });
+
+    // ① SSE content-type + 空内容 ⇒ `streamSession.run` 返回 failed。
+    fetchMock.mockResolvedValue(new Response(
+      'data: {"type":"response.completed","response":{"id":"resp-empty","status":"completed","output":[]}}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
+    ));
+    await injectResponsesStream();
+    expect(String(captureObserved('sse-reader')?.errorMessage)).toContain('empty content');
+
+    // ② content-type 非 SSE，正文是「看起来像 responses SSE」的带内失败帧 ⇒ 单块流出口。
+    proxyLogValuesMock.mockClear();
+    fetchMock.mockResolvedValue(new Response(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"boom-single-chunk"}}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+    ));
+    await injectResponsesStream();
+    expect(String(captureObserved('non-sse-single-chunk')?.errorMessage)).toContain('boom-single-chunk');
+
+    // ③ content-type 非 SSE、正文是 responses JSON：有可见输出、但 `type=response.failed` ⇒ final payload 出口。
+    proxyLogValuesMock.mockClear();
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp-inband-json',
+      object: 'response',
+      type: 'response.failed',
+      output_text: 'partial',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial' }] }],
+      error: { message: 'boom-final-payload' },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    await injectResponsesStream();
+    expect(String(captureObserved('non-sse-final-payload')?.errorMessage)).toContain('boom-final-payload');
+
+    expect(observed).toEqual([
+      { exit: 'sse-reader', isStream: true, firstByteLatencyMs: expect.any(Number) },
+      { exit: 'non-sse-single-chunk', isStream: true, firstByteLatencyMs: expect.any(Number) },
+      { exit: 'non-sse-final-payload', isStream: true, firstByteLatencyMs: expect.any(Number) },
+    ]);
   });
 
   // —— 上游「带内错误帧」（HTTP 200 + `text/event-stream`）的识别与原样透传 ——

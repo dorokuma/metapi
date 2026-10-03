@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [1.4.19] - 2026-10-03
+
+### 修复
+
+- **`token-router-dump-retention` 区分 flock 真争锁与环境错误，不再把环境类失败误报成「锁被他人持有」**（`src/server/services/tokenRouterDumpRetentionService.ts`）：`acquireCleanupLock` 此前对 `flock` 的**任何非零退出**都打印同一句 `cleanup lock held by another process`，且**从不读取 stderr** ⇒ 环境类错误（坏 fd、锁文件不可用、文件系统不支持等）被误报为「有其它进程持锁」，把运维引向一个并不存在的持锁进程。
+  - **按 stderr 是否非空分类**：stderr 为空 ＝ 真争锁，**原措辞逐字保留**；stderr 非空 ＝ 环境错误，改用新措辞 `flock failed before it could test the lock (not lock contention)`，并把 **stderr 首行**（`split('\n')[0].trim()`，常量 `FLOCK_STDERR_EXCERPT_LIMIT = 120` 字符上限截断、超长补 `…`）透出到同一条 warn。
+  - **fail-closed 与返回值语义零变化**：两条分支都 `closeSync(fd); return null;`（跳过本轮清理），只是诊断口径不同；锁的获取 / 释放、调用方 `finally` 里的 `closeSync(fd)` 与清理跳过语义一字未改。
+  - **判据依据**：上游 util-linux `sys-utils/flock.c` —— 争锁路径 `case EWOULDBLOCK: case EACCES:` 在非 `--verbose` 时**静默** `exit(conflict_exit_code)`（默认 `1`）；其余所有出口都先 `warn()`/`err()` 到 stderr 再退出，故「stderr 非空 ⇒ 非争锁」成立。并按本服务的实际调用形态（fd 模式 `flock -x -n 3`）在 **util-linux 2.41** 上实测：真争锁 exit 1 且 stderr 空、坏 fd exit 65 且 stderr 非空、`locale` 遍历结论一致。
+  - **测试**（改既有文件 `src/server/services/tokenRouterDumpRetentionService.test.ts`）：**先红后绿**——红态失败原文即那句误报；并新增 **stub 命中计数自检**（`flockFailureStub.hits`），一旦调用形态漂移（例如 `-n` 变成 `-xn`）stub 便不再命中，用例必须变红（已实测复现）。
+  - **范围与未宣称**：本条只改诊断口径，未改动任何决策 / 重试 / 路由 / 计费语义；**未观测到生产环境出现该误报**，此修复是依据上游机制与实测的分类订正，不声称线上已触发。
+
 ## [1.4.18] - 2026-10-03
 
 ### 修复

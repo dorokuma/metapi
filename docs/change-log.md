@@ -718,6 +718,26 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码与测试改动、脚本改动 + `/tmp` 模拟证据与红 / 变异日志、笔记表与 R6 节、CHANGELOG 两条、本条日志。
 - **状态**：已完成（**未提交**，分支 `fix/observability-o8-and-mask-tokens`，并入 1.4.18）。本轮**未做任何 git 写操作**（不 add / commit / push / merge / branch / checkout / stash），**未真跑部署**、未触碰容器 / 生产库 / 生产设置。**遗留**：外层 catch 的 fbl 仍为 `null`（该处无 response 对象，属事实不可得）；count-tokens 路径的 fbl 仍为 `null`（未接首字节观测，属真值不可得）。
 
+### 11. 版本 1.4.19 与发版准备（`MARK-WK-RELEASE-1419-1791027`；不含发版动作）
+
+- **类型**：版本与文档（发版准备）
+- **需求来源**：本会话需求（任务标记 `MARK-WK-RELEASE-1419-1791027`；无 GitHub Issue 链接）——`a095335a`（`fix(token-router-dump-retention): 区分 flock 真争锁与环境错误`）合入 main（现役 main = `a095335a`）后的发版准备。
+- **目标**：按仓库既有发版惯例为 1.4.19 准备提交内容（版本号 + `CHANGELOG.md` + 本文件），并在最终树跑齐门槛；**不含 commit / push / 部署**。
+- **模板与依据（先查明，未凭印象）**：`git show 738b1b18 --stat`（`chore(release): 1.4.18`，即上一版发版提交）= `CHANGELOG.md` / `package-lock.json` / `package.json` **三个文件**；本轮改**同三个文件 + 本文件**（发版日志），逐字照其改法（版本号两文件同法、`CHANGELOG.md` 仍插在 `## [Unreleased]` 之后、`### 修复` 段）。
+- **实现范围**：
+  - **版本**：`package.json` `1.4.18 → 1.4.19`；`package-lock.json` 的**根 `version`** 与 **`packages[""].version`** 两处同步 `1.4.18 → 1.4.19`。
+  - **`CHANGELOG.md`**：`## [Unreleased]` 之后新增 `## [1.4.19] - 2026-10-03`，一条修复——`acquireCleanupLock` 原先对 `flock` 的**任何非零退出**都报 `cleanup lock held by another process`（**从不读取 stderr**）；现按 **stderr 是否非空**分类：为空 ＝ 真争锁（**原措辞逐字保留**），非空 ＝ 环境错误（新措辞 `flock failed before it could test the lock (not lock contention)` + stderr 首行，常量 `FLOCK_STDERR_EXCERPT_LIMIT = 120` 字符上限截断）；fail-closed 与返回值语义零变化（两支都 `closeSync(fd); return null;`）；判据依据上游 util-linux `sys-utils/flock.c` 与 2.41 实测。**未写任何未验证宣称**（明确标注未观测到生产环境出现该误报）。
+  - **本文件**：补本条。
+- **主要文件**：`package.json`、`package-lock.json`、`CHANGELOG.md`、`docs/change-log.md`
+- **验证（五条门槛于 cwd；实跑日志 `/tmp/rel1419/`）**：
+  - `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 **0 字节**）｜`/tmp/rel1419/tsc-server.log`
+  - `npm run typecheck` 四段（web / web:test / server / desktop）exit 0、`error TS` **0** 处、横幅打 `metapi@1.4.19`｜`/tmp/rel1419/typecheck.log`
+  - `npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3410 passed | 16 skipped (3426)`、`221.14s`（与 1.4.18 终态基线 3409 相比 **+1** = `a095335a` 新增的 1 个用例）｜`/tmp/rel1419/full-test.log`
+  - `npm run repo:drift-check` exit 0、`Violations: 0`、`Tracked debt: 5`（均为预存项）｜`/tmp/rel1419/drift.log`
+  - `git diff --check` 零告警（exit 0）
+- **交付物**：版本号（两文件）、`CHANGELOG.md` 1.4.19 段、本条日志、五条门槛日志、`git diff --stat`。
+- **状态**：已完成（**未提交**，分支 `chore/release-1.4.19`）。本轮**未做任何 commit / push / merge / 部署**，未触碰容器 / 生产库 / 生产设置；发版动作（`scripts/deploy-painless.sh --version 1.4.19 --yes` 及验收 / 收尾）不在本条范围。**tag 惯例**：`git tag --list --sort=v:refname` 最新为 `v1.4.0`——仓库**曾有** `v<版本>` 打 tag 的惯例，但 `v1.4.0` 之后（1.4.1–1.4.18）**再未**逐版打 tag，本轮**不打 tag**。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

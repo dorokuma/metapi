@@ -453,6 +453,33 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：版本号、三处日志文档、笔记口径修正。
 - **状态**：已完成（**未提交**）。发版动作（`scripts/deploy-painless.sh --version 1.4.15 --yes` 及之后的验收 / 收尾）不在本条范围：本片**未执行任何 git 写操作，未触碰容器 / 生产库 / 生产设置**。
 
+### 5. 降级出口观测列补齐 + 调试库凭据脱敏（fix-A，含 R2 补丁）
+
+- **类型**：缺陷修复（观测列语义与安全）+ 口径文档订正
+- **需求来源**：本会话需求（任务标记 `MARK-FIX-A-OBS-MASK-1790955`、`MARK-FIX-A-R2-1790985034`；无 GitHub Issue 链接）
+- **目标**：①`proxy_logs` 里由降级出口（`onDowngrade`）写下的行不再两列俱空（`client_http_status` / `is_stream`）；②`proxy_debug_*` 四条头列不再明文保有上游/下游凭据（调试价值保留、明文消失）。
+- **实现范围**：
+  - **降级行补列**：新增 `CLIENT_HTTP_STATUS_NON_TERMINAL = -1`（`proxy-core/surfaces/sharedSurface.ts`），两个降级出口（`chatSurface.ts` / `openAiResponsesSurface.ts` 的 `onDowngrade`）各补写 `clientHttpStatus` 与 `isStream`（流式 `true` / 非流式 `false`）。降级行返回后 `executeEndpointFlow` 会 `continue` 试下一个端点（`orchestration/endpointFlow.ts` 的降级分支，要求 `!isLastEndpoint`）⇒ 降级行**永远不是终态行**，故不写猜测的真实下发码。
+  - **`client_http_status` 三取值语义（写死，R2-3 补登在本条）**：① `100..599` = 真实下发的状态码（终态行，以及按各自既有口径写真实码的非终态行，如预重试出口）；② `-1`（`CLIENT_HTTP_STATUS_NON_TERMINAL`）= **仅表示「该行由 `onDowngrade` 降级出口写入的真实非终态尝试」**，真实码在该请求的终态行上；③ `NULL` = 无法判定（租约超时行 / 非 toolkit 直写日志 / 缺列兜底）。该表述已同步进 `src/server/db/schema.ts` 的列注释与笔记（R2-2 订正：原文写成「全列不变量」不实——降级出口之外的中间来源仍按各自既有口径写真实码或 NULL）。
+  - **调试库头脱敏**：唯一写入点 `services/proxyDebugTraceStore.ts` 的 `serializeHeaders`（四条列咽喉：`proxy_debug_attempts.request_headers_json` / `.response_headers_json` / `proxy_debug_traces.request_headers_json` / `.final_response_headers_json`）接入敏感头掩码；只替换**值**（头名/次序/非敏感头原文保留）为固定占位 `[redacted]`，不写定长哈希（不保留任何原文派生取值）。判定：精确名单（`authorization` / `proxy-authorization` / `cookie` / `set-cookie` / `x-api-key` / `api-key` / `x-goog-api-key`）+ **词元判定**（`key` / `apikey` / `api-key` / `token` / `secret` / `password` / `passwd` / `credential` / `signature` / `auth`，R2-1 升级）+ 保底子串规则；`x-monkey` / `x-request-id` / `content-type` / `x-client` 等不误伤。
+- **主要文件**：
+  - `src/server/proxy-core/surfaces/sharedSurface.ts`、`chatSurface.ts`、`openAiResponsesSurface.ts`
+  - `src/server/services/proxyDebugTraceStore.ts`、`src/server/db/schema.ts`
+  - `src/server/routes/proxy/chat.singleChannelFailure.test.ts`、`src/server/services/proxyDebugTraceStore.test.ts`
+  - `.agents/notes/20261002-client-visible-failure-semantics.md`、本文件
+- **验证**：见下方第 6 条（本片与 R2 合跑的最终全量 / typecheck / drift 统计）；逐轮先红后绿证据：R1 `/tmp/mark1790955/{red,green}`（3 例红：两处降级行两列俱 NULL + 调试库含明文）、R2-1 `/tmp/mark1790985034/{red,green}`（仅回退词元判定 ⇒ 6 个头名漏网整组变红）。
+- **交付物**：代码、测试、笔记与本条持续变更日志。
+- **状态**：已完成（**未提交**）。遗留登记：O-d（**8 处**流式失败出口仍未传 `is_stream` / `firstByteLatencyMs`：chat 面 4 + responses 面 4，行号清单见笔记「遗留与跟进」O-d）；URL 侧 `key=`（`target_url` 落库，生产命中 0，未处理）；历史明文行是否提前清理 / 轮换密钥由用户决定（`proxy_debug_*` 默认 24h 保留期会自然过期）。
+
+### 6. fix-A 本批全量与静态检查统计（验证记录）
+
+- **类型**：验证记录
+- **需求来源**：本会话需求（任务标记 `MARK-FIX-A-OBS-MASK-1790955` + `MARK-FIX-A-R2-1790985034`；无 GitHub Issue 链接）
+- **实现范围**：无代码改动，仅记录本批（R1 + R2）交付的验证结果。
+- **验证**：`npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）；`npm run typecheck` 四段（web / web:test / server / desktop）exit 0；`npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3383 passed | 16 skipped (3399)`、231.21s（R2 基线 3382 passed ⇒ +1 = R2-1 新增用例）；`npm run repo:drift-check` `Violations: 0`（5 条预存 tracked debt）。逐份日志：R1 `/tmp/mark1790955/{red,green}`、R2 `/tmp/mark1790985034/{red,green}`，归档于 `.agents/notes/20261002-client-visible-failure-semantics.md` 对应小节。
+- **交付物**：验证统计（本条）。
+- **状态**：已完成（**未提交**）。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

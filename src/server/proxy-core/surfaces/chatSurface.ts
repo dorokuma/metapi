@@ -63,6 +63,7 @@ import { shouldAbortSameSiteEndpointFallback } from '../../services/proxyRetryPo
 import { applyOpenAiServiceTierPolicy } from '../serviceTierPolicy.js';
 import { maybeHandleWebSearchOnlySimulation } from '../webSearchSimulation.js';
 import {
+  CLIENT_HTTP_STATUS_NON_TERMINAL,
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
   buildSurfaceConcurrencyBusyMessage,
@@ -793,6 +794,12 @@ export async function handleChatSurfaceRequest(
             modelRequested: requestedModel,
             status: 'failed',
             httpStatus: ctx.response.status,
+            // 降级行 = **非终态行**：本轮端点失败后 `endpointFlow` 会继续试下一个端点（`continue`），
+            // 客户端此刻还没收到任何终态结果 ⇒ `client_http_status` 写非终态哨兵（不写猜测值）；
+            // 该请求客户端实收的真实状态码在后续终态行（成功行 / 失败出口行）上。
+            clientHttpStatus: CLIENT_HTTP_STATUS_NON_TERMINAL,
+            // 流式请求一律 true：这一列描述「本轮请求是不是流式」，与该行是否为终态无关。
+            isStream,
             latencyMs: Date.now() - startTime,
             errorMessage: ctx.errText,
             retryCount,

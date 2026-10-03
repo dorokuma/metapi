@@ -197,7 +197,11 @@ oracle 独立复核 R1 后指出**一条仍可静默的路径**：`legacy` 失�
 - **O-a 上游原文进入通道失败分类判据（`MARK-B4-FIX-R1` 增）**：`src/server/services/tokenRouter.ts:399/403/407/411`（`matchesAnyPattern(USAGE_LIMIT_RATE_LIMIT_PATTERNS \| SITE_MODEL_FAILURE_PATTERNS \| SITE_PROTOCOL_FAILURE_PATTERNS \| SITE_VALIDATION_FAILURE_PATTERNS, errorText)`）与 `:517-535`（分类）/`:578-581`（`parseCodexQuotaResetHint`）。带内失败现在会把**上游原文**（含 `Retry after 29s.` 与尾部 `(code=…, request_id=…)`）送进这些子串/正则判据，直接决定「限流冷却 / 模型级失败 / 站点级失败」分流。后缀在尾部、不命中关键词，但**发版后需以真实流量确认分类未被新文本改变**。
 - **O-b responses 面同形帧仍静默（`MARK-B4-FIX-R1` 增）**：`src/server/transformers/openai/responses/proxyStream.ts:167-173` 的 `isFailureEvent` 只认 `event`/`type` ∈ {`error`,`response.failed`}；`{"error":{…},"type":"stream_error"}` 这类形不认（落到 `normalizeEvent` → 无匹配 → 静默）。codex 新版只走 `/v1/responses` ⇒ **本轮的 chat 面修复对它们无效**，需另开一片把同一判据搬过去。
 - **O-c 非 SSE 200 JSON error 体仍可能被 hijack（`MARK-B4-FIX-R1` 增）**：`src/server/transformers/openai/chat/proxyStream.ts:508-512`（`consumeUpstreamFinalPayload` 的 `new` 分类）只 `markFailed`，随后同函数的 openai 分支仍会把归一化 final 块 `emitLines({meaningful:true})` 写出 ⇒ 可能先 hijack 成 200 SSE，客户端拿不到 502。M2 只覆盖「带内帧」，本条不在本轮范围（只报告不改）。
-- **O-d 流式失败出口缺 `is_stream`（`MARK-B4-FIX-R1` 增）**：4 处出口的 `recordStreamFailure({…})`（`src/server/proxy-core/surfaces/chatSurface.ts` 的 `:1102/:1162/:1267/:1348` 之前那段调用）都没传 `isStream`/`firstByteLatencyMs` ⇒ `proxy_logs.is_stream` 在这类失败下恒 NULL（观测列缺一项）。
+- **O-d 流式失败出口缺 `is_stream`（`MARK-B4-FIX-R1` 增；计数由 `MARK-FIX-A-R2-P1` 订正为 8 处）**：**8 个** `recordStreamFailure({…})` 调用点（chat 面 4 + responses 面 4，行号为本轮快照）都没传 `isStream` / `firstByteLatencyMs` ⇒ `proxy_logs.is_stream` 与 `first_byte_latency_ms` 在这类失败下恒 NULL（观测列缺一项）。8 处清单：
+  - `src/server/proxy-core/surfaces/chatSurface.ts:1091`、`:1152`、`:1256`、`:1337`；
+  - `src/server/proxy-core/surfaces/openAiResponsesSurface.ts:1126`、`:1222`、`:1311`、`:1377`。
+  - 逐块核对过入参：8 处均**只**传 `selected` / `requestedModel` / `modelName` / `errorMessage` / `latencyMs` / `retryCount` / `promptTokens` / `completionTokens` / `totalTokens` / `upstreamPath` / `runtimeFailureStatus`，`isStream` 与 `firstByteLatencyMs` 均 **0 命中**；取值器 `sharedSurface.ts:1203` 写的是 `args.isStream ?? null` / `args.firstByteLatencyMs ?? null`。
+  - **订正记录**：原文只写 chat 面那 4 处（`MARK-B4-FIX-R1` 当时只看 chat 面），漏了 responses 面同名 4 处；两者调用形完全一致，缺口同源。
 - **O-e 未覆盖的带内失败形（`MARK-B4-FIX-R1` 增）**：本轮判据只认「顶层 `error` 对象 / `type` 为 `stream_error` / SSE 帧名 `error`」三类。① `choices[].finish_reason === 'error'` 但无顶层 `error` 对象；② SSE 帧名为 `response.failed` 而载荷无 `type` 字段；③ 字符串型 `error`（`{"error":"upstream failed"}`）——三者在 chat 面仍走原归一化链（静默或空内容兜底），需按实测流量决定是否补判据。
 - **R3-① 失败帧之后仍可能写出内容帧（`MARK-B4-R3-LEGACY-GATE-1790933` 增）**：失败帧处理完（`markFailed`）后 `handleEventBlock` **不停止消费上游**——new 形 `proxyStream.ts:457-472`（已写字节分支写帧后 `return`）与 legacy 已写字节分支（`:486-505`）都不终结本轮；上游若在错误帧之后还发内容帧，仍会被归一化并写出。**概率极低**（上游通常在错误帧后停写）但形态存在：客户端会看到「内容帧出现在失败帧之后」，若错误帧被客户端跳过，末态可能只剩上游自带的 `[DONE]`。建议：失败终态后的后续帧只计数不写出（另开一片）。**R4 后**：新加的 claude legacy 分支同样只在帧写完后退回（`proxyStream.ts:496-502`），不终止消费 ⇒ 本观察项对 claude 下游依然成立。
 - **R3-② O1 与 O6 叠加时的「静默窗口」（`MARK-B4-R3-LEGACY-GATE-1790933` 增）**：已 hijack 后走 `handleExecutionError` 仍可能进重试轮（O1：`sharedSurface.ts:1073-1074` + `chatSurface.ts:1550-1571`），而轮首会把 `streamStarted` 重置为 false（`chatSurface.ts:441`）⇒ M2/R3-A 的 `hasStartedDownstreamWrite()` 会把这个失败误判成「未写字节」而**不写帧**；同时 502 出口又因响应头已发被 Fastify `sent` 门禁丢掉（O6：`chatSurface.ts:475`）⇒ **客户端已收到上一轮字节、却拿不到任何失败信号**。与 O1/O6 同一处修复（「已 hijack 即终态、跨轮次不重置」护栏）。
@@ -229,3 +233,75 @@ R4（R3-⑥ 闭环）：只改一处生产代码 + 一处用例 + 本文。
   4. **新形 M1**：`chat.stream.test.ts` `claude downstream: an in-band stream_error frame produces exactly one error frame (no synthesized second one)` 绿（仍恰一帧、无第二帧）。
 - **计数与证据**：`npx tsc --noEmit -p tsconfig.server.json` exit 0；`npm run typecheck` 四段 exit 0（`/tmp/r4/green/typecheck.txt`）；`npm test -- --no-file-parallelism` exit 0、`Test Files 508 passed | 2 skipped (510)`、`Tests 3380 passed | 16 skipped (3396)`、223.79s（基线 3379 ⇒ +1 = 本轮新增用例，计数自洽；`/tmp/r4/green/full.txt`）；`npm run repo:drift-check` `Violations: 0`（仅 5 条预存 debt；`/tmp/r4/green/drift.txt`）。聚焦广度：`chat.singleChannelFailure + chat.stream + transformers/openai/chat + transformers/shared + transformers/anthropic` ⇒ **14 files / 246 passed**（`/tmp/r4/green/focused-claude-family.txt`）。
 - **口径（写死，防后续误读）**：① 本轮只把 **claude 下游** 的 `response.failed` 从「归一化块」改为「M1 错误帧」，**openai 下游不变**；② claude 下游的 `type:'error'` 形实际到不了这条分支（`consumeAnthropicSseEvent` 先以 `ANTHROPIC_RAW_SSE_EVENT_NAMES` 接手，见 `anthropic/messages/streamBridge.ts` 的 `event: error` 原生帧支线）⇒ 本分支在 claude 下游实际只服务 `response.failed`；③ 客户端看到的 claude 错误帧**不封顶**（与 M1/S1 同口径），落库经 64KB 守卫。
+
+## 验证（本轮 `MARK-FIX-A-OBS-MASK-1790955`，未 commit）
+
+两项修复：①**降级出口补齐观测列**（`onDowngrade` 落库行的 `client_http_status` / `is_stream`）；②**调试库上游凭据不再明文落库**（debug 头脱敏）。生产代码只动 4 个文件：`proxy-core/surfaces/{chatSurface,openAiResponsesSurface,sharedSurface}.ts`、`services/proxyDebugTraceStore.ts`（另改 2 个既有测试文件；无新测试文件）；**未提交、未动容器与生产库**。
+
+### ① 降级出口（`onDowngrade`）的列语义：非终态行写哨兵
+
+**先读清调用时机**：`onDowngrade` 由 `executeEndpointFlow` 在**中途**调用，回调返回后循环 `continue` 去试下一个端点（`src/server/proxy-core/orchestration/endpointFlow.ts:335-341`，且该分支要求 `!isLastEndpoint`）⇒ **降级行永远不是该请求的终态行**：同一请求至少还会再落一行（成功行，或终态失败出口行）。所以「客户端到底收到什么」不在这行上。
+
+| 列 | 改前 | 改后（降级行） |
+| --- | --- | --- |
+| `client_http_status` | 没传 ⇒ NULL（看不出是漏写、还是本就不该有值） | `CLIENT_HTTP_STATUS_NON_TERMINAL`（= **-1**，非终态哨兵） |
+| `is_stream` | 没传 ⇒ NULL | 本轮请求是否流式的真值（流式 `true` / 非流式 `false`） |
+| `http_status` | 本轮上游状态（如 502） | 不变 |
+| `status` | `'failed'` | 不变（仍是这一轮尝试的结果） |
+
+- 哨兵定义（R2 后仍指同一常量）：`src/server/proxy-core/surfaces/sharedSurface.ts:276`（`export const CLIENT_HTTP_STATUS_NON_TERMINAL = -1`；语义注释 `:251-275`，R2-2 已改为「只约束本哨兵的来源行」）。
+- 两个出口接线：`src/server/proxy-core/surfaces/chatSurface.ts:800`（`clientHttpStatus`）/`:802`（`isStream`）；`src/server/proxy-core/surfaces/openAiResponsesSurface.ts:909` / `:911`。
+
+**`client_http_status` 取值口径（R2-2 订正后写死；**不是「凡非终态就写 -1」**）**：
+1. `100..599`：真实下发的状态码——终态行，**以及按各自既有口径写真实码的非终态行**（预重试出口 `handleUpstreamFailure` / `handleDetectedFailure` / `handleExecutionError` 的落库发生在 `maybeRetry` **之前**；**8 处**流式失败出口 `recordStreamFailure`（chat 面 4 + responses 面 4，清单见「遗留与跟进」O-d）的调用方随后才决定 `retryCount += 1`）；
+2. `-1`（`CLIENT_HTTP_STATUS_NON_TERMINAL`）：**仅表示「该行由 `onDowngrade` 出口写入的真实非终态尝试」**；
+3. `NULL`：无法判定——租约超时行（**3 处** busy 出口都未传该列：`chatSurface.ts:820`（chat 面）/ `chatSurface.ts:1849`（claude count-tokens 面）/ `openAiResponsesSurface.ts:930`（responses 面））、非 toolkit 直写日志、缺列兜底。
+
+> **R2-2 订正（oracle S-1）**：本节原文把这三类写成「全列不变量」（第 1 类还写成「客户端真实收到的终态状态码」）**不实**：降级出口之外的中间/非终态来源仍按各自既有口径写真实码或 NULL。现已同步为「只约束本哨兵的来源行」（代码侧 `sharedSurface.ts:251-275` 常量注释同改）。
+
+**为什么不做廉价回填**：降级回调是 `executeEndpointFlow` 的内联钩子，`executeEndpointFlow` 回流只有 `{ok,status,errText,rawErrText,upstreamPath}`（`endpointFlow.ts:344-350`），**不回流任何 `proxy_log_id`**，仓内也没有「按 id 回填代理日志行」的通道；要回填就得把这一行的 id 一路带到终态出口再补一次 `UPDATE`（新增跨层管道 + 与终态写入竞争），代价远超一个观测列本身 ⇒ 选「明确标记非终态」。
+
+**为什么哨兵取 -1（而不是 NULL / 0）**：
+- 不写 NULL：NULL 在本列既有含义是「无法判定 / 缺列兜底」，写它等于**看不出这一行到底是不是终态行**（也看不出是漏写）——正是改前的状态。
+- 不写 0：同表 `http_status = 0` 的既有约定是「没有真实上游 HTTP 响应」（描述**上游侧**），本列描述的是**客户端侧**；复用同一个字面值会让两件事混叠（与上文「`http_status=0` 与客户端实收 502/503 是两件事」同源）。
+- 取 -1：合法状态码是 `100..599`，-1 落在值域外、不可能被误读成真实状态码；「整数列用 -1 当『不适用 / 非值』哨兵」在本仓有先例（token 用量投影把 `sites.id = -1` 当「未知站点」哨兵）。
+- **影响面**：全仓**没有** `client_http_status` 的读侧消费（`src/**` 检索只有写侧、schema 契约、跨库迁移拷贝、db 列存在性门禁与用例），故新增哨兵值不动任何既有查询/统计。
+
+**登记（本次不做）**：O-d 仍成立（**8 处**流式失败出口仍未传 `isStream` / `firstByteLatencyMs`，清单见「遗留与跟进」O-d）；gemini 面的 `onDowngrade`（`geminiSurface.ts:1421-1427`）**不写 `proxy_logs`**（只更新 debug attempt）⇒ 不存在同类缺列，无需改。
+
+## 验证（本轮 `MARK-FIX-A-R2-1790985034`，未 commit）
+
+oracle 第二意见落地：R2-1 掩码边界补齐（必修代码）、R2-2 哨兵口径订正（必修文档）、R2-3 列语义可见性（必修文档）。同一分支 `fix/downgrade-observability-and-secret-masking`，未提交；R2-1 只动脱敏 helper/名单与该处测试，未动其它逻辑。
+
+> **行号基准（如实登记）**：本文件早期小节（B4/CVF 各轮）里的 `sharedSurface.ts` / `chatSurface.ts` / `openAiResponsesSurface.ts`
+> 行号是**各自写入当时的快照**。之后两次改动会使这些文件的行号整体位移：R1 在 `sharedSurface.ts`
+> 新增哨兵注释（约 +25 行，且各降级出口各 +1..+2 行）、R2-2 又把该注释扩写了 +6 行。本节行号为 **R2 后**
+> 的当前快照；核对历史小节时请**以符号名 / 函数名（如 `handleExecutionError`、`recordStreamFailure`）为准**，
+> 行号仅作定位起点（是否需要整文件重编号，留给主代理决定）。
+
+### R2-2 哨兵口径订正（oracle S-1）
+
+- 原注释把 `client_http_status` 的三取值写成**全列不变量**（第 1 类还写成「客户端真实收到的终态状态码」）——**不实**：同列在降级出口之外的中间/非终态来源仍按各自既有口径写真实码或 NULL。
+- 代码侧（`proxy-core/surfaces/sharedSurface.ts:251-275` 常量注释）：改为**只约束本哨兵来源行**（-1 仅表示「该行由 `onDowngrade` 出口写入的真实非终态尝试」），并写明其它非终态来源的既有口径：
+  - 预重试出口（落库发生在 `maybeRetry` **之前**，行号为 R2 后的当前快照）：`handleUpstreamFailure`（`sharedSurface.ts:1003` vs `:1026`）、`handleDetectedFailure`（`:1074` vs `:1087`）、`handleExecutionError`（`:1131` vs `:1140`）写各自真实状态码 / 取值器取值；**8 处** `recordStreamFailure`（chat 面 4 + responses 面 4，行号清单见「遗留与跟进」O-d）同理（调用方随后才 `retryCount += 1`，落库取值器 `:1203`）；
+  - 租约超时行（**3 处** busy 出口未传 `clientHttpStatus`：`chatSurface.ts:820` / `:1849`、`openAiResponsesSurface.ts:930`）与直写日志 / 缺列兜底：落 NULL。
+- 笔记侧同步：见上文「R2-2 订正」（原「三类取值」段已改写为「**不是『凡非终态就写 -1』**」句）。
+
+### R2-3 可见性（oracle S-2）
+
+- `src/server/db/schema.ts` 的 `clientHttpStatus` 列注释补三取值语义（100..599 终态真实码 / -1 仅 `onDowngrade` 非终态 / NULL 无法判定）＋「**不是**凡非终态就写 -1」的显式提醒。
+- `docs/change-log.md` 新增 2026-10-02 的第 5、6 条（本批实现与验证统计），第 5 条含上面同一段列语义说明；`CHANGELOG.md` 的 1.4.16 条目按任务留到发版准备轮。
+
+### 计数与证据（R2 后重跑，全绿）
+
+- `npx tsc --noEmit -p tsconfig.server.json` exit 0（输出 0 字节）；`npm run typecheck` 四段 exit 0｜`/tmp/mark1790985034/green/typecheck.txt`、`typecheck-server.txt`。
+- `npm test -- --no-file-parallelism` exit 0：`Test Files 508 passed | 2 skipped (510)`、`Tests 3383 passed | 16 skipped (3399)`、231.21s（R2 任务给定基线 508 files / **3382** passed / 16 skipped ⇒ +1 = 本轮新增的 R2-1 用例，计数自洽）｜`/tmp/mark1790985034/green/full.txt`。
+- `npm run repo:drift-check`：`Violations: 0`（仅 5 条预存 tracked debt）｜`/tmp/mark1790985034/green/drift.txt`。
+
+## 发布准备（`MARK-FIX-A-RELEASE-PREP-1790986024`，本步不 commit、不 push）
+
+### P-1 文档订正（oracle 复核提出的两条纯文档）
+
+1. **NULL 桶补第三处 busy 出口**：NULL 取值来源原只列 `chatSurface.ts:820` 与 `openAiResponsesSurface.ts:930`，漏了 `chatSurface.ts:1849`（同样是 lease timeout 形：`buildSurfaceConcurrencyBusyMessage` + `failureToolkit.log` 未传 `clientHttpStatus`，所在处理器 `handleClaudeCountTokensSurfaceRequest`）。已补进哨兵注释的 NULL 桶（改为「**3 处** busy 出口」并按面列举）及本节各 NULL 清单。
+2. **`recordStreamFailure` 调用点 4 → 8（数字订正）**：实际为 **8 个**生产调用点（chat 面 4 + responses 面 4，行号清单见「遗留与跟进」O-d）；逐个执行块核对入参，`isStream` / `firstByteLatencyMs` **均 0 命中**。笔记内四处「4 处」（O-d 条目、三类取值段、登记段、R2-2 段）与 `docs/change-log.md` 第 5 条的遗留登记已统一订正。
+

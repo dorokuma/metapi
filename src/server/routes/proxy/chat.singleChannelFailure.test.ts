@@ -701,4 +701,121 @@ describe('chat proxy retry exhaustion surfaces the real upstream failure', () =>
     expect(errorMessage).toContain('tool execution failed');
     expect(errorMessage).toContain('request_id=req_claude_legacy_failed');
   });
+
+  it('writes the non-terminal client_http_status sentinel + the real is_stream for the chat-surface downgrade row', async () => {
+    // 降级出口（`onDowngrade`）的行**不是终态行**：本轮端点失败后 `executeEndpointFlow` 会 `continue` 去试下一个
+    // 端点（`orchestration/endpointFlow.ts:335-341`），客户端此刻还没收到任何终态结果 ⇒ `client_http_status`
+    // 写非终态哨兵（不写猜测值），真实下发状态码留在该请求的终态行上；`is_stream` 按本轮请求补齐。
+    // 改前这两列都漏写（恒 NULL）——「发在 502 上」与「is_stream 丢失」正是本用例要锁的两件事。
+    const { CLIENT_HTTP_STATUS_NON_TERMINAL } = await import('../../proxy-core/surfaces/sharedSurface.js');
+    // 哨兵口径本身也锁住：本列合法值是 HTTP 状态码（100..599），-1 落在值域外。
+    expect(CLIENT_HTTP_STATUS_NON_TERMINAL).toBe(-1);
+
+    const encoder = new TextEncoder();
+    const upstreamSse = [
+      'data: {"id":"chatcmpl-downgrade-ok","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"ok after downgrade"},"finish_reason":null}]}\n\n',
+      'data: {"id":"chatcmpl-downgrade-ok","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ].join('');
+    fetchMock
+      // 首端点 5xx ⇒ `shouldDowngrade`（`ctx.response.status >= 500`）成立 ⇒ 降级出口落库后继续试下一个端点。
+      .mockResolvedValueOnce(upstreamErrorResponse(502, 'bad gateway from upstream'))
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(upstreamSse));
+          controller.close();
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // 降级成功：客户端拿到 200 流（不是失败）。
+    expect(response.statusCode).toBe(200);
+    // 两次上游 dispatch ⇒ 确实走的是降级路径（第二次换了端点）。
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const rows = await db.select().from(schema.proxyLogs).all();
+    // 同一请求两行：降级（非终态）行 + 终态（成功）行。
+    expect(rows.length).toBe(2);
+
+    const downgradeRow = rows.find((row) => row.status === 'failed');
+    expect(downgradeRow).toBeTruthy();
+    // `http_status` 仍是「本轮上游/逻辑状态」（502 = 触发降级的那次上游响应）。
+    expect(Number(downgradeRow?.httpStatus)).toBe(502);
+    // 改前这两列恒 NULL（`is_stream` 没传、`client_http_status` 没传）；
+    // 同一条断言同时锁「主列写哨兵（不写 502 猜测值）」与「`is_stream` 取流式真值」；
+    // 哨兵 = -1（不是 502）：客户端此刻还没收到终态结果，其真实状态码在该请求的终态行上。
+    expect({
+      clientHttpStatus: downgradeRow?.clientHttpStatus,
+      isStream: downgradeRow?.isStream,
+    }).toEqual({
+      clientHttpStatus: CLIENT_HTTP_STATUS_NON_TERMINAL,
+      isStream: true,
+    });
+
+    // 终态行口径不变：成功行仍是真实下发状态码 200（哨兵不污染终态行）。
+    const successRow = rows.find((row) => row.status === 'success');
+    expect(Number(successRow?.clientHttpStatus)).toBe(200);
+    expect(successRow?.isStream).toBe(true);
+  });
+
+  it('writes the non-terminal sentinel + is_stream=false for the responses-surface downgrade row on a non-stream request', async () => {
+    // 与上一条同一出口在 responses 面（`openAiResponsesSurface.ts` 的 `onDowngrade`）的落库；
+    // 本用例走**非流式**请求 ⇒ `is_stream` 必须是 false（防把该列写死成 true）。
+    const { CLIENT_HTTP_STATUS_NON_TERMINAL } = await import('../../proxy-core/surfaces/sharedSurface.js');
+
+    fetchMock
+      .mockResolvedValueOnce(upstreamErrorResponse(502, 'bad gateway from upstream'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-downgrade-nonstream',
+        object: 'chat.completion',
+        model: 'gpt-4o-mini',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok after downgrade' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-4o-mini',
+        input: 'hi',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const rows = await db.select().from(schema.proxyLogs).all();
+    expect(rows.length).toBe(2);
+    const downgradeRow = rows.find((row) => row.status === 'failed');
+    expect(downgradeRow).toBeTruthy();
+    expect(Number(downgradeRow?.httpStatus)).toBe(502);
+    // 同一条断言：非终态哨兵 + `is_stream` 按非流式请求取 false（改前两列都是 NULL）。
+    expect({
+      clientHttpStatus: downgradeRow?.clientHttpStatus,
+      isStream: downgradeRow?.isStream,
+    }).toEqual({
+      clientHttpStatus: CLIENT_HTTP_STATUS_NON_TERMINAL,
+      isStream: false,
+    });
+  });
 });

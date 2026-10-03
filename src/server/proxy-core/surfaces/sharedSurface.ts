@@ -248,6 +248,33 @@ export function getSurfaceRequestFailure(error: unknown): {
   };
 }
 
+/**
+ * `onDowngrade` 出口写入的**非终态行**的 `client_http_status` 哨兵值。
+ *
+ * 语义（**只约束本哨兵的来源行**，不是整列不变量）：该行由降级出口写入，且它**不是**该请求的终态行——
+ * `onDowngrade` 返回后 `executeEndpointFlow` 会 `continue` 去试下一个端点（`orchestration/endpointFlow.ts`
+ * 的降级分支，要求 `!isLastEndpoint`），客户端此刻还没有收到任何终态结果，故本列「客户端实收状态码」无从
+ * 取值：写一个真实状态码是编造，写 NULL 又会与既有含义（「无法判定 / 缺列兜底 / 非 toolkit 直写日志」）混叠
+ * ——既看不出是「漏写」还是「本就不该有值」。
+ *
+ * **本列不是「凡非终态就写 -1」**：其它非终态 / 中间来源各按自己既有口径落库，不写本哨兵——
+ * - 预重试出口：`handleUpstreamFailure` / `handleDetectedFailure` / `handleExecutionError` 的落库发生在
+ *   `maybeRetry` **之前**（即重试前就写下了这一行），以及 **8 处**流式失败出口 `recordStreamFailure`
+ *   （chat 面 4 + responses 面 4，调用方随后才决定 `retryCount += 1`）——它们写各自真实状态码（或取值器取值）；
+ * - 租约超时行：**3 处** busy 出口（`chatSurface.ts` 的 chat 面与 claude count-tokens 面各一处、
+ *   `openAiResponsesSurface.ts` 的 responses 面一处）都未传 `clientHttpStatus`，与无法判定的历史直写日志一样：落 NULL。
+ *
+ * 取值口径（正式文档：`.agents/notes/20261002-client-visible-failure-semantics.md`）：
+ * - `100..599`：真实下发的状态码（终态行；以及上述预重试 / 流式失败等按各自既有口径写真实码的行）；
+ * - `CLIENT_HTTP_STATUS_NON_TERMINAL`（= -1）：**仅表示「该行由 `onDowngrade` 出口写入的真实非终态尝试」**；
+ * - `NULL`：无法判定（3 处租约超时行 / 历史直写日志 / 缺列兜底）。
+ *
+ * 为什么取 -1：本列合法值是 HTTP 状态码（100..599），-1 落在值域外、不可能被误读成真实状态码；同表
+ * `http_status = 0` 的既有约定是「没有真实上游 HTTP 响应」，描述的是**上游侧**事实，本哨兵描述的是
+ * **客户端侧**「还没有终态结果」，不复用同一个字面值以免两件事混叠。
+ */
+export const CLIENT_HTTP_STATUS_NON_TERMINAL = -1;
+
 export async function writeSurfaceProxyLog(input: {
   warningScope: string;
   selected: {
